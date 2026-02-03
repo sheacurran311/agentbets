@@ -13,6 +13,8 @@ export default defineConfig({
       }
     }
   },
+  // Handle client-side routing - serve index.html for /app routes
+  appType: 'spa',
   define: {
     'process.env': {},
     global: 'globalThis'

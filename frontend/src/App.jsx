@@ -490,11 +490,37 @@ function App() {
   const { publicKey, sendTransaction, connected } = useWallet()
   const { connection } = useConnection()
 
-  // Landing page - first-time visitor state
-  const [hasOnboarded, setHasOnboarded] = useState(() => {
-    return localStorage.getItem('agentbets_onboarded') === 'true'
+  // URL-based routing: / = landing page, /app = main app
+  const [isAppRoute, setIsAppRoute] = useState(() => {
+    const path = window.location.pathname
+    return path.startsWith('/app')
   })
+
+  // Landing page - user type selection
   const [userType, setUserType] = useState(null) // 'human' or 'agent'
+
+  // Listen for browser back/forward navigation
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname
+      setIsAppRoute(path.startsWith('/app'))
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  // Navigate to app (called when user clicks "Enter App" or similar)
+  const navigateToApp = useCallback((type) => {
+    setUserType(type)
+    setIsAppRoute(true)
+    window.history.pushState({}, '', '/app')
+  }, [])
+
+  // Navigate back to landing
+  const navigateToLanding = useCallback(() => {
+    setIsAppRoute(false)
+    window.history.pushState({}, '', '/')
+  }, [])
 
   const [view, setView] = useState('markets')
   const [markets, setMarkets] = useState([])
@@ -573,12 +599,10 @@ function App() {
     txStatus?.type === 'pending' ? { opacity: 0.5, cursor: 'not-allowed' } : {}
   , [txStatus?.type])
 
-  // Complete onboarding
+  // Complete onboarding - navigate to /app
   const completeOnboarding = (type) => {
-    setUserType(type)
-    setHasOnboarded(true)
-    localStorage.setItem('agentbets_onboarded', 'true')
     localStorage.setItem('agentbets_user_type', type)
+    navigateToApp(type)
   }
 
   // Fetch agent royalties
@@ -914,8 +938,8 @@ function App() {
     return days > 0 ? `${days}d` : 'Ended'
   }
 
-  // Landing Page Component
-  if (!hasOnboarded) {
+  // Landing Page Component (shown at root URL /)
+  if (!isAppRoute) {
     return (
       <div style={styles.landingPage} className="bg-grid">
         <GlobalStyles />
@@ -1098,7 +1122,13 @@ function App() {
       {/* Sidebar */}
       <aside style={styles.sidebar} className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
         <div style={styles.logoContainer}>
-          <img src="/agentbets-logo-full.png" alt="AgentBets" style={styles.logoImg} />
+          <img
+            src="/agentbets-logo-full.png"
+            alt="AgentBets"
+            style={{...styles.logoImg, cursor: 'pointer'}}
+            onClick={navigateToLanding}
+            title="Back to home"
+          />
         </div>
 
         <div style={styles.sidebarSection}>
