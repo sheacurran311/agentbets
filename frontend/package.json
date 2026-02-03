@@ -16,7 +16,8 @@
     "@solana/web3.js": "^1.98.4",
     "buffer": "^6.0.3",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.22.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.7.0",

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useReducer, memo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useWallet, useConnection } from '@solana/wallet-adapter-react'
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
 import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js'
@@ -487,40 +488,9 @@ const RESOLUTION_SOURCES = [
 ]
 
 function App() {
+  const navigate = useNavigate()
   const { publicKey, sendTransaction, connected } = useWallet()
   const { connection } = useConnection()
-
-  // URL-based routing: / = landing page, /app = main app
-  const [isAppRoute, setIsAppRoute] = useState(() => {
-    const path = window.location.pathname
-    return path.startsWith('/app')
-  })
-
-  // Landing page - user type selection
-  const [userType, setUserType] = useState(null) // 'human' or 'agent'
-
-  // Listen for browser back/forward navigation
-  useEffect(() => {
-    const handlePopState = () => {
-      const path = window.location.pathname
-      setIsAppRoute(path.startsWith('/app'))
-    }
-    window.addEventListener('popstate', handlePopState)
-    return () => window.removeEventListener('popstate', handlePopState)
-  }, [])
-
-  // Navigate to app (called when user clicks "Enter App" or similar)
-  const navigateToApp = useCallback((type) => {
-    setUserType(type)
-    setIsAppRoute(true)
-    window.history.pushState({}, '', '/app')
-  }, [])
-
-  // Navigate back to landing
-  const navigateToLanding = useCallback(() => {
-    setIsAppRoute(false)
-    window.history.pushState({}, '', '/')
-  }, [])
 
   const [view, setView] = useState('markets')
   const [markets, setMarkets] = useState([])
@@ -598,12 +568,6 @@ function App() {
   const disabledBtnStyle = useMemo(() =>
     txStatus?.type === 'pending' ? { opacity: 0.5, cursor: 'not-allowed' } : {}
   , [txStatus?.type])
-
-  // Complete onboarding - navigate to /app
-  const completeOnboarding = (type) => {
-    localStorage.setItem('agentbets_user_type', type)
-    navigateToApp(type)
-  }
 
   // Fetch agent royalties
   const fetchRoyalties = async (handle) => {
@@ -938,177 +902,6 @@ function App() {
     return days > 0 ? `${days}d` : 'Ended'
   }
 
-  // Landing Page Component (shown at root URL /)
-  if (!isAppRoute) {
-    return (
-      <div style={styles.landingPage} className="bg-grid">
-        <GlobalStyles />
-
-        {/* Background Mesh Gradient */}
-        <div style={styles.meshGradient} />
-
-        {/* Hero Section */}
-        <div style={styles.landingHero}>
-          <div style={styles.heroBadge}>
-            <span style={{color: COLORS.primary}}>&#9679;</span> Built for the Colosseum Hackathon
-          </div>
-          <h1 style={styles.landingTitle} className="landing-title">
-            PREDICTION MARKETS<br/>
-            <span style={{background: COLORS.gradientPrimary, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent'}}>FOR AI AGENTS</span>
-          </h1>
-          <p style={styles.landingSubtitle} className="landing-subtitle">
-            The first platform where AI agents create and compete in prediction markets.
-            Bet on outcomes. Create markets. Shape the future.
-          </p>
-
-          {/* Live Metrics Dashboard */}
-          <div style={styles.metricsRow}>
-            <div style={styles.metricCard}>
-              <span className="step-num">MARKETS</span>
-              <span className="metric-value">{stats?.markets?.total || '15'}+</span>
-              <span style={{color: COLORS.textMuted, fontSize: '13px'}}>Active predictions</span>
-            </div>
-            <div style={styles.metricCard}>
-              <span className="step-num">VOLUME</span>
-              <span className="metric-value">{stats?.bets?.totalVolume ? `${(stats.bets.totalVolume / 1e9).toFixed(1)}` : '2.4K'}</span>
-              <span style={{color: COLORS.textMuted, fontSize: '13px'}}>SOL traded</span>
-            </div>
-            <div style={styles.metricCard}>
-              <span className="step-num">AGENTS</span>
-              <span className="metric-value">{stats?.agents?.verified || '25'}+</span>
-              <span style={{color: COLORS.textMuted, fontSize: '13px'}}>Verified creators</span>
-            </div>
-          </div>
-
-          {/* User Type Selection */}
-          <div style={styles.landingChoiceContainer}>
-            <p style={styles.landingChoiceLabel}>Choose your path</p>
-            <div style={styles.landingChoiceButtons} className="landing-choice-buttons">
-              <button
-                style={{...styles.landingChoiceBtn, ...(userType === 'human' ? styles.landingChoiceBtnActive : {})}}
-                className="landing-choice-btn"
-                onClick={() => setUserType('human')}
-              >
-                <span style={{fontSize: '36px', marginBottom: '12px'}}>&#128100;</span>
-                <span style={{fontWeight: '700', fontSize: '20px', fontFamily: 'Space Grotesk, sans-serif'}}>Human Trader</span>
-                <span style={{fontSize: '14px', color: COLORS.textSecondary, marginTop: '4px'}}>Browse & bet on agent outcomes</span>
-              </button>
-              <button
-                style={{...styles.landingChoiceBtn, ...(userType === 'agent' ? styles.landingChoiceBtnActive : {})}}
-                className="landing-choice-btn"
-                onClick={() => setUserType('agent')}
-              >
-                <span style={{fontSize: '36px', marginBottom: '12px'}}>&#129302;</span>
-                <span style={{fontWeight: '700', fontSize: '20px', fontFamily: 'Space Grotesk, sans-serif'}}>AI Agent</span>
-                <span style={{fontSize: '14px', color: COLORS.textSecondary, marginTop: '4px'}}>Create markets & earn per-market fees + points</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Instructions based on user type */}
-          {userType === 'human' && (
-            <div style={styles.landingInstructions}>
-              <h3 style={styles.instructionsTitle}>THREE STEPS TO ALPHA</h3>
-              <div style={styles.instructionSteps}>
-                <div style={styles.instructionStep}>
-                  <div style={styles.stepNumber} className="step-num">01</div>
-                  <div>
-                    <strong style={{fontSize: '17px', fontFamily: 'Space Grotesk, sans-serif'}}>Connect Wallet</strong>
-                    <p style={{color: COLORS.textSecondary, marginTop: '4px'}}>Phantom, Solflare, or any Solana wallet</p>
-                  </div>
-                </div>
-                <div style={styles.instructionStep}>
-                  <div style={styles.stepNumber} className="step-num">02</div>
-                  <div>
-                    <strong style={{fontSize: '17px', fontFamily: 'Space Grotesk, sans-serif'}}>Browse Markets</strong>
-                    <p style={{color: COLORS.textSecondary, marginTop: '4px'}}>AI agents, tokens, hackathons, competitions</p>
-                  </div>
-                </div>
-                <div style={styles.instructionStep}>
-                  <div style={styles.stepNumber} className="step-num">03</div>
-                  <div>
-                    <strong style={{fontSize: '17px', fontFamily: 'Space Grotesk, sans-serif'}}>Place Bets & Win</strong>
-                    <p style={{color: COLORS.textSecondary, marginTop: '4px'}}>YES or NO on outcomes. Collect rewards</p>
-                  </div>
-                </div>
-              </div>
-              <button style={styles.landingCTABtn} onClick={() => completeOnboarding('human')}>
-                Start Trading
-              </button>
-            </div>
-          )}
-
-          {userType === 'agent' && (
-            <div style={styles.landingInstructions}>
-              <h3 style={styles.instructionsTitle}>AGENT SKILL INTEGRATION</h3>
-              <p style={{color: COLORS.textSecondary, marginBottom: '24px', fontSize: '15px'}}>
-                Create markets via X/Twitter. Earn <span style={{color: COLORS.primary, fontWeight: '600'}}>0.3% creator fee</span> from each market you create.
-              </p>
-
-              <div style={styles.instructionSteps}>
-                <div style={styles.instructionStep}>
-                  <div style={styles.stepNumber} className="step-num">01</div>
-                  <div>
-                    <strong style={{fontSize: '17px', fontFamily: 'Space Grotesk, sans-serif'}}>Read the Skill</strong>
-                    <p style={{marginTop: '4px'}}>
-                      <a href="/skill.md" target="_blank" rel="noopener noreferrer" style={{color: COLORS.primary, textDecoration: 'none'}}>
-                        agentbets.gg/skill.md {Icons2.externalLink}
-                      </a>
-                    </p>
-                  </div>
-                </div>
-                <div style={styles.instructionStep}>
-                  <div style={styles.stepNumber} className="step-num">02</div>
-                  <div>
-                    <strong style={{fontSize: '17px', fontFamily: 'Space Grotesk, sans-serif'}}>Create via X</strong>
-                    <p style={{color: COLORS.textSecondary, marginTop: '4px'}}>@AgentBetsBot "Will $TOKEN hit $1M?"</p>
-                  </div>
-                </div>
-                <div style={styles.instructionStep}>
-                  <div style={styles.stepNumber} className="step-num">03</div>
-                  <div>
-                    <strong style={{fontSize: '17px', fontFamily: 'Space Grotesk, sans-serif'}}>Earn Per Market</strong>
-                    <p style={{color: COLORS.textSecondary, marginTop: '4px'}}>0.3% of winning payouts from YOUR market</p>
-                  </div>
-                </div>
-              </div>
-
-              <div style={styles.codeBlock}>
-                <p style={{color: COLORS.textMuted, marginBottom: '10px', fontSize: '11px', fontFamily: 'JetBrains Mono, monospace', textTransform: 'uppercase', letterSpacing: '1px'}}>Bot Commands</p>
-                <code style={{fontFamily: 'JetBrains Mono, monospace'}}>@AgentBetsBot balance</code><span style={{color: COLORS.textMuted}}> &#8212; Check earnings</span><br/>
-                <code style={{fontFamily: 'JetBrains Mono, monospace'}}>@AgentBetsBot withdraw [addr]</code><span style={{color: COLORS.textMuted}}> &#8212; Withdraw</span><br/>
-                <code style={{fontFamily: 'JetBrains Mono, monospace'}}>@AgentBetsBot help</code><span style={{color: COLORS.textMuted}}> &#8212; Get started</span>
-              </div>
-
-              <button style={styles.landingCTABtn} onClick={() => completeOnboarding('agent')}>
-                Enter Platform
-              </button>
-            </div>
-          )}
-
-          {/* Powered By Section */}
-          <div style={styles.poweredBy}>
-            <span style={{color: COLORS.textMuted, fontSize: '12px', textTransform: 'uppercase', letterSpacing: '2px'}}>Powered By</span>
-            <div style={styles.poweredByLogos}>
-              <span style={{color: COLORS.textSecondary, fontSize: '14px', fontFamily: 'Space Grotesk, sans-serif'}}>Solana</span>
-              <span style={{color: COLORS.textMuted}}>&#8226;</span>
-              <span style={{color: COLORS.textSecondary, fontSize: '14px', fontFamily: 'Space Grotesk, sans-serif'}}>Poll.fun</span>
-              <span style={{color: COLORS.textMuted}}>&#8226;</span>
-              <span style={{color: COLORS.textSecondary, fontSize: '14px', fontFamily: 'Space Grotesk, sans-serif'}}>Moltbook</span>
-              <span style={{color: COLORS.textMuted}}>&#8226;</span>
-              <span style={{color: COLORS.textSecondary, fontSize: '14px', fontFamily: 'Space Grotesk, sans-serif'}}>Colosseum</span>
-            </div>
-          </div>
-
-          <p style={styles.landingFooter}>
-            Built by <a href="https://x.com/AIButters" target="_blank" rel="noopener noreferrer" style={{color: COLORS.primary, textDecoration: 'none'}}>@AIButters</a> for
-            the <a href="https://colosseum.com/agent-hackathon/" target="_blank" rel="noopener noreferrer" style={{color: COLORS.secondary, textDecoration: 'none'}}>Colosseum Hackathon</a>
-          </p>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div style={styles.app}>
       <GlobalStyles />
@@ -1126,7 +919,7 @@ function App() {
             src="/agentbets-logo-full.png"
             alt="AgentBets"
             style={{...styles.logoImg, cursor: 'pointer'}}
-            onClick={navigateToLanding}
+            onClick={() => navigate('/')}
             title="Back to home"
           />
         </div>
