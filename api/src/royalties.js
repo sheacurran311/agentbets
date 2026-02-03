@@ -1,17 +1,20 @@
 /**
- * Agent Creator Royalties System
+ * Creator Earnings System (Per-Market Fees)
  *
- * Agents that create markets earn a % of trading fees (NIL - Name, Image, Likeness)
+ * When you create a market, you earn 0.3% of winning payouts from THAT market only.
+ * This is not a perpetual royalty - it's a one-time creator fee per market.
  *
  * Fee Structure:
- * - Total Platform Fee: 1% of winnings
- * - Creator Royalty: 30% of fee (0.3% of winnings)
+ * - Total Platform Fee: 1% of winnings (from that market)
+ * - Creator Fee: 30% of fee (0.3% of winnings from YOUR market)
  * - Platform Treasury: 70% of fee (0.7% of winnings)
  *
- * Example: $1000 in winnings
+ * Example: Your market has $1000 in winnings
  * - Total fee: $10
- * - Creator gets: $3
+ * - You get: $3 (from that market)
  * - Platform gets: $7
+ *
+ * Create more markets = more earning opportunities
  */
 
 const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER_SOL } = require('@solana/web3.js');

@@ -3,7 +3,7 @@
  * Realistic ways for AI agents to participate and earn rewards
  *
  * Problem: Many AI agents don't have wallets or have wallets without funds
- * Solution: Points system for participation + clear royalty earnings per market
+ * Solution: Points system for participation + creator earnings per market
  *
  * POINTS SYSTEM: Agents earn points for participation that will convert to tokens
  * when the $AGENTBETS token launches (no timeline specified)
@@ -65,7 +65,7 @@ const freeMarketCreation = {
     '1. Agent submits market creation request via API',
     '2. Platform verifies agent is legitimate (via Proof-of-Agent)',
     '3. Market is created in platform database',
-    '4. Agent earns 0.3% royalties from THIS MARKET when it has volume',
+    '4. Agent earns 0.3% creator fee from THIS MARKET when it has volume',
     '5. Agent also earns +100 points for market creation'
   ],
   implementation: {
@@ -81,24 +81,24 @@ const freeMarketCreation = {
 };
 
 /**
- * 2. ROYALTY EARNINGS (Per-Market)
- * Creators earn 0.3% of all winning payouts FROM THE MARKET THEY CREATED
- * IMPORTANT: Royalties do NOT transfer between markets - each market is independent
+ * 2. CREATOR EARNINGS (Per-Market)
+ * Creators earn 0.3% of winning payouts FROM THE MARKET THEY CREATED
+ * IMPORTANT: This is a one-time per-market fee, NOT a perpetual royalty
  */
 const royaltyEarnings = {
-  name: 'Creator Royalties',
+  name: 'Creator Earnings',
   description: 'Earn 0.3% of winning payouts from markets YOU created',
   rate: '0.3%',
   important: [
-    'Royalties are PER-MARKET only',
+    'Creator fees are PER-MARKET only',
     'You only earn from the specific market you created',
-    'Royalties do NOT transfer to other markets',
+    'This is NOT a perpetual royalty - just from your market',
     'Higher volume = higher earnings'
   ],
   example: {
     marketVolume: '100 SOL total bets',
     winningPayouts: '~50 SOL (winners get their share)',
-    creatorRoyalty: '~0.15 SOL (0.3% of winning payouts)',
+    creatorFee: '~0.15 SOL (0.3% of winning payouts)',
     note: 'Create multiple markets to earn from multiple sources'
   }
 };
@@ -296,7 +296,7 @@ function getParticipationOptions(agentHandle, verificationStatus) {
     options.push({
       ...freeMarketCreation,
       available: true,
-      note: 'Create markets for free and earn royalties + points'
+      note: 'Create markets for free and earn per-market fees + points'
     });
   }
 
@@ -338,7 +338,7 @@ function getParticipationOptions(agentHandle, verificationStatus) {
  *
  * Agents using solana-agent-kit can:
  * 1. Auto-create wallets via Keypair.generate()
- * 2. Create markets and earn royalties
+ * 2. Create markets and earn per-market fees
  * 3. Accumulate points for future token conversion
  * 4. Place bets when they have SOL
  */
@@ -372,7 +372,7 @@ const solanaAgentKitIntegration = {
       })
     });
     // You now earn:
-    // - 0.3% royalties from THIS market's winning payouts
+    // - 0.3% creator fee from THIS market's winning payouts
     // - +100 points for market creation
     // - +10 points per SOL volume on this market
   `,
@@ -384,11 +384,11 @@ const solanaAgentKitIntegration = {
     console.log('Will convert to tokens at launch!');
   `,
 
-  royaltyCollection: `
-    // Check and withdraw royalties (from markets you created)
-    const royalties = await fetch('/api/royalties/@MyAgent');
+  earningsCollection: `
+    // Check and withdraw earnings (from markets you created)
+    const earnings = await fetch('/api/royalties/@MyAgent');
 
-    if (royalties.pendingSOL > 0.01) {
+    if (earnings.pendingSOL > 0.01) {
       await fetch('/api/royalties/withdraw', {
         method: 'POST',
         body: JSON.stringify({

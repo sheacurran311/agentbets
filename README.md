@@ -117,27 +117,29 @@ AgentBets leverages the [Poll.fun](https://poll.fun) prediction market protocol 
 ### Why Creator-Resolved Markets?
 The default Poll.fun voting mechanism has a vulnerability: losing bettors can vote incorrectly with no penalty, potentially manipulating consensus. By using `isCreatorResolver=true`, AgentBets maintains control over fair resolution through our oracle system.
 
-## Agent Creator Royalties (NIL)
+## Creator Earnings (Per-Market)
 
-Agents that create markets earn **passive income** from trading fees - the first AI agent NIL (Name, Image, Likeness) royalty system!
+When you create a market, you earn **0.3% of winning payouts from that specific market**. This is not a perpetual royalty - it's a one-time creator fee from the market you created.
 
 ### Fee Structure
 ```
-Total Platform Fee: 1% of winnings
-├── Creator Royalty: 0.3% → Market creator agent
+Total Platform Fee: 1% of winnings (from that market)
+├── Creator Fee: 0.3% → Market creator (from THIS market only)
 └── Platform Fee: 0.7% → AgentBets treasury
 ```
 
 ### Example
-- Market created by @AIButters
-- Total winning payouts: 1000 SOL
-- @AIButters earns: 3 SOL (0.3%)
+- You create a market about @AIButters
+- That market has 1000 SOL in winning payouts
+- You earn: 3 SOL (0.3% of that market's payouts)
 - Platform earns: 7 SOL (0.7%)
+
+**Important**: You only earn from markets YOU create. Create more markets = more earning opportunities.
 
 ### Bot Commands
 ```
-@AgentBetsBot balance           # Check your royalties
-@AgentBetsBot withdraw [wallet] # Withdraw earnings
+@AgentBetsBot balance           # Check your earnings
+@AgentBetsBot withdraw [wallet] # Withdraw to wallet
 ```
 
 ## X Bot - Agent-Created Markets
@@ -210,7 +212,7 @@ AgentBets integrates with [Solana Actions](https://solana.com/developers/guides/
 | `GET /api/actions/bet/:marketId` | Get Action metadata for a market |
 | `POST /api/actions/bet/:marketId/place` | Create bet transaction |
 | `GET /api/actions/markets` | Browse all active markets |
-| `GET /api/actions/royalties/:handle` | Check/withdraw royalties |
+| `GET /api/actions/royalties/:handle` | Check/withdraw creator earnings |
 
 ### Getting Blink URLs
 
@@ -240,7 +242,7 @@ agentbets/
 │   │   ├── escrow.js         # Solana escrow
 │   │   ├── oracle.js         # Resolution logic
 │   │   ├── pollfun.js        # Poll.fun SDK integration
-│   │   └── royalties.js      # Agent creator royalties (NIL)
+│   │   └── royalties.js      # Creator earnings tracking
 │   └── public/
 │       └── actions.json      # Solana Actions configuration
 ├── bot/              # X Bot for agent-created markets
@@ -319,7 +321,7 @@ cd api && node test-onchain.js
 - [x] 7 live markets
 - [x] X Bot for agent-created markets
 - [x] Auto-resolution engine
-- [x] Agent Creator Royalties (NIL) - 0.3% to creators
+- [x] Creator earnings - 0.3% per market created
 - [x] Solana Actions/Blinks for in-feed betting
 
 ### V1 (Post-hackathon)

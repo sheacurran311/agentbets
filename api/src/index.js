@@ -15,7 +15,7 @@ const escrow = require('./escrow');
 const oracle = require('./oracle');
 // Poll.fun SDK for on-chain prediction markets
 const { pollFunService, PollFunService } = require('./pollfun');
-// Agent Creator Royalties (NIL)
+// Creator Earnings (per-market fees)
 const royalties = require('./royalties');
 // Solana Actions (Blinks) for X/Twitter integration
 const { router: actionsRouter, generateBlinkUrl, generateMarketsBlinkUrl, ACTION_CORS_HEADERS } = require('./actions');
@@ -1435,11 +1435,11 @@ app.get('/api/onchain/user/:wallet', async (req, res) => {
 });
 
 // ==========================================
-// AGENT CREATOR ROYALTIES (NIL)
+// CREATOR EARNINGS (Per-Market Fees)
 // ==========================================
 
 /**
- * Get agent's royalty balance
+ * Get agent's earnings balance
  * GET /api/royalties/:agentHandle
  */
 app.get('/api/royalties/:agentHandle', (req, res) => {
