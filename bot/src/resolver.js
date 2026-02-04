@@ -4,18 +4,34 @@
  * Automatically resolves markets using API data
  * Supports multiple data sources:
  * - DexScreener (token prices, mcap)
+ * - Pyth Network (on-chain price oracles)
  * - X API (followers, engagement)
  * - Moltbook (karma, agent stats)
  * - GitHub (commits, releases)
  * - Solana (balances, transactions)
+ * - CoinGecko (backup price data)
  */
 
 const axios = require('axios');
 
+// Pyth price feed IDs for common tokens (Solana mainnet)
+const PYTH_PRICE_FEEDS = {
+  'SOL': '0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d',
+  'BTC': '0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',
+  'ETH': '0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace',
+  'USDC': '0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a',
+  'BONK': '0x72b021217ca3fe68922a19aaf990109cb9d84e9ad004b4d2025ad6f529314419',
+  'JUP': '0x0a0408d619e9380abad35060f9192039ed5042fa6f82301d0e48bb52be830996',
+  'WIF': '0x4ca4beeca86f0d164160323817a4e42b10010a724c2217c6ee41b54cd4cc61fc',
+};
+
 class ResolutionEngine {
   constructor() {
     this.dexscreenerApi = 'https://api.dexscreener.com/latest';
+    this.pythApi = 'https://hermes.pyth.network/api';
+    this.coingeckoApi = 'https://api.coingecko.com/api/v3';
     this.moltbookApi = process.env.MOLTBOOK_API_URL || 'https://api.moltbook.com/v1';
+    this.solanaRpc = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
   }
 
   /**
@@ -28,6 +44,13 @@ class ResolutionEngine {
       switch (resolution) {
         case 'dexscreener':
           return await this.resolveDexScreener(targetToken, threshold, question);
+
+        case 'pyth':
+        case 'oracle':
+          return await this.resolvePyth(targetToken, threshold, question);
+
+        case 'coingecko':
+          return await this.resolveCoingecko(targetToken, threshold, question);
 
         case 'x-api':
           return await this.resolveXApi(targetHandle, threshold, question);
@@ -118,6 +141,154 @@ class ResolutionEngine {
 
     } catch (error) {
       return { resolved: false, error: `DexScreener API error: ${error.message}` };
+    }
+  }
+
+  /**
+   * Resolve using Pyth Network on-chain oracle
+   * More reliable and manipulation-resistant than DEX APIs
+   */
+  async resolvePyth(token, threshold, question) {
+    if (!token) {
+      const match = question.match(/\$([A-Z]+)/);
+      if (match) {
+        token = match[1].toUpperCase();
+      } else {
+        return { resolved: false, error: 'No token specified' };
+      }
+    }
+
+    token = token.toUpperCase();
+    const priceFeedId = PYTH_PRICE_FEEDS[token];
+
+    if (!priceFeedId) {
+      // Fallback to DexScreener if Pyth doesn't have this token
+      console.log(`[Resolver] Pyth doesn't have ${token}, falling back to DexScreener`);
+      return await this.resolveDexScreener(token, threshold, question);
+    }
+
+    try {
+      const response = await axios.get(
+        `${this.pythApi}/latest_price_feeds`,
+        {
+          params: { ids: [priceFeedId] },
+          timeout: 10000
+        }
+      );
+
+      const priceData = response.data?.[0];
+      if (!priceData || !priceData.price) {
+        return { resolved: false, error: `No Pyth price data for ${token}` };
+      }
+
+      // Pyth returns price with exponent
+      const price = parseFloat(priceData.price.price) * Math.pow(10, priceData.price.expo);
+      const confidence = parseFloat(priceData.price.conf) * Math.pow(10, priceData.price.expo);
+
+      const thresholdNum = this.parseThreshold(threshold);
+      if (!thresholdNum) {
+        return { resolved: false, error: 'Could not parse threshold' };
+      }
+
+      const outcome = price >= thresholdNum ? 'YES' : 'NO';
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: `$${price.toFixed(price < 1 ? 6 : 2)} (±${confidence.toFixed(2)})`,
+        threshold: `$${this.formatNumber(thresholdNum)}`,
+        source: 'Pyth Oracle',
+        data: {
+          token,
+          price,
+          confidence,
+          publishTime: priceData.price.publish_time
+        }
+      };
+    } catch (error) {
+      console.log(`[Resolver] Pyth error, falling back to DexScreener: ${error.message}`);
+      return await this.resolveDexScreener(token, threshold, question);
+    }
+  }
+
+  /**
+   * Resolve using CoinGecko API (free, good for major tokens)
+   */
+  async resolveCoingecko(token, threshold, question) {
+    if (!token) {
+      const match = question.match(/\$([A-Z]+)/);
+      if (match) {
+        token = match[1].toLowerCase();
+      } else {
+        return { resolved: false, error: 'No token specified' };
+      }
+    }
+
+    // Map common symbols to CoinGecko IDs
+    const tokenMap = {
+      'sol': 'solana',
+      'btc': 'bitcoin',
+      'eth': 'ethereum',
+      'usdc': 'usd-coin',
+      'bonk': 'bonk',
+      'jup': 'jupiter-exchange-solana',
+      'wif': 'dogwifcoin',
+      'jto': 'jito-governance-token',
+      'pyth': 'pyth-network',
+      'render': 'render-token',
+      'rndr': 'render-token',
+    };
+
+    const coinId = tokenMap[token.toLowerCase()] || token.toLowerCase();
+
+    try {
+      const response = await axios.get(
+        `${this.coingeckoApi}/simple/price`,
+        {
+          params: {
+            ids: coinId,
+            vs_currencies: 'usd',
+            include_market_cap: true,
+            include_24hr_change: true
+          },
+          timeout: 10000
+        }
+      );
+
+      const data = response.data?.[coinId];
+      if (!data) {
+        return { resolved: false, error: `Token ${token} not found on CoinGecko` };
+      }
+
+      const price = data.usd;
+      const mcap = data.usd_market_cap;
+
+      const thresholdNum = this.parseThreshold(threshold);
+      if (!thresholdNum) {
+        return { resolved: false, error: 'Could not parse threshold' };
+      }
+
+      const isMcapQuestion = /mcap|market cap/i.test(question);
+      const actualValue = isMcapQuestion ? mcap : price;
+      const outcome = actualValue >= thresholdNum ? 'YES' : 'NO';
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: isMcapQuestion
+          ? `$${this.formatNumber(mcap)} mcap`
+          : `$${price.toFixed(price < 1 ? 6 : 2)}`,
+        threshold: `$${this.formatNumber(thresholdNum)}`,
+        source: 'CoinGecko',
+        data: {
+          token,
+          price,
+          mcap,
+          change24h: data.usd_24h_change
+        }
+      };
+    } catch (error) {
+      return { resolved: false, error: `CoinGecko API error: ${error.message}` };
     }
   }
 
@@ -346,14 +517,109 @@ class ResolutionEngine {
 
   /**
    * Resolve using Solana on-chain data
+   * Supports: wallet balances, token holdings, transaction counts
    */
   async resolveSolana(data) {
-    // This would check Solana RPC for wallet balances, transactions, etc.
-    // For now, return manual resolution needed
-    return {
-      resolved: false,
-      error: 'Solana on-chain resolution not yet implemented'
-    };
+    const { question, threshold } = data;
+
+    // Extract wallet address from question
+    const walletMatch = question.match(/([1-9A-HJ-NP-Za-km-z]{32,44})/);
+    if (!walletMatch) {
+      return { resolved: false, error: 'No Solana wallet address found in question' };
+    }
+
+    const walletAddress = walletMatch[1];
+
+    try {
+      // Determine what we're checking
+      const isBalanceQuestion = /balance|hold|has|sol\b/i.test(question);
+      const isTokenQuestion = /token|usdc|bonk/i.test(question);
+
+      if (isBalanceQuestion && !isTokenQuestion) {
+        // Check SOL balance
+        const response = await axios.post(this.solanaRpc, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getBalance',
+          params: [walletAddress]
+        }, { timeout: 10000 });
+
+        const lamports = response.data?.result?.value || 0;
+        const solBalance = lamports / 1e9; // Convert lamports to SOL
+
+        const thresholdNum = this.parseThreshold(threshold);
+        if (!thresholdNum) {
+          return { resolved: false, error: 'Could not parse threshold' };
+        }
+
+        const outcome = solBalance >= thresholdNum ? 'YES' : 'NO';
+
+        return {
+          resolved: true,
+          outcome,
+          actualValue: `${solBalance.toFixed(4)} SOL`,
+          threshold: `${thresholdNum} SOL`,
+          source: 'Solana RPC',
+          data: {
+            wallet: walletAddress,
+            balanceLamports: lamports,
+            balanceSOL: solBalance
+          }
+        };
+      }
+
+      if (isTokenQuestion) {
+        // Check token accounts
+        const response = await axios.post(this.solanaRpc, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getTokenAccountsByOwner',
+          params: [
+            walletAddress,
+            { programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' },
+            { encoding: 'jsonParsed' }
+          ]
+        }, { timeout: 10000 });
+
+        const accounts = response.data?.result?.value || [];
+        const totalTokens = accounts.length;
+
+        // For USDC specifically
+        const usdcMint = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'; // Devnet
+        const usdcAccount = accounts.find(a =>
+          a.account?.data?.parsed?.info?.mint === usdcMint
+        );
+        const usdcBalance = usdcAccount?.account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0;
+
+        const thresholdNum = this.parseThreshold(threshold);
+
+        if (/usdc/i.test(question) && thresholdNum) {
+          const outcome = usdcBalance >= thresholdNum ? 'YES' : 'NO';
+          return {
+            resolved: true,
+            outcome,
+            actualValue: `${usdcBalance.toFixed(2)} USDC`,
+            threshold: `${thresholdNum} USDC`,
+            source: 'Solana RPC',
+            data: { wallet: walletAddress, usdcBalance }
+          };
+        }
+
+        // Generic token count
+        return {
+          resolved: true,
+          outcome: totalTokens > 0 ? 'YES' : 'NO',
+          actualValue: `${totalTokens} token accounts`,
+          source: 'Solana RPC',
+          data: { wallet: walletAddress, tokenAccounts: totalTokens }
+        };
+      }
+
+      return { resolved: false, error: 'Could not determine what to check on Solana' };
+
+    } catch (error) {
+      return { resolved: false, error: `Solana RPC error: ${error.message}` };
+    }
   }
 
   /**

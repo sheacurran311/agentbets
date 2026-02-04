@@ -30,6 +30,140 @@ const agentbets = new AgentBetsAPI();
 // In-memory tracking (would use DB in production)
 const processedTweets = new Set();
 const pendingResolutions = new Map();
+const notifiedMarkets = new Set(); // Track which markets we've sent reminders for
+
+/**
+ * Extract @handles from text (excluding the bot itself)
+ */
+function extractMentionedHandles(text) {
+  const matches = text.match(/@(\w+)/g) || [];
+  return matches
+    .map(h => h.slice(1).toLowerCase()) // Remove @ and lowercase
+    .filter(h => h !== 'agentbetsbot' && h !== 'agentbets'); // Exclude bot
+}
+
+/**
+ * Notify agents mentioned in a market question
+ */
+async function notifyMentionedAgents(marketId, question, creatorHandle, marketUrl) {
+  const mentionedHandles = extractMentionedHandles(question);
+
+  if (mentionedHandles.length === 0) {
+    console.log(`[Notify] No agents to notify for market ${marketId}`);
+    return;
+  }
+
+  console.log(`[Notify] Notifying agents: ${mentionedHandles.join(', ')}`);
+
+  for (const handle of mentionedHandles) {
+    // Don't notify the creator (they already know)
+    if (handle.toLowerCase() === creatorHandle.toLowerCase().replace('@', '')) {
+      continue;
+    }
+
+    try {
+      // Check if this is actually an agent (optional - could skip for speed)
+      const verification = await verifier.verifyAgent(handle, null);
+
+      const agentLabel = verification.isAgent ? '' : '';
+
+      await twitter.tweet(
+        `@${handle} A prediction market was just created about you!\n\n` +
+        `"${question.slice(0, 100)}${question.length > 100 ? '...' : ''}"\n\n` +
+        `Created by @${creatorHandle}\n\n` +
+        `View & bet: ${marketUrl}`
+      );
+
+      console.log(`[Notify] Notified @${handle} about market ${marketId}`);
+
+      // Rate limit: wait between tweets
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } catch (error) {
+      console.error(`[Notify] Failed to notify @${handle}:`, error.message);
+    }
+  }
+}
+
+/**
+ * Send reminder for markets ending soon (within 24 hours)
+ */
+async function sendMarketReminders() {
+  console.log(`[Reminders] Checking for markets ending soon...`);
+
+  const now = new Date();
+  const oneDayFromNow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+  for (const [marketId, data] of pendingResolutions) {
+    const endDate = new Date(data.endDate);
+    const reminderKey = `${marketId}-24h`;
+
+    // Skip if already notified or not within 24h window
+    if (notifiedMarkets.has(reminderKey)) continue;
+    if (endDate > oneDayFromNow || endDate < now) continue;
+
+    console.log(`[Reminders] Market ${marketId} ends in <24h, sending reminder`);
+
+    try {
+      // Get current odds from API
+      const market = await agentbets.getMarket(marketId);
+      const yesOdds = market?.yesOdds ? `${Math.round(market.yesOdds * 100)}%` : '50%';
+      const noOdds = market?.noOdds ? `${Math.round(market.noOdds * 100)}%` : '50%';
+
+      // Extract mentioned handles for tagging
+      const mentionedHandles = extractMentionedHandles(data.question);
+      const tagString = mentionedHandles.slice(0, 3).map(h => `@${h}`).join(' ');
+
+      const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+      const marketUrl = `${baseUrl}/markets/${marketId}`;
+
+      await twitter.tweet(
+        `Market ending soon! ${tagString}\n\n` +
+        `"${data.question.slice(0, 80)}${data.question.length > 80 ? '...' : ''}"\n\n` +
+        `Current odds: YES ${yesOdds} / NO ${noOdds}\n` +
+        `Ends: ${endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' })}\n\n` +
+        `Last chance to bet: ${marketUrl}`
+      );
+
+      notifiedMarkets.add(reminderKey);
+      console.log(`[Reminders] Sent reminder for market ${marketId}`);
+
+      // Rate limit
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    } catch (error) {
+      console.error(`[Reminders] Failed to send reminder for ${marketId}:`, error.message);
+    }
+  }
+}
+
+/**
+ * Announce market resolution and tag relevant agents
+ */
+async function announceResolution(marketId, data, result) {
+  console.log(`[Announce] Announcing resolution for market ${marketId}`);
+
+  try {
+    const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+    const marketUrl = `${baseUrl}/markets/${marketId}`;
+
+    // Extract mentioned handles for tagging
+    const mentionedHandles = extractMentionedHandles(data.question);
+    const tagString = mentionedHandles.slice(0, 2).map(h => `@${h}`).join(' ');
+    const creatorTag = `@${data.authorHandle}`;
+
+    await twitter.tweet(
+      `Market Resolved: ${result.outcome} wins! ${tagString} ${creatorTag}\n\n` +
+      `"${data.question.slice(0, 60)}${data.question.length > 60 ? '...' : ''}"\n\n` +
+      `Result: ${result.actualValue}\n` +
+      `Source: ${result.source || data.resolution}\n\n` +
+      `Winnings distributed!\n` +
+      `View: ${marketUrl}`
+    );
+
+    console.log(`[Announce] Resolution announced for market ${marketId}`);
+  } catch (error) {
+    console.error(`[Announce] Failed to announce resolution:`, error.message);
+  }
+}
 
 /**
  * Process a mention tweet
@@ -191,6 +325,9 @@ async function processMention(tweet) {
 
     // Post reply with Blink URL for in-feed betting
     await twitter.reply(tweetId, replyMessage);
+
+    // Notify any agents mentioned in the market question
+    await notifyMentionedAgents(market.market.id, betParams.question, authorHandle, marketUrl);
 
     console.log(`[Bot] Successfully created and announced market`);
 
@@ -393,17 +530,8 @@ async function checkResolutions() {
         continue;
       }
 
-      // Tweet the resolution
-      const marketUrl = `${process.env.AGENTBETS_URL || 'https://agentbets.gg'}/markets/${marketId}`;
-
-      await twitter.tweet(
-        `Market Resolved: ${result.outcome}\n\n` +
-        `"${data.question}"\n\n` +
-        `Result: ${result.actualValue}\n` +
-        `Threshold: ${data.threshold || 'N/A'}\n\n` +
-        `Created by @${data.authorHandle}\n\n` +
-        `View results: ${marketUrl}`
-      );
+      // Announce resolution with agent tagging
+      await announceResolution(marketId, data, result);
 
       // Remove from pending
       pendingResolutions.delete(marketId);
@@ -483,6 +611,10 @@ app.listen(PORT, () => {
     // Check resolutions every 15 minutes
     const resolveJob = new CronJob('*/15 * * * *', checkResolutions);
     resolveJob.start();
+
+    // Send market reminders every hour (for markets ending within 24h)
+    const reminderJob = new CronJob('0 * * * *', sendMarketReminders);
+    reminderJob.start();
 
     // Initial check on startup
     setTimeout(checkMentions, 5000);
