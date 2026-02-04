@@ -2,12 +2,12 @@
  * x402 Payment Handler for AgentBets
  *
  * Enables AI agents to place bets using USDC over HTTP (x402 protocol).
- * No wallet signing required - agents pay via HTTP headers.
+ * Payments are in USDC on Solana (devnet for testing, mainnet for production).
  *
  * Flow:
  * 1. Agent calls POST /api/agent/bet with bet details
  * 2. Server returns 402 with payment requirements
- * 3. Agent signs payment with their x402 wallet
+ * 3. Agent signs payment with their Solana wallet
  * 4. Agent retries with PAYMENT-SIGNATURE header
  * 5. Server records bet and returns confirmation
  */
@@ -16,40 +16,45 @@ const { readFileSync, existsSync } = require('fs');
 const { join } = require('path');
 const { homedir } = require('os');
 
-const WALLET_FILE = join(homedir(), '.x402', 'wallet.json');
+const WALLET_FILE = join(homedir(), '.agentbets', 'solana-wallet.json');
 
-// USDC contract addresses per network
-const USDC_CONTRACTS = {
-  'eip155:8453': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',     // Base mainnet
-  'eip155:84532': '0x036CbD53842c5426634e7929541eC2318f3dCF7e',    // Base Sepolia (testnet)
+// USDC token addresses on Solana
+const USDC_TOKENS = {
+  'solana:devnet': '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',   // Circle USDC on devnet
+  'solana:mainnet': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',  // Circle USDC on mainnet
 };
 
-// EIP-712 domain params for USDC
-const USDC_DOMAIN = { name: 'USDC', version: '2' };
+// Solana RPC endpoints
+const SOLANA_RPC = {
+  'solana:devnet': 'https://api.devnet.solana.com',
+  'solana:mainnet': 'https://api.mainnet-beta.solana.com',
+};
 
 /**
- * Get the platform's x402 wallet address for receiving payments
+ * Get the platform's Solana wallet address for receiving payments
  */
 function getPayToAddress() {
   // Use environment variable first, fall back to wallet file
-  if (process.env.X402_WALLET_ADDRESS) {
-    return process.env.X402_WALLET_ADDRESS;
+  if (process.env.SOLANA_PAY_TO_ADDRESS) {
+    return process.env.SOLANA_PAY_TO_ADDRESS;
+  }
+  if (process.env.ESCROW_WALLET) {
+    return process.env.ESCROW_WALLET;
   }
   if (existsSync(WALLET_FILE)) {
-    return JSON.parse(readFileSync(WALLET_FILE, 'utf-8')).address;
+    return JSON.parse(readFileSync(WALLET_FILE, 'utf-8')).publicKey;
   }
-  // Default to escrow wallet (would need x402 setup in production)
-  return process.env.ESCROW_WALLET || null;
+  return null;
 }
 
 /**
- * Build x402 v2 payment requirements for a bet
+ * Build x402 v2 payment requirements for a bet (Solana USDC)
  *
  * @param {object} options
  * @param {number} options.amountUSDC - Bet amount in USDC
  * @param {string} options.marketId - Market being bet on
  * @param {string} options.outcome - YES or NO
- * @param {string} [options.network='eip155:84532'] - Network ID (testnet default)
+ * @param {string} [options.network='solana:devnet'] - Network ID (devnet default)
  * @returns {object} x402 v2 payment requirements
  */
 function buildBetPaymentRequirements(options) {
@@ -57,18 +62,18 @@ function buildBetPaymentRequirements(options) {
     amountUSDC,
     marketId,
     outcome,
-    network = 'eip155:84532', // Base Sepolia (testnet) by default
+    network = 'solana:devnet', // Solana devnet by default
     agentHandle
   } = options;
 
   const payTo = getPayToAddress();
   if (!payTo) {
-    throw new Error('No x402 wallet configured. Set X402_WALLET_ADDRESS env var.');
+    throw new Error('No Solana wallet configured. Set SOLANA_PAY_TO_ADDRESS or ESCROW_WALLET env var.');
   }
 
-  const asset = USDC_CONTRACTS[network];
+  const asset = USDC_TOKENS[network];
   if (!asset) {
-    throw new Error(`Unknown network: ${network}. Supported: ${Object.keys(USDC_CONTRACTS).join(', ')}`);
+    throw new Error(`Unknown network: ${network}. Supported: ${Object.keys(USDC_TOKENS).join(', ')}`);
   }
 
   // Convert USDC amount to smallest unit (6 decimals)
@@ -87,8 +92,8 @@ function buildBetPaymentRequirements(options) {
       payTo,
       maxTimeoutSeconds: 300,
       asset,
+      rpc: SOLANA_RPC[network],
       extra: {
-        ...USDC_DOMAIN,
         // Custom metadata for bet tracking
         agentBets: {
           marketId,
@@ -123,14 +128,20 @@ function sendBetPaymentRequired(res, options) {
     x402: {
       version: 2,
       amountUSDC: options.amountUSDC,
-      network: options.network || 'eip155:84532',
-      payTo: getPayToAddress()
+      network: options.network || 'solana:devnet',
+      payTo: getPayToAddress(),
+      asset: USDC_TOKENS[options.network || 'solana:devnet']
     },
     bet: {
       marketId: options.marketId,
       outcome: options.outcome,
       amount: options.amountUSDC,
       currency: 'USDC'
+    },
+    funding: {
+      faucet: 'https://faucet.circle.com',
+      network: 'Solana Devnet',
+      instructions: 'Select Solana Devnet and paste your wallet address'
     }
   });
 }
@@ -158,7 +169,7 @@ function parsePaymentHeader(paymentHeader) {
       valid: true,
       signature: decoded.signature || paymentHeader,
       payload: decoded.payload || decoded,
-      network: decoded.network || 'eip155:84532',
+      network: decoded.network || 'solana:devnet',
       amount: decoded.amount || decoded.payload?.amount
     };
   } catch (e) {
@@ -209,7 +220,7 @@ function x402BetGate(options = {}) {
         marketId,
         outcome: outcome.toUpperCase(),
         agentHandle,
-        network: req.body.network || 'eip155:84532'
+        network: req.body.network || 'solana:devnet'
       });
     }
 
@@ -272,5 +283,6 @@ module.exports = {
   getPayToAddress,
   usdcToSolApprox,
   solToUsdcApprox,
-  USDC_CONTRACTS
+  USDC_TOKENS,
+  SOLANA_RPC
 };
