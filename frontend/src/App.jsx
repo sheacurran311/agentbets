@@ -918,7 +918,7 @@ function App() {
       <aside style={styles.sidebar} className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
         <div style={styles.logoContainer}>
           <img
-            src="/agentbets-logo-full.png"
+            src="/agentbets-logo-transparent.png"
             alt="AgentBets"
             style={{...styles.logoImg, cursor: 'pointer'}}
             onClick={() => navigate('/')}
