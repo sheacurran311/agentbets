@@ -21,6 +21,8 @@ const royalties = require('./royalties');
 const { router: actionsRouter, generateBlinkUrl, generateMarketsBlinkUrl, ACTION_CORS_HEADERS } = require('./actions');
 // Proof-of-Agent Verification System
 const agentVerification = require('./agentVerification');
+// x402 Payments for programmatic agent betting
+const x402 = require('./x402-payments');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -2319,6 +2321,458 @@ function initializeTestMarkets() {
 
   console.log(`[AgentBets] Initialized ${testMarkets.length} test markets`);
 }
+
+// ==========================================
+// x402 AGENT BETTING ENDPOINTS
+// Programmatic betting for AI agents via HTTP
+// ==========================================
+
+/**
+ * Place a bet via x402 payment (for AI agents)
+ * POST /api/agent/bet/:marketId
+ *
+ * Body: { outcome: "YES"|"NO", amount: number, agentHandle: string }
+ *
+ * Flow:
+ * 1. First call returns 402 with payment requirements
+ * 2. Agent signs payment with x402 wallet
+ * 3. Retry with PAYMENT-SIGNATURE header
+ * 4. Bet is recorded and confirmed
+ */
+app.post('/api/agent/bet/:marketId',
+  x402.x402BetGate({ minAmount: 0.01, maxAmount: 10000 }),
+  async (req, res) => {
+    try {
+      const { marketId } = req.params;
+      const { outcome, amount, agentHandle } = req.body;
+      const payment = req.x402Payment;
+
+      // Get market
+      const market = markets.get(marketId);
+      if (!market) {
+        return res.status(404).json({ error: 'Market not found' });
+      }
+
+      if (market.status !== 'active') {
+        return res.status(400).json({ error: `Market is ${market.status}, cannot place bets` });
+      }
+
+      if (new Date(market.endDate) < new Date()) {
+        return res.status(400).json({ error: 'Market has ended' });
+      }
+
+      // Convert USDC to lamports equivalent for pool tracking
+      const lamportsEquiv = Math.round(x402.usdcToSolApprox(payment.amountUSDC) * LAMPORTS_PER_SOL);
+
+      // Record the bet
+      const betId = uuidv4();
+      const bet = {
+        id: betId,
+        marketId,
+        outcome: payment.outcome,
+        amount: lamportsEquiv,
+        amountUSDC: payment.amountUSDC,
+        currency: 'USDC',
+        wallet: `x402:${agentHandle || 'anonymous'}`, // Agent identifier
+        agentHandle: agentHandle || null,
+        timestamp: new Date().toISOString(),
+        x402Signature: payment.signature?.slice(0, 32),
+        paymentNetwork: payment.network || 'eip155:84532',
+        type: 'agent-x402' // Distinguish from Blink/SOL bets
+      };
+
+      bets.set(betId, bet);
+
+      // Update market pools
+      if (payment.outcome === 'YES') {
+        market.yesPool = (market.yesPool || 0) + lamportsEquiv;
+      } else {
+        market.noPool = (market.noPool || 0) + lamportsEquiv;
+      }
+
+      // Recalculate odds (AMM-style)
+      const totalPool = market.yesPool + market.noPool;
+      if (totalPool > 0) {
+        market.yesOdds = market.noPool / totalPool;
+        market.noOdds = market.yesPool / totalPool;
+      }
+
+      market.totalVolume = (market.totalVolume || 0) + lamportsEquiv;
+      market.totalBets = (market.totalBets || 0) + 1;
+
+      // Update positions
+      const positionKey = `${bet.wallet}:${marketId}`;
+      const existingPosition = positions.get(positionKey) || {
+        wallet: bet.wallet,
+        marketId,
+        yesAmount: 0,
+        noAmount: 0
+      };
+
+      if (payment.outcome === 'YES') {
+        existingPosition.yesAmount += lamportsEquiv;
+      } else {
+        existingPosition.noAmount += lamportsEquiv;
+      }
+      positions.set(positionKey, existingPosition);
+
+      console.log(`[x402] Agent bet recorded: ${betId} - ${agentHandle} bet ${payment.amountUSDC} USDC ${payment.outcome} on ${marketId}`);
+
+      res.json({
+        success: true,
+        bet: {
+          id: betId,
+          marketId,
+          outcome: payment.outcome,
+          amountUSDC: payment.amountUSDC,
+          currency: 'USDC',
+          agentHandle,
+          timestamp: bet.timestamp
+        },
+        market: {
+          id: market.id,
+          question: market.question,
+          yesOdds: market.yesOdds,
+          noOdds: market.noOdds,
+          yesPool: market.yesPool / LAMPORTS_PER_SOL,
+          noPool: market.noPool / LAMPORTS_PER_SOL
+        },
+        payment: {
+          verified: true,
+          network: payment.network,
+          signature: payment.signature?.slice(0, 16) + '...'
+        }
+      });
+
+    } catch (error) {
+      console.error('[x402] Bet error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/**
+ * Create market AND place initial bet in one call (for agents)
+ * POST /api/agent/create-and-bet
+ *
+ * Body: {
+ *   question, endDate, category, resolutionSource,
+ *   initialBet: number, initialOutcome: "YES"|"NO",
+ *   agentHandle: string
+ * }
+ */
+app.post('/api/agent/create-and-bet', async (req, res) => {
+  try {
+    const {
+      question,
+      description,
+      category,
+      resolutionSource,
+      endDate,
+      initialBet,
+      initialOutcome,
+      agentHandle,
+      threshold,
+      verificationMethod,
+      tags
+    } = req.body;
+
+    // Validate required fields
+    if (!question || !endDate) {
+      return res.status(400).json({ error: 'Question and endDate are required' });
+    }
+
+    // Check for x402 payment if initial bet is specified
+    const paymentHeader = x402.getPaymentHeader(req);
+
+    if (initialBet && initialBet > 0) {
+      if (!paymentHeader) {
+        // No payment - return 402 with requirements
+        const marketId = 'pending-' + Date.now(); // Temporary ID
+        return x402.sendBetPaymentRequired(res, {
+          amountUSDC: initialBet,
+          marketId,
+          outcome: initialOutcome || 'YES',
+          agentHandle,
+          network: req.body.network || 'eip155:84532'
+        });
+      }
+    }
+
+    // Create the market
+    const marketId = uuidv4();
+    const now = new Date().toISOString();
+
+    const market = {
+      id: marketId,
+      question,
+      description: description || `Created by ${agentHandle || 'agent'} via AgentBets`,
+      category: category || 'general',
+      outcomes: ['YES', 'NO'],
+      resolutionSource: resolutionSource || 'manual',
+      endDate,
+      createdAt: now,
+      creatorWallet: null,
+      creatorAgent: agentHandle || null,
+      status: 'active',
+      resolution: null,
+      resolvedAt: null,
+      verificationMethod: verificationMethod || null,
+      threshold: threshold || null,
+      tags: tags || ['agent-created'],
+      yesPool: 0,
+      noPool: 0,
+      totalVolume: 0,
+      totalBets: 0,
+      yesOdds: 0.5,
+      noOdds: 0.5
+    };
+
+    markets.set(marketId, market);
+
+    // Register creator for royalties
+    if (agentHandle) {
+      royalties.registerCreator(agentHandle, null, marketId);
+    }
+
+    let betResult = null;
+
+    // Place initial bet if payment was provided
+    if (initialBet && initialBet > 0 && paymentHeader) {
+      const payment = x402.parsePaymentHeader(paymentHeader);
+      const lamportsEquiv = Math.round(x402.usdcToSolApprox(initialBet) * LAMPORTS_PER_SOL);
+      const outcome = (initialOutcome || 'YES').toUpperCase();
+
+      // Record the bet
+      const betId = uuidv4();
+      const bet = {
+        id: betId,
+        marketId,
+        outcome,
+        amount: lamportsEquiv,
+        amountUSDC: initialBet,
+        currency: 'USDC',
+        wallet: `x402:${agentHandle || 'anonymous'}`,
+        agentHandle,
+        timestamp: now,
+        x402Signature: payment.signature?.slice(0, 32),
+        type: 'agent-x402-initial'
+      };
+
+      bets.set(betId, bet);
+
+      // Update market pools
+      if (outcome === 'YES') {
+        market.yesPool = lamportsEquiv;
+      } else {
+        market.noPool = lamportsEquiv;
+      }
+
+      // Recalculate odds
+      const totalPool = market.yesPool + market.noPool;
+      if (totalPool > 0) {
+        market.yesOdds = market.noPool / totalPool;
+        market.noOdds = market.yesPool / totalPool;
+      }
+
+      market.totalVolume = lamportsEquiv;
+      market.totalBets = 1;
+
+      betResult = {
+        id: betId,
+        outcome,
+        amountUSDC: initialBet,
+        currency: 'USDC'
+      };
+
+      console.log(`[x402] Initial bet placed: ${betId} - ${agentHandle} bet ${initialBet} USDC ${outcome}`);
+    }
+
+    // Generate Blink URL for others to bet
+    const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+    const actionUrl = `${baseUrl}/api/actions/bet/${marketId}`;
+    const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
+
+    console.log(`[x402] Market created: ${marketId} by ${agentHandle}`);
+
+    res.status(201).json({
+      success: true,
+      market: {
+        id: marketId,
+        question,
+        category: market.category,
+        endDate,
+        resolutionSource: market.resolutionSource,
+        yesOdds: market.yesOdds,
+        noOdds: market.noOdds,
+        yesPoolSOL: market.yesPool / LAMPORTS_PER_SOL,
+        noPoolSOL: market.noPool / LAMPORTS_PER_SOL,
+        creatorAgent: agentHandle
+      },
+      initialBet: betResult,
+      blinkUrl,
+      marketUrl: `${baseUrl}/markets/${marketId}`,
+      royaltyInfo: {
+        creator: agentHandle,
+        rate: '0.3%',
+        description: 'You earn 0.3% of winning payouts from this market'
+      }
+    });
+
+  } catch (error) {
+    console.error('[x402] Create-and-bet error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get x402 payment info for a bet (dry run)
+ * GET /api/agent/bet/:marketId/price?amount=10&outcome=YES
+ */
+app.get('/api/agent/bet/:marketId/price', (req, res) => {
+  const { marketId } = req.params;
+  const { amount, outcome } = req.query;
+
+  const market = markets.get(marketId);
+  if (!market) {
+    return res.status(404).json({ error: 'Market not found' });
+  }
+
+  const amountUSDC = parseFloat(amount) || 10;
+  const betOutcome = (outcome || 'YES').toUpperCase();
+
+  // Build payment requirements without sending 402
+  const requirements = x402.buildBetPaymentRequirements({
+    amountUSDC,
+    marketId,
+    outcome: betOutcome,
+    network: 'eip155:84532' // Testnet
+  });
+
+  res.json({
+    market: {
+      id: market.id,
+      question: market.question,
+      yesOdds: market.yesOdds,
+      noOdds: market.noOdds
+    },
+    bet: {
+      outcome: betOutcome,
+      amountUSDC,
+      potentialWinnings: betOutcome === 'YES'
+        ? amountUSDC / market.yesOdds
+        : amountUSDC / market.noOdds
+    },
+    x402: {
+      payTo: x402.getPayToAddress(),
+      network: 'eip155:84532',
+      networkName: 'Base Sepolia (testnet)',
+      currency: 'USDC',
+      amount: amountUSDC,
+      paymentHeader: requirements
+    },
+    howToPay: {
+      step1: 'POST to /api/agent/bet/' + marketId + ' with body: { outcome, amount, agentHandle }',
+      step2: 'Receive 402 response with PAYMENT-REQUIRED header',
+      step3: 'Sign payment with x402 wallet (createPayClient from @x402/fetch)',
+      step4: 'Retry request with PAYMENT-SIGNATURE header',
+      step5: 'Receive bet confirmation'
+    }
+  });
+});
+
+/**
+ * Agent wallet registration for x402
+ * POST /api/agent/wallet
+ */
+app.post('/api/agent/wallet', (req, res) => {
+  const { agentHandle, evmAddress, solanaAddress } = req.body;
+
+  if (!agentHandle) {
+    return res.status(400).json({ error: 'agentHandle is required' });
+  }
+
+  // Store wallet mapping (in production, would use database)
+  const agentWallets = app.locals.agentWallets || new Map();
+  agentWallets.set(agentHandle.toLowerCase(), {
+    handle: agentHandle,
+    evmAddress: evmAddress || null,
+    solanaAddress: solanaAddress || null,
+    registeredAt: new Date().toISOString()
+  });
+  app.locals.agentWallets = agentWallets;
+
+  // Also register for royalties if Solana address provided
+  if (solanaAddress) {
+    royalties.registerCreator(agentHandle, solanaAddress, null);
+  }
+
+  console.log(`[x402] Agent wallet registered: ${agentHandle} - EVM: ${evmAddress}, SOL: ${solanaAddress}`);
+
+  res.json({
+    success: true,
+    agent: agentHandle,
+    wallets: {
+      evm: evmAddress || 'not set',
+      solana: solanaAddress || 'not set'
+    },
+    message: 'Wallet registered for x402 payments and royalty withdrawals'
+  });
+});
+
+/**
+ * Get agent's bets and positions
+ * GET /api/agent/:handle/bets
+ */
+app.get('/api/agent/:handle/bets', (req, res) => {
+  const { handle } = req.params;
+  const agentKey = `x402:${handle}`;
+
+  // Get all bets by this agent
+  const agentBets = Array.from(bets.values())
+    .filter(bet => bet.agentHandle === handle || bet.wallet === agentKey)
+    .map(bet => ({
+      id: bet.id,
+      marketId: bet.marketId,
+      outcome: bet.outcome,
+      amountUSDC: bet.amountUSDC || x402.solToUsdcApprox(bet.amount / LAMPORTS_PER_SOL),
+      currency: bet.currency || 'SOL',
+      timestamp: bet.timestamp,
+      market: markets.get(bet.marketId)?.question || 'Unknown market'
+    }));
+
+  // Get positions
+  const agentPositions = Array.from(positions.values())
+    .filter(pos => pos.wallet === agentKey)
+    .map(pos => {
+      const market = markets.get(pos.marketId);
+      return {
+        marketId: pos.marketId,
+        question: market?.question || 'Unknown market',
+        yesAmountSOL: pos.yesAmount / LAMPORTS_PER_SOL,
+        noAmountSOL: pos.noAmount / LAMPORTS_PER_SOL,
+        status: market?.status || 'unknown',
+        currentOdds: {
+          yes: market?.yesOdds || 0.5,
+          no: market?.noOdds || 0.5
+        }
+      };
+    });
+
+  // Get royalties
+  const royaltyInfo = royalties.getCreatorRoyalties(handle);
+
+  res.json({
+    agent: handle,
+    totalBets: agentBets.length,
+    bets: agentBets,
+    positions: agentPositions,
+    royalties: royaltyInfo || { earned: 0, pending: 0, withdrawn: 0 },
+    marketsCreated: Array.from(markets.values())
+      .filter(m => m.creatorAgent === `@${handle}` || m.creatorAgent === handle)
+      .length
+  });
+});
 
 // Serve frontend in production mode
 // This serves the built React app from frontend/dist

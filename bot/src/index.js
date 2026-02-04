@@ -102,17 +102,46 @@ async function processMention(tweet) {
     console.log(`[Bot] Parsed bet:`, betParams);
 
     // Create market on AgentBets
-    const market = await agentbets.createMarket({
-      question: betParams.question,
-      description: `Created by @${authorHandle} via AgentBets Bot`,
-      category: betParams.category || 'general',
-      endDate: betParams.endDate,
-      resolutionSource: betParams.resolution,
-      threshold: betParams.threshold,
-      verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
-      creatorAgent: `@${authorHandle}`,
-      tags: ['agent-created', authorHandle, betParams.resolution]
-    });
+    // If agent included initial bet, use create-and-bet endpoint
+    const hasInitialBet = betParams.initialBet && betParams.initialBet > 0;
+
+    let market;
+    if (hasInitialBet) {
+      // Use create-and-bet endpoint (requires x402 payment)
+      console.log(`[Bot] Agent wants to create market with initial bet: ${betParams.initialBet} ${betParams.initialCurrency} ${betParams.initialOutcome}`);
+
+      // For now, create market without the bet (x402 payment would need to come from agent's wallet)
+      // The agent will need to follow up with x402 payment to place the bet
+      market = await agentbets.createMarket({
+        question: betParams.question,
+        description: `Created by @${authorHandle} via AgentBets Bot`,
+        category: betParams.category || 'general',
+        endDate: betParams.endDate,
+        resolutionSource: betParams.resolution,
+        threshold: betParams.threshold,
+        verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
+        creatorAgent: `@${authorHandle}`,
+        tags: ['agent-created', authorHandle, betParams.resolution],
+        // Include initial bet info for the reply
+        requestedInitialBet: {
+          amount: betParams.initialBet,
+          currency: betParams.initialCurrency,
+          outcome: betParams.initialOutcome
+        }
+      });
+    } else {
+      market = await agentbets.createMarket({
+        question: betParams.question,
+        description: `Created by @${authorHandle} via AgentBets Bot`,
+        category: betParams.category || 'general',
+        endDate: betParams.endDate,
+        resolutionSource: betParams.resolution,
+        threshold: betParams.threshold,
+        verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
+        creatorAgent: `@${authorHandle}`,
+        tags: ['agent-created', authorHandle, betParams.resolution]
+      });
+    }
 
     if (!market.success) {
       console.log(`[Bot] Failed to create market: ${market.error}`);
@@ -146,14 +175,22 @@ async function processMention(tweet) {
       month: 'short', day: 'numeric', year: 'numeric'
     });
 
-    // Post reply with Blink URL for in-feed betting
-    await twitter.reply(tweetId,
-      `New bet created by @${authorHandle}!\n\n` +
+    // Build reply message
+    let replyMessage = `New bet created by @${authorHandle}!\n\n` +
       `"${betParams.question}"\n\n` +
       `Ends: ${endDateFormatted}\n` +
-      `Resolution: ${betParams.resolution}\n\n` +
-      `Bet now: ${blinkUrl}`
-    );
+      `Resolution: ${betParams.resolution}\n\n`;
+
+    // If agent requested initial bet, include x402 payment instructions
+    if (hasInitialBet) {
+      replyMessage += `To place your ${betParams.initialBet} ${betParams.initialCurrency} ${betParams.initialOutcome} bet:\n` +
+        `POST ${baseUrl}/api/agent/bet/${market.market.id}\n\n`;
+    }
+
+    replyMessage += `Bet now: ${blinkUrl}`;
+
+    // Post reply with Blink URL for in-feed betting
+    await twitter.reply(tweetId, replyMessage);
 
     console.log(`[Bot] Successfully created and announced market`);
 
@@ -242,6 +279,46 @@ async function processCommand(tweetId, authorHandle, text) {
           `Total Bets: ${stats?.bets?.total || 0}\n` +
           `Volume: ${stats?.bets?.totalVolume?.toFixed(2) || 0} SOL\n\n` +
           `Create markets to earn royalties!`
+        );
+        break;
+      }
+
+      case 'bet': {
+        // Agent wants to place a bet on an existing market
+        // Format: @AgentBetsBot bet 10 USDC YES on market abc123
+        const betParams = command;
+
+        if (!betParams.valid) {
+          await twitter.reply(tweetId,
+            `@${authorHandle} ${betParams.error}\n\n` +
+            `Format: @AgentBetsBot bet [amount] USDC [YES/NO] on market [ID]\n\n` +
+            `Example: @AgentBetsBot bet 10 USDC YES on market abc123`
+          );
+          break;
+        }
+
+        // Find market by ID or question
+        let marketId = betParams.marketId;
+        if (!marketId && betParams.marketQuestion) {
+          // Search for market by question (would need API endpoint)
+          await twitter.reply(tweetId,
+            `@${authorHandle} Please specify the market ID.\n\n` +
+            `Format: @AgentBetsBot bet 10 USDC YES on market [ID]\n\n` +
+            `Find market IDs at agentbets.gg/markets`
+          );
+          break;
+        }
+
+        // Reply with x402 payment instructions
+        const baseUrl = process.env.AGENTBETS_API_URL?.replace('/api', '') || 'https://agentbets.gg';
+
+        await twitter.reply(tweetId,
+          `@${authorHandle} To place this bet programmatically:\n\n` +
+          `POST ${baseUrl}/api/agent/bet/${marketId}\n` +
+          `Body: { outcome: "${betParams.outcome}", amount: ${betParams.amount}, agentHandle: "${authorHandle}" }\n\n` +
+          `Use x402 payment (USDC on Base).\n` +
+          `Docs: agentbets.gg/docs/agent-api\n\n` +
+          `Or bet via Blink: ${baseUrl}/api/actions/bet/${marketId}`
         );
         break;
       }

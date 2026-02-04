@@ -10,8 +10,8 @@ class BetParser {
     // Keywords that indicate a bet request
     this.betKeywords = ['bet:', 'create bet', 'new bet', 'prediction:', 'market:'];
 
-    // Bot command keywords
-    this.commandKeywords = ['balance', 'withdraw', 'royalties', 'help', 'stats'];
+    // Bot command keywords - now includes 'bet on' for placing bets
+    this.commandKeywords = ['balance', 'withdraw', 'royalties', 'help', 'stats', 'bet on', 'wager'];
 
     // Resolution source mappings
     this.resolutionSources = {
@@ -56,7 +56,15 @@ class BetParser {
    */
   isCommand(text) {
     const lowerText = text.toLowerCase();
-    return this.commandKeywords.some(keyword => lowerText.includes(keyword));
+    // Check for explicit commands first
+    if (this.commandKeywords.some(keyword => lowerText.includes(keyword))) {
+      return true;
+    }
+    // Check for bet placement format (amount + outcome + market)
+    if (this.isBetPlacement(text)) {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -86,7 +94,90 @@ class BetParser {
       return { command: 'stats' };
     }
 
+    // NEW: Bet placement command
+    if (lowerText.includes('bet on') || lowerText.includes('wager on') ||
+        /\d+\s*(usdc|sol)\s+(yes|no)\s+on/i.test(lowerText)) {
+      return {
+        command: 'bet',
+        ...this.parseBetPlacement(text)
+      };
+    }
+
     return { command: 'unknown' };
+  }
+
+  /**
+   * Check if this is a bet placement command (betting on existing market)
+   */
+  isBetPlacement(text) {
+    const lowerText = text.toLowerCase();
+    return lowerText.includes('bet on') ||
+           lowerText.includes('wager on') ||
+           lowerText.includes('bet yes') ||
+           lowerText.includes('bet no') ||
+           /\d+\s*(usdc|sol)\s+(yes|no)\s+on/i.test(lowerText);
+  }
+
+  /**
+   * Parse bet placement command
+   * Formats:
+   *   @AgentBetsBot bet 10 USDC YES on market abc123
+   *   @AgentBetsBot wager 5 USDC NO on "Will Butters win?"
+   *   @AgentBetsBot bet on market abc123 - 10 USDC YES
+   */
+  parseBetPlacement(text) {
+    const result = {
+      valid: false,
+      marketId: null,
+      marketQuestion: null,
+      outcome: null,
+      amount: null,
+      currency: 'USDC', // Default to USDC for x402 payments
+      error: null
+    };
+
+    // Extract amount and currency
+    const amountMatch = text.match(/(\d+(?:\.\d+)?)\s*(usdc|sol)/i);
+    if (amountMatch) {
+      result.amount = parseFloat(amountMatch[1]);
+      result.currency = amountMatch[2].toUpperCase();
+    }
+
+    // Extract outcome (YES/NO)
+    const outcomeMatch = text.match(/\b(yes|no)\b/i);
+    if (outcomeMatch) {
+      result.outcome = outcomeMatch[1].toUpperCase();
+    }
+
+    // Extract market ID (alphanumeric, typically 8-24 chars)
+    const marketIdMatch = text.match(/market\s+([a-zA-Z0-9_-]{6,32})/i) ||
+                          text.match(/on\s+([a-zA-Z0-9_-]{6,32})/i);
+    if (marketIdMatch) {
+      result.marketId = marketIdMatch[1];
+    }
+
+    // Extract market question (in quotes)
+    const questionMatch = text.match(/[""]([^""]+)[""]/);
+    if (questionMatch) {
+      result.marketQuestion = questionMatch[1];
+    }
+
+    // Validate
+    if (!result.amount) {
+      result.error = 'Missing bet amount. Use: "bet 10 USDC YES on market [ID]"';
+      return result;
+    }
+    if (!result.outcome) {
+      result.error = 'Missing outcome (YES/NO). Use: "bet 10 USDC YES on market [ID]"';
+      return result;
+    }
+    if (!result.marketId && !result.marketQuestion) {
+      result.error = 'Missing market ID or question. Use: "bet 10 USDC YES on market [ID]"';
+      return result;
+    }
+
+    result.valid = true;
+    return result;
   }
 
   /**
@@ -102,7 +193,11 @@ class BetParser {
         threshold: null,
         category: 'general',
         targetHandle: null,
-        targetToken: null
+        targetToken: null,
+        // NEW: Initial bet parameters
+        initialBet: null,
+        initialOutcome: null,
+        initialCurrency: 'USDC'
       };
 
       // Extract question (in quotes or after bet: or natural language with ?)
@@ -177,6 +272,25 @@ class BetParser {
 
       // Detect category
       result.category = this.detectCategory(result.question);
+
+      // NEW: Extract initial bet amount (for create + bet in one tweet)
+      // Formats: "betting 10 USDC YES", "wager: 5 USDC NO", "10 USDC on YES"
+      const betAmountMatch = text.match(/(?:betting|wager|stake|put)\s*:?\s*(\d+(?:\.\d+)?)\s*(usdc|sol)/i) ||
+                             text.match(/(\d+(?:\.\d+)?)\s*(usdc|sol)\s+(?:on\s+)?(yes|no)/i);
+
+      if (betAmountMatch) {
+        result.initialBet = parseFloat(betAmountMatch[1]);
+        result.initialCurrency = betAmountMatch[2].toUpperCase();
+
+        // Get outcome if present
+        const outcomeMatch = text.match(/\b(yes|no)\b/i);
+        if (outcomeMatch) {
+          result.initialOutcome = outcomeMatch[1].toUpperCase();
+        } else {
+          // Default to YES if creating the market (creator believes their prediction)
+          result.initialOutcome = 'YES';
+        }
+      }
 
       result.valid = true;
       return result;
