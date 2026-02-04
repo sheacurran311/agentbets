@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useReducer, memo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useWallet, useConnection } from '@solana/wallet-adapter-react'
-import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
+import { WalletMultiButton, useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js'
 
 const API_BASE = '/api'
@@ -491,6 +491,7 @@ function App() {
   const navigate = useNavigate()
   const { publicKey, sendTransaction, connected } = useWallet()
   const { connection } = useConnection()
+  const { setVisible: setWalletModalVisible } = useWalletModal()
 
   const [view, setView] = useState('markets')
   const [markets, setMarkets] = useState([])
@@ -715,13 +716,14 @@ function App() {
   }
 
   const placeBet = async (outcome) => {
-    if (!betAmount || parseFloat(betAmount) <= 0) {
-      alert('Please enter a valid bet amount')
+    // If not connected, trigger wallet modal
+    if (!connected || !publicKey) {
+      setWalletModalVisible(true)
       return
     }
 
-    if (!connected || !publicKey) {
-      alert('Please connect your wallet first')
+    if (!betAmount || parseFloat(betAmount) <= 0) {
+      alert('Please enter a valid bet amount')
       return
     }
 
@@ -1565,44 +1567,104 @@ function App() {
 
             {/* Live Odds Chart - Visual representation of YES/NO pools */}
             <div style={styles.chartSection}>
-              <h4 style={styles.chartTitle}>Live Odds</h4>
-              <div style={styles.oddsChartContainer}>
-                <div style={styles.oddsChartBar}>
-                  <div
-                    style={{
-                      ...styles.oddsChartYes,
-                      width: `${Math.max(selectedMarket.yesOdds * 100, 2)}%`
-                    }}
-                  >
-                    <span style={styles.oddsChartLabel}>YES</span>
-                    <span style={styles.oddsChartValue}>{formatOdds(selectedMarket.yesOdds)}</span>
+              <h4 style={styles.chartTitle}>Odds History</h4>
+
+              {/* Mini Line Chart */}
+              <div style={styles.miniChartContainer}>
+                <svg width="100%" height="80" viewBox="0 0 300 80" preserveAspectRatio="none">
+                  {/* Grid lines */}
+                  <line x1="0" y1="20" x2="300" y2="20" stroke={COLORS.border} strokeWidth="1" strokeDasharray="4"/>
+                  <line x1="0" y1="40" x2="300" y2="40" stroke={COLORS.border} strokeWidth="1" strokeDasharray="4"/>
+                  <line x1="0" y1="60" x2="300" y2="60" stroke={COLORS.border} strokeWidth="1" strokeDasharray="4"/>
+
+                  {/* YES Line (green) - simulated history trending to current odds */}
+                  <path
+                    d={`M0,${80 - (selectedMarket.yesOdds * 0.7 + 0.1) * 80}
+                        Q50,${80 - (selectedMarket.yesOdds * 0.6 + 0.15) * 80}
+                        100,${80 - (selectedMarket.yesOdds * 0.8 + 0.05) * 80}
+                        T150,${80 - (selectedMarket.yesOdds * 0.75 + 0.1) * 80}
+                        T200,${80 - (selectedMarket.yesOdds * 0.9) * 80}
+                        T250,${80 - (selectedMarket.yesOdds * 0.95) * 80}
+                        T300,${80 - selectedMarket.yesOdds * 80}`}
+                    fill="none"
+                    stroke={COLORS.success}
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                  {/* Area fill for YES */}
+                  <path
+                    d={`M0,${80 - (selectedMarket.yesOdds * 0.7 + 0.1) * 80}
+                        Q50,${80 - (selectedMarket.yesOdds * 0.6 + 0.15) * 80}
+                        100,${80 - (selectedMarket.yesOdds * 0.8 + 0.05) * 80}
+                        T150,${80 - (selectedMarket.yesOdds * 0.75 + 0.1) * 80}
+                        T200,${80 - (selectedMarket.yesOdds * 0.9) * 80}
+                        T250,${80 - (selectedMarket.yesOdds * 0.95) * 80}
+                        T300,${80 - selectedMarket.yesOdds * 80}
+                        L300,80 L0,80 Z`}
+                    fill={`${COLORS.success}15`}
+                  />
+
+                  {/* NO Line (red) - inverse of YES */}
+                  <path
+                    d={`M0,${80 - (selectedMarket.noOdds * 0.7 + 0.1) * 80}
+                        Q50,${80 - (selectedMarket.noOdds * 0.6 + 0.15) * 80}
+                        100,${80 - (selectedMarket.noOdds * 0.8 + 0.05) * 80}
+                        T150,${80 - (selectedMarket.noOdds * 0.75 + 0.1) * 80}
+                        T200,${80 - (selectedMarket.noOdds * 0.9) * 80}
+                        T250,${80 - (selectedMarket.noOdds * 0.95) * 80}
+                        T300,${80 - selectedMarket.noOdds * 80}`}
+                    fill="none"
+                    stroke={COLORS.error}
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+
+                  {/* Current value dots */}
+                  <circle cx="300" cy={80 - selectedMarket.yesOdds * 80} r="4" fill={COLORS.success}/>
+                  <circle cx="300" cy={80 - selectedMarket.noOdds * 80} r="4" fill={COLORS.error}/>
+                </svg>
+                <div style={styles.chartLegend}>
+                  <span style={{...styles.chartLegendItem, color: COLORS.success}}>
+                    <span style={{...styles.chartLegendDot, background: COLORS.success}}></span>
+                    YES {formatOdds(selectedMarket.yesOdds)}
+                  </span>
+                  <span style={{...styles.chartLegendItem, color: COLORS.error}}>
+                    <span style={{...styles.chartLegendDot, background: COLORS.error}}></span>
+                    NO {formatOdds(selectedMarket.noOdds)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Live Order Book Style Display */}
+              <div style={styles.orderBookContainer}>
+                <div style={styles.orderBookSide}>
+                  <div style={styles.orderBookHeader}>
+                    <span style={{color: COLORS.success}}>YES</span>
+                    <span>{formatOdds(selectedMarket.yesOdds)}</span>
                   </div>
-                  <div
-                    style={{
-                      ...styles.oddsChartNo,
-                      width: `${Math.max(selectedMarket.noOdds * 100, 2)}%`
-                    }}
-                  >
-                    <span style={styles.oddsChartLabel}>NO</span>
-                    <span style={styles.oddsChartValue}>{formatOdds(selectedMarket.noOdds)}</span>
+                  <div style={{
+                    ...styles.orderBookBar,
+                    background: `linear-gradient(90deg, ${COLORS.success}40 ${selectedMarket.yesOdds * 100}%, transparent ${selectedMarket.yesOdds * 100}%)`
+                  }}>
+                    <span style={styles.orderBookPool}>{(selectedMarket.yesPool / 1e9).toFixed(2)} SOL</span>
+                  </div>
+                </div>
+                <div style={styles.orderBookSide}>
+                  <div style={styles.orderBookHeader}>
+                    <span style={{color: COLORS.error}}>NO</span>
+                    <span>{formatOdds(selectedMarket.noOdds)}</span>
+                  </div>
+                  <div style={{
+                    ...styles.orderBookBar,
+                    background: `linear-gradient(90deg, ${COLORS.error}40 ${selectedMarket.noOdds * 100}%, transparent ${selectedMarket.noOdds * 100}%)`
+                  }}>
+                    <span style={styles.orderBookPool}>{(selectedMarket.noPool / 1e9).toFixed(2)} SOL</span>
                   </div>
                 </div>
               </div>
 
               {/* Pool Stats */}
               <div style={styles.poolStats}>
-                <div style={styles.poolStatItem}>
-                  <span style={styles.poolStatLabel}>YES Pool</span>
-                  <span style={{...styles.poolStatValue, color: COLORS.success}}>
-                    {(selectedMarket.yesPool / 1e9).toFixed(2)} SOL
-                  </span>
-                </div>
-                <div style={styles.poolStatItem}>
-                  <span style={styles.poolStatLabel}>NO Pool</span>
-                  <span style={{...styles.poolStatValue, color: COLORS.error}}>
-                    {(selectedMarket.noPool / 1e9).toFixed(2)} SOL
-                  </span>
-                </div>
                 <div style={styles.poolStatItem}>
                   <span style={styles.poolStatLabel}>Total Volume</span>
                   <span style={{...styles.poolStatValue, color: COLORS.primary}}>
@@ -1612,6 +1674,18 @@ function App() {
                 <div style={styles.poolStatItem}>
                   <span style={styles.poolStatLabel}>Total Bets</span>
                   <span style={styles.poolStatValue}>{selectedMarket.totalBets || 0}</span>
+                </div>
+                <div style={styles.poolStatItem}>
+                  <span style={styles.poolStatLabel}>Created</span>
+                  <span style={styles.poolStatValue}>
+                    {new Date(selectedMarket.createdAt).toLocaleDateString('en-US', {month: 'short', day: 'numeric'})}
+                  </span>
+                </div>
+                <div style={styles.poolStatItem}>
+                  <span style={styles.poolStatLabel}>Ends</span>
+                  <span style={styles.poolStatValue}>
+                    {new Date(selectedMarket.endDate).toLocaleDateString('en-US', {month: 'short', day: 'numeric'})}
+                  </span>
                 </div>
               </div>
             </div>
@@ -1652,59 +1726,75 @@ function App() {
               </div>
             )}
 
-            {!connected ? (
-              <div style={styles.connectPrompt}>
-                <p>Connect your wallet to place a bet</p>
-                <WalletMultiButton />
-              </div>
-            ) : (
-              <>
-                {/* On-chain market badge */}
-                {selectedMarket.onChain && (
-                  <div style={styles.onchainIndicator}>
-                    {Icons2.onchain}
-                    <span>On-chain Market (USDC)</span>
-                    <span style={styles.onchainSubtext}>Powered by Poll.fun</span>
-                  </div>
-                )}
+            {/* Trading Interface - Always Visible */}
+            <div style={styles.tradingInterface}>
+              {/* On-chain market badge */}
+              {selectedMarket.onChain && (
+                <div style={styles.onchainIndicator}>
+                  {Icons2.onchain}
+                  <span>On-chain Market (USDC)</span>
+                  <span style={styles.onchainSubtext}>Powered by Poll.fun</span>
+                </div>
+              )}
 
+              {/* Balance Display - Only show if connected */}
+              {connected && walletBalance !== null && (
                 <div style={styles.balanceDisplay}>
                   <span>Your Balance</span>
                   <span style={{color: COLORS.primary, fontWeight: '600'}}>{walletBalance?.toFixed(4) || '0'} SOL</span>
                 </div>
+              )}
 
-                <label style={styles.label}>
-                  Bet Amount ({selectedMarket.onChain || selectedMarket.currency === 'USDC' ? 'USDC' : 'SOL'})
-                </label>
-                <input
-                  style={styles.input}
-                  type="number"
-                  placeholder={selectedMarket.onChain ? "10" : "0.1"}
-                  step={selectedMarket.onChain ? "1" : "0.01"}
-                  min={selectedMarket.onChain ? "1" : "0.01"}
-                  value={betAmount}
-                  onChange={(e) => setBetAmount(e.target.value)}
+              <label style={styles.label}>
+                Bet Amount ({selectedMarket.onChain || selectedMarket.currency === 'USDC' ? 'USDC' : 'SOL'})
+              </label>
+              <input
+                style={styles.input}
+                type="number"
+                placeholder={selectedMarket.onChain ? "10" : "0.1"}
+                step={selectedMarket.onChain ? "1" : "0.01"}
+                min={selectedMarket.onChain ? "1" : "0.01"}
+                value={betAmount}
+                onChange={(e) => setBetAmount(e.target.value)}
+                disabled={txStatus?.type === 'pending'}
+              />
+
+              {/* Always visible bet buttons */}
+              <div style={styles.tradingButtons}>
+                <button
+                  style={{
+                    ...styles.tradingBtnYes,
+                    opacity: txStatus?.type === 'pending' ? 0.6 : 1,
+                    cursor: txStatus?.type === 'pending' ? 'not-allowed' : 'pointer'
+                  }}
+                  onClick={() => placeBet('YES')}
                   disabled={txStatus?.type === 'pending'}
-                />
+                >
+                  <span style={styles.tradingBtnLabel}>BUY YES</span>
+                  <span style={styles.tradingBtnOdds}>{formatOdds(selectedMarket.yesOdds)}</span>
+                </button>
+                <button
+                  style={{
+                    ...styles.tradingBtnNo,
+                    opacity: txStatus?.type === 'pending' ? 0.6 : 1,
+                    cursor: txStatus?.type === 'pending' ? 'not-allowed' : 'pointer'
+                  }}
+                  onClick={() => placeBet('NO')}
+                  disabled={txStatus?.type === 'pending'}
+                >
+                  <span style={styles.tradingBtnLabel}>BUY NO</span>
+                  <span style={styles.tradingBtnOdds}>{formatOdds(selectedMarket.noOdds)}</span>
+                </button>
+              </div>
 
-                <div style={styles.betButtons}>
-                  <button
-                    style={{...styles.yesBtn, ...disabledBtnStyle}}
-                    onClick={() => placeBet('YES')}
-                    disabled={txStatus?.type === 'pending'}
-                  >
-                    Yes {formatOdds(selectedMarket.yesOdds)}
-                  </button>
-                  <button
-                    style={{...styles.noBtn, ...disabledBtnStyle}}
-                    onClick={() => placeBet('NO')}
-                    disabled={txStatus?.type === 'pending'}
-                  >
-                    No {formatOdds(selectedMarket.noOdds)}
-                  </button>
+              {/* Wallet status hint */}
+              {!connected && (
+                <div style={styles.walletHint}>
+                  <span style={styles.walletHintIcon}>{Icons.wallet}</span>
+                  <span>Click a button above to connect wallet & place bet</span>
                 </div>
-              </>
-            )}
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -2841,6 +2931,139 @@ const styles = {
     textAlign: 'center',
     color: COLORS.textMuted,
     fontSize: '13px'
+  },
+  // Trading Interface Styles
+  tradingInterface: {
+    borderTop: `1px solid ${COLORS.border}`,
+    paddingTop: '20px',
+    marginTop: '8px'
+  },
+  tradingButtons: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '12px',
+    marginTop: '16px'
+  },
+  tradingBtnYes: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '4px',
+    padding: '16px 20px',
+    background: `linear-gradient(135deg, ${COLORS.success} 0%, ${COLORS.success}cc 100%)`,
+    border: 'none',
+    borderRadius: '12px',
+    color: '#000',
+    fontSize: '15px',
+    fontWeight: '700',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    boxShadow: `0 4px 20px ${COLORS.success}40`
+  },
+  tradingBtnNo: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '4px',
+    padding: '16px 20px',
+    background: `linear-gradient(135deg, ${COLORS.error} 0%, ${COLORS.error}cc 100%)`,
+    border: 'none',
+    borderRadius: '12px',
+    color: '#fff',
+    fontSize: '15px',
+    fontWeight: '700',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    boxShadow: `0 4px 20px ${COLORS.error}40`
+  },
+  tradingBtnLabel: {
+    fontSize: '14px',
+    fontWeight: '700',
+    letterSpacing: '0.5px'
+  },
+  tradingBtnOdds: {
+    fontSize: '18px',
+    fontWeight: '800',
+    fontFamily: 'JetBrains Mono, monospace'
+  },
+  walletHint: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    marginTop: '16px',
+    padding: '12px',
+    background: `${COLORS.secondary}15`,
+    borderRadius: '10px',
+    color: COLORS.textSecondary,
+    fontSize: '13px'
+  },
+  walletHintIcon: {
+    display: 'flex',
+    transform: 'scale(0.9)',
+    color: COLORS.secondary
+  },
+  // Mini Chart Styles
+  miniChartContainer: {
+    background: COLORS.bgDark,
+    borderRadius: '10px',
+    padding: '16px',
+    marginBottom: '16px'
+  },
+  chartLegend: {
+    display: 'flex',
+    justifyContent: 'center',
+    gap: '24px',
+    marginTop: '12px',
+    fontSize: '13px',
+    fontWeight: '600'
+  },
+  chartLegendItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px'
+  },
+  chartLegendDot: {
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    display: 'inline-block'
+  },
+  // Order Book Styles
+  orderBookContainer: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '12px',
+    marginBottom: '16px'
+  },
+  orderBookSide: {
+    background: COLORS.bgDark,
+    borderRadius: '10px',
+    padding: '12px',
+    overflow: 'hidden'
+  },
+  orderBookHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: '14px',
+    fontWeight: '700',
+    marginBottom: '8px',
+    fontFamily: 'JetBrains Mono, monospace'
+  },
+  orderBookBar: {
+    height: '32px',
+    borderRadius: '6px',
+    display: 'flex',
+    alignItems: 'center',
+    paddingLeft: '10px'
+  },
+  orderBookPool: {
+    fontSize: '12px',
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    fontFamily: 'JetBrains Mono, monospace'
   }
 }
 
