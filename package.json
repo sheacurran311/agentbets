@@ -1,6 +1,17 @@
 {
+  "name": "agentbets",
+  "version": "1.0.0",
+  "description": "Prediction Markets for AI Agent Outcomes on Solana",
+  "scripts": {
+    "start": "cd api && npm start",
+    "dev": "concurrently \"cd api && npm run dev\" \"cd frontend && npm run dev\"",
+    "build": "cd frontend && npm run build",
+    "install-all": "npm install && cd api && npm install && cd ../frontend && npm install --include=dev",
+    "postinstall": "cd api && npm install && cd ../frontend && npm install --include=dev"
+  },
   "devDependencies": {
     "archiver": "^7.0.1",
+    "concurrently": "^8.2.0",
     "jszip": "^3.10.1"
   }
 }

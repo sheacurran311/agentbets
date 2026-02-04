@@ -1905,7 +1905,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => {
+// API documentation endpoint (moved from / to /api)
+app.get('/api', (req, res) => {
   res.json({
     name: 'AgentBets API',
     tagline: 'Prediction Markets for AI Agent Outcomes',
@@ -2318,6 +2319,27 @@ function initializeTestMarkets() {
 
   console.log(`[AgentBets] Initialized ${testMarkets.length} test markets`);
 }
+
+// Serve frontend in production mode
+// This serves the built React app from frontend/dist
+const frontendPath = path.join(__dirname, '../../frontend/dist');
+app.use(express.static(frontendPath));
+
+// Handle SPA routing - serve index.html for all non-API routes
+app.get('*', (req, res, next) => {
+  // Skip API routes
+  if (req.path.startsWith('/api/') || req.path.startsWith('/health')) {
+    return next();
+  }
+  // Serve index.html for SPA routing
+  const indexPath = path.join(frontendPath, 'index.html');
+  const fs = require('fs');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    next();
+  }
+});
 
 // Start server
 app.listen(PORT, () => {
