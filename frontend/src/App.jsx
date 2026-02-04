@@ -1115,7 +1115,7 @@ function App() {
                       key={market.id}
                       style={{...styles.marketCard, animationDelay: `${index * 50}ms`}}
                       className="market-card glass-card"
-                      onClick={() => connected ? setSelectedMarket(market) : alert('Connect wallet first')}
+                      onClick={() => setSelectedMarket(market)}
                       onMouseEnter={handleCardMouseEnter}
                       onMouseLeave={handleCardMouseLeave}
                     >
@@ -1561,6 +1561,89 @@ function App() {
                   </a>
                 </div>
               )}
+            </div>
+
+            {/* Live Odds Chart - Visual representation of YES/NO pools */}
+            <div style={styles.chartSection}>
+              <h4 style={styles.chartTitle}>Live Odds</h4>
+              <div style={styles.oddsChartContainer}>
+                <div style={styles.oddsChartBar}>
+                  <div
+                    style={{
+                      ...styles.oddsChartYes,
+                      width: `${Math.max(selectedMarket.yesOdds * 100, 2)}%`
+                    }}
+                  >
+                    <span style={styles.oddsChartLabel}>YES</span>
+                    <span style={styles.oddsChartValue}>{formatOdds(selectedMarket.yesOdds)}</span>
+                  </div>
+                  <div
+                    style={{
+                      ...styles.oddsChartNo,
+                      width: `${Math.max(selectedMarket.noOdds * 100, 2)}%`
+                    }}
+                  >
+                    <span style={styles.oddsChartLabel}>NO</span>
+                    <span style={styles.oddsChartValue}>{formatOdds(selectedMarket.noOdds)}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Pool Stats */}
+              <div style={styles.poolStats}>
+                <div style={styles.poolStatItem}>
+                  <span style={styles.poolStatLabel}>YES Pool</span>
+                  <span style={{...styles.poolStatValue, color: COLORS.success}}>
+                    {(selectedMarket.yesPool / 1e9).toFixed(2)} SOL
+                  </span>
+                </div>
+                <div style={styles.poolStatItem}>
+                  <span style={styles.poolStatLabel}>NO Pool</span>
+                  <span style={{...styles.poolStatValue, color: COLORS.error}}>
+                    {(selectedMarket.noPool / 1e9).toFixed(2)} SOL
+                  </span>
+                </div>
+                <div style={styles.poolStatItem}>
+                  <span style={styles.poolStatLabel}>Total Volume</span>
+                  <span style={{...styles.poolStatValue, color: COLORS.primary}}>
+                    {(selectedMarket.totalVolume / 1e9).toFixed(2)} SOL
+                  </span>
+                </div>
+                <div style={styles.poolStatItem}>
+                  <span style={styles.poolStatLabel}>Total Bets</span>
+                  <span style={styles.poolStatValue}>{selectedMarket.totalBets || 0}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Recent Activity - Mini orderbook style */}
+            <div style={styles.modalActivitySection}>
+              <h4 style={styles.chartTitle}>Recent Activity</h4>
+              <div style={styles.modalActivityList}>
+                {selectedMarket.totalBets > 0 ? (
+                  <>
+                    <div style={styles.modalActivityItem}>
+                      <span style={{...styles.modalActivitySide, color: COLORS.success}}>YES</span>
+                      <span style={styles.modalActivityAmount}>0.5 SOL</span>
+                      <span style={styles.modalActivityTime}>2m ago</span>
+                    </div>
+                    <div style={styles.modalActivityItem}>
+                      <span style={{...styles.modalActivitySide, color: COLORS.error}}>NO</span>
+                      <span style={styles.modalActivityAmount}>0.25 SOL</span>
+                      <span style={styles.modalActivityTime}>5m ago</span>
+                    </div>
+                    <div style={styles.modalActivityItem}>
+                      <span style={{...styles.modalActivitySide, color: COLORS.success}}>YES</span>
+                      <span style={styles.modalActivityAmount}>1.0 SOL</span>
+                      <span style={styles.modalActivityTime}>12m ago</span>
+                    </div>
+                  </>
+                ) : (
+                  <div style={styles.noActivity}>
+                    <span style={{opacity: 0.6}}>No bets yet - be the first!</span>
+                  </div>
+                )}
+              </div>
             </div>
 
             {txStatus && (
@@ -2632,6 +2715,132 @@ const styles = {
     fontSize: '14px',
     color: COLORS.textMuted,
     marginTop: '20px'
+  },
+  // Chart and Activity Styles
+  chartSection: {
+    marginBottom: '20px',
+    padding: '16px',
+    background: `${COLORS.bgCard}`,
+    borderRadius: '12px',
+    border: `1px solid ${COLORS.border}`
+  },
+  chartTitle: {
+    fontSize: '13px',
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    marginBottom: '12px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px'
+  },
+  oddsChartContainer: {
+    marginBottom: '16px'
+  },
+  oddsChartBar: {
+    display: 'flex',
+    height: '48px',
+    borderRadius: '8px',
+    overflow: 'hidden',
+    background: COLORS.bgDark
+  },
+  oddsChartYes: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '0 12px',
+    background: `linear-gradient(135deg, ${COLORS.success}dd, ${COLORS.success}99)`,
+    color: '#000',
+    fontWeight: '600',
+    fontSize: '14px',
+    minWidth: '60px',
+    transition: 'width 0.3s ease'
+  },
+  oddsChartNo: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '0 12px',
+    background: `linear-gradient(135deg, ${COLORS.error}dd, ${COLORS.error}99)`,
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: '14px',
+    minWidth: '60px',
+    transition: 'width 0.3s ease'
+  },
+  oddsChartLabel: {
+    fontSize: '12px',
+    opacity: 0.9
+  },
+  oddsChartValue: {
+    fontFamily: 'JetBrains Mono, monospace',
+    fontSize: '14px'
+  },
+  poolStats: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, 1fr)',
+    gap: '12px'
+  },
+  poolStatItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    padding: '10px 8px',
+    background: COLORS.bgDark,
+    borderRadius: '8px'
+  },
+  poolStatLabel: {
+    fontSize: '10px',
+    color: COLORS.textMuted,
+    textTransform: 'uppercase',
+    marginBottom: '4px'
+  },
+  poolStatValue: {
+    fontSize: '14px',
+    fontWeight: '600',
+    fontFamily: 'JetBrains Mono, monospace',
+    color: COLORS.textPrimary
+  },
+  modalActivitySection: {
+    marginBottom: '20px',
+    padding: '16px',
+    background: `${COLORS.bgCard}`,
+    borderRadius: '12px',
+    border: `1px solid ${COLORS.border}`
+  },
+  modalActivityList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px'
+  },
+  modalActivityItem: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '10px 12px',
+    background: COLORS.bgDark,
+    borderRadius: '8px',
+    fontSize: '13px'
+  },
+  modalActivitySide: {
+    fontWeight: '600',
+    width: '40px'
+  },
+  modalActivityAmount: {
+    flex: 1,
+    textAlign: 'center',
+    fontFamily: 'JetBrains Mono, monospace',
+    color: COLORS.textPrimary
+  },
+  modalActivityTime: {
+    color: COLORS.textMuted,
+    fontSize: '12px',
+    width: '60px',
+    textAlign: 'right'
+  },
+  noActivity: {
+    padding: '20px',
+    textAlign: 'center',
+    color: COLORS.textMuted,
+    fontSize: '13px'
   }
 }
 
