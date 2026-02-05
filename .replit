@@ -1,11 +1,11 @@
 run = "npm run start"
 entrypoint = "api/src/index.js"
-modules = ["nodejs-20:v8-20230920-bd784b9"]
+modules = ["nodejs-20", "web", "nix"]
 
 hidden = [".config", "package-lock.json"]
 
 [nix]
-channel = "stable-23_11"
+channel = "stable-25_05"
 
 [deployment]
 run = ["sh", "-c", "npm run start"]
