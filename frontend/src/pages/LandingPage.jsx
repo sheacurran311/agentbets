@@ -70,13 +70,13 @@ export default function LandingPage() {
         <div style={styles.metricsRow}>
           <div style={styles.metricCard}>
             <span className="step-num">MARKETS</span>
-            <span className="metric-value">{stats?.markets?.total || '15'}+</span>
+            <span className="metric-value">{stats?.markets?.active || '0'}</span>
             <span style={{color: COLORS.textMuted, fontSize: '13px'}}>Active predictions</span>
           </div>
           <div style={styles.metricCard}>
             <span className="step-num">VOLUME</span>
-            <span className="metric-value">{stats?.bets?.totalVolume ? `${(stats.bets.totalVolume).toFixed(1)}` : '2.4K'}</span>
-            <span style={{color: COLORS.textMuted, fontSize: '13px'}}>SOL traded</span>
+            <span className="metric-value">${stats?.bets?.totalVolumeUSDC ? stats.bets.totalVolumeUSDC.toLocaleString() : '0'}</span>
+            <span style={{color: COLORS.textMuted, fontSize: '13px'}}>USDC traded</span>
           </div>
           <div style={styles.metricCard}>
             <span className="step-num">AGENTS</span>

@@ -10,7 +10,10 @@
 
 require('dotenv').config();
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const { CronJob } = require('cron');
+const schedule = require('node-schedule');
 const TwitterService = require('./twitter');
 const BetParser = require('./parser');
 const AgentVerifier = require('./verifier');
@@ -18,7 +21,130 @@ const ResolutionEngine = require('./resolver');
 const AgentBetsAPI = require('./api-client');
 
 const app = express();
+app.use(express.json());
 const PORT = process.env.BOT_PORT || 3003;
+
+// Persistence file path
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
+const PENDING_RESOLUTIONS_FILE = path.join(DATA_DIR, 'pending-resolutions.json');
+const PROCESSED_TWEETS_FILE = path.join(DATA_DIR, 'processed-tweets.json');
+
+/**
+ * Validate required environment variables
+ */
+function validateEnvironment() {
+  const required = {
+    TWITTER_BEARER_TOKEN: 'Required for X API follower verification',
+    AGENTBETS_API_URL: 'Required for API communication'
+  };
+
+  const optional = {
+    TWITTER_API_KEY: 'Required for posting tweets',
+    TWITTER_API_SECRET: 'Required for posting tweets',
+    TWITTER_ACCESS_TOKEN: 'Required for posting tweets',
+    TWITTER_ACCESS_SECRET: 'Required for posting tweets',
+    MOLTBOOK_API_KEY: 'Required for Moltbook agent verification',
+    GITHUB_TOKEN: 'Required for GitHub-based resolution'
+  };
+
+  console.log('\n[Config] Checking environment variables...');
+  
+  let hasErrors = false;
+  for (const [key, description] of Object.entries(required)) {
+    if (!process.env[key]) {
+      console.error(`[Config] ERROR: Missing required env var: ${key}`);
+      console.error(`        ${description}`);
+      hasErrors = true;
+    } else {
+      console.log(`[Config] ✓ ${key} is configured`);
+    }
+  }
+
+  for (const [key, description] of Object.entries(optional)) {
+    if (!process.env[key]) {
+      console.warn(`[Config] WARNING: Missing optional env var: ${key}`);
+      console.warn(`        ${description}`);
+    } else {
+      console.log(`[Config] ✓ ${key} is configured`);
+    }
+  }
+
+  if (hasErrors) {
+    console.error('\n[Config] Missing required environment variables!');
+    console.error('[Config] For Railway: Set these in your service variables');
+    console.error('[Config] For local dev: Copy .env.example to .env and fill in values\n');
+  }
+
+  return !hasErrors;
+}
+
+/**
+ * Ensure data directory exists
+ */
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    console.log(`[Persistence] Created data directory: ${DATA_DIR}`);
+  }
+}
+
+/**
+ * Load pending resolutions from disk
+ */
+function loadPendingResolutions() {
+  try {
+    if (fs.existsSync(PENDING_RESOLUTIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PENDING_RESOLUTIONS_FILE, 'utf8'));
+      console.log(`[Persistence] Loaded ${Object.keys(data).length} pending resolutions from disk`);
+      return new Map(Object.entries(data));
+    }
+  } catch (error) {
+    console.error('[Persistence] Error loading pending resolutions:', error.message);
+  }
+  return new Map();
+}
+
+/**
+ * Save pending resolutions to disk
+ */
+function savePendingResolutions() {
+  try {
+    ensureDataDir();
+    const data = Object.fromEntries(pendingResolutions);
+    fs.writeFileSync(PENDING_RESOLUTIONS_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('[Persistence] Error saving pending resolutions:', error.message);
+  }
+}
+
+/**
+ * Load processed tweets from disk
+ */
+function loadProcessedTweets() {
+  try {
+    if (fs.existsSync(PROCESSED_TWEETS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PROCESSED_TWEETS_FILE, 'utf8'));
+      console.log(`[Persistence] Loaded ${data.length} processed tweet IDs from disk`);
+      return new Set(data);
+    }
+  } catch (error) {
+    console.error('[Persistence] Error loading processed tweets:', error.message);
+  }
+  return new Set();
+}
+
+/**
+ * Save processed tweets to disk (keep last 10000 to prevent unbounded growth)
+ */
+function saveProcessedTweets() {
+  try {
+    ensureDataDir();
+    const tweets = Array.from(processedTweets).slice(-10000);
+    fs.writeFileSync(PROCESSED_TWEETS_FILE, JSON.stringify(tweets));
+  } catch (error) {
+    console.error('[Persistence] Error saving processed tweets:', error.message);
+  }
+}
 
 // Initialize services
 const twitter = new TwitterService();
@@ -27,10 +153,12 @@ const verifier = new AgentVerifier();
 const resolver = new ResolutionEngine();
 const agentbets = new AgentBetsAPI();
 
-// In-memory tracking (would use DB in production)
-const processedTweets = new Set();
-const pendingResolutions = new Map();
+// Load persisted data
+ensureDataDir();
+const processedTweets = loadProcessedTweets();
+const pendingResolutions = loadPendingResolutions();
 const notifiedMarkets = new Set(); // Track which markets we've sent reminders for
+const scheduledJobs = new Map(); // Track scheduled resolution jobs
 
 /**
  * Extract @handles from text (excluding the bot itself)
@@ -131,6 +259,122 @@ async function sendMarketReminders() {
       await new Promise(resolve => setTimeout(resolve, 3000));
     } catch (error) {
       console.error(`[Reminders] Failed to send reminder for ${marketId}:`, error.message);
+    }
+  }
+}
+
+/**
+ * Schedule a market resolution at its exact end time
+ * Uses node-schedule for precise timing instead of polling
+ */
+function scheduleMarketResolution(marketId, data) {
+  const endDate = new Date(data.endDate);
+  const now = new Date();
+
+  // If already past end date, resolve immediately
+  if (endDate <= now) {
+    console.log(`[Scheduler] Market ${marketId} already ended, resolving immediately`);
+    resolveMarket(marketId, data);
+    return;
+  }
+
+  // Cancel any existing job for this market
+  if (scheduledJobs.has(marketId)) {
+    scheduledJobs.get(marketId).cancel();
+    console.log(`[Scheduler] Cancelled existing job for market ${marketId}`);
+  }
+
+  // Schedule job at exact end time
+  const job = schedule.scheduleJob(marketId, endDate, async () => {
+    console.log(`[Scheduler] Executing scheduled resolution for market ${marketId}`);
+    await resolveMarket(marketId, data);
+    scheduledJobs.delete(marketId);
+  });
+
+  if (job) {
+    scheduledJobs.set(marketId, job);
+    console.log(`[Scheduler] Scheduled resolution for market ${marketId} at ${endDate.toISOString()}`);
+  } else {
+    console.error(`[Scheduler] Failed to schedule job for market ${marketId}`);
+  }
+}
+
+/**
+ * Resolve a single market - called by scheduler or polling
+ */
+async function resolveMarket(marketId, data) {
+  // Skip if we've already proposed a resolution
+  if (data.proposalStatus === 'proposed') {
+    console.log(`[Resolver] Market ${marketId} already has proposal, skipping`);
+    return;
+  }
+
+  console.log(`[Resolver] Resolving market ${marketId}...`);
+
+  try {
+    const result = await resolver.resolve(data);
+
+    if (!result.resolved) {
+      console.log(`[Resolver] Could not resolve market ${marketId}: ${result.error}`);
+      return;
+    }
+
+    console.log(`[Resolver] Resolved: ${result.outcome} (value: ${result.actualValue})`);
+
+    // Propose resolution on AgentBets (does NOT finalize - admin must confirm)
+    const confidence = result.confidence || 90;
+    const evidence = {
+      source: result.source,
+      actualValue: result.actualValue,
+      threshold: result.threshold,
+      data: result.data,
+      resolvedAt: new Date().toISOString()
+    };
+
+    const proposal = await agentbets.proposeResolution(
+      marketId,
+      result.outcome,
+      confidence,
+      evidence
+    );
+
+    if (!proposal.success) {
+      console.log(`[Resolver] Failed to propose resolution on API: ${proposal.error}`);
+      return;
+    }
+
+    console.log(`[Resolver] Resolution proposed for market ${marketId}`);
+    console.log(`[Resolver] Outcome: ${result.outcome} (confidence: ${confidence}%)`);
+
+    // Optionally announce the proposal
+    if (process.env.ANNOUNCE_PROPOSALS === 'true') {
+      await announceProposal(marketId, data, result);
+    }
+
+    // Mark as proposed so we don't re-propose
+    data.proposalStatus = 'proposed';
+    data.proposedAt = new Date().toISOString();
+    data.proposedResolution = result;
+    pendingResolutions.set(marketId, data);
+    savePendingResolutions();
+
+    console.log(`[Resolver] Market ${marketId} proposal complete, awaiting admin confirmation`);
+
+  } catch (error) {
+    console.error(`[Resolver] Error resolving market ${marketId}:`, error);
+  }
+}
+
+/**
+ * Reschedule all pending resolutions on startup
+ * This ensures we don't miss resolutions after a restart
+ */
+function rescheduleAllMarkets() {
+  console.log(`[Scheduler] Rescheduling ${pendingResolutions.size} pending markets...`);
+  
+  for (const [marketId, data] of pendingResolutions) {
+    if (data.proposalStatus !== 'proposed') {
+      scheduleMarketResolution(marketId, data);
     }
   }
 }
@@ -320,7 +564,7 @@ async function processMention(tweet) {
     console.log(`[Bot] Market created: ${market.market.id}`);
 
     // Track for auto-resolution
-    pendingResolutions.set(market.market.id, {
+    const marketData = {
       tweetId,
       authorHandle,
       question: betParams.question,
@@ -328,8 +572,14 @@ async function processMention(tweet) {
       resolution: betParams.resolution,
       threshold: betParams.threshold,
       targetHandle: betParams.targetHandle,
-      targetToken: betParams.targetToken
-    });
+      targetToken: betParams.targetToken,
+      createdAt: new Date().toISOString()
+    };
+    pendingResolutions.set(market.market.id, marketData);
+    savePendingResolutions();
+
+    // Schedule exact-time resolution
+    scheduleMarketResolution(market.market.id, marketData);
 
     // Reply with success - include Blink URL for direct betting
     const baseUrl = process.env.AGENTBETS_API_URL?.replace('/api', '') || 'https://agentbets.gg';
@@ -528,80 +778,44 @@ async function checkMentions() {
 }
 
 /**
- * Check and resolve ended markets
+ * Check and resolve ended markets (fallback for missed scheduled jobs)
+ * Primary resolution happens via node-schedule at exact end times
+ * This runs every minute as a safety net
  */
 async function checkResolutions() {
-  console.log(`[Resolver] Checking for markets to resolve...`);
+  console.log(`[Resolver] Fallback check for markets to resolve...`);
 
   const now = new Date();
+  let resolvedCount = 0;
 
   for (const [marketId, data] of pendingResolutions) {
     const endDate = new Date(data.endDate);
 
+    // Skip if not ended yet
     if (now < endDate) {
-      continue; // Not ended yet
+      continue;
     }
 
     // Skip if we've already proposed a resolution
     if (data.proposalStatus === 'proposed') {
-      continue; // Awaiting admin confirmation
+      continue;
     }
 
-    console.log(`[Resolver] Market ${marketId} has ended, checking resolution...`);
-
-    try {
-      const result = await resolver.resolve(data);
-
-      if (!result.resolved) {
-        console.log(`[Resolver] Could not resolve: ${result.error}`);
-        continue;
-      }
-
-      console.log(`[Resolver] Resolved: ${result.outcome} (value: ${result.actualValue})`);
-
-      // Propose resolution on AgentBets (does NOT finalize - admin must confirm)
-      const confidence = result.confidence || 90; // Use resolver's confidence or default to 90%
-      const evidence = {
-        source: result.source,
-        actualValue: result.actualValue,
-        threshold: result.threshold,
-        data: result.data
-      };
-
-      const proposal = await agentbets.proposeResolution(
-        marketId,
-        result.outcome,
-        confidence,
-        evidence
-      );
-
-      if (!proposal.success) {
-        console.log(`[Resolver] Failed to propose resolution on API: ${proposal.error}`);
-        continue;
-      }
-
-      console.log(`[Resolver] Resolution proposed for market ${marketId}`);
-      console.log(`[Resolver] Outcome: ${result.outcome} (confidence: ${confidence}%)`);
-      console.log(`[Resolver] Awaiting admin confirmation at: ${process.env.AGENTBETS_API_URL}/markets/pending-resolutions`);
-
-      // Optionally announce the proposal (can be disabled if you want to wait for admin only)
-      if (process.env.ANNOUNCE_PROPOSALS === 'true') {
-        await announceProposal(marketId, data, result);
-      }
-
-      // DO NOT announce final resolution yet - wait for admin confirmation
-      // DO NOT remove from pending yet - keep tracking until admin confirms
-      // Mark as proposed so we don't re-propose
-      data.proposalStatus = 'proposed';
-      data.proposedAt = new Date().toISOString();
-      data.proposedResolution = result; // Store for later announcement
-      pendingResolutions.set(marketId, data);
-
-      console.log(`[Resolver] Market ${marketId} proposal complete, awaiting admin confirmation`);
-
-    } catch (error) {
-      console.error(`[Resolver] Error resolving market ${marketId}:`, error);
+    // Check if there's already a scheduled job for this market
+    // If so, the scheduled job should handle it
+    if (scheduledJobs.has(marketId)) {
+      console.log(`[Resolver] Market ${marketId} has scheduled job, skipping fallback`);
+      continue;
     }
+
+    // No scheduled job and market has ended - resolve now
+    console.log(`[Resolver] Market ${marketId} missed scheduled resolution, resolving via fallback...`);
+    await resolveMarket(marketId, data);
+    resolvedCount++;
+  }
+
+  if (resolvedCount > 0) {
+    console.log(`[Resolver] Fallback resolved ${resolvedCount} markets`);
   }
 }
 
@@ -673,8 +887,14 @@ app.post('/webhook/resolution-confirmed', async (req, res) => {
 
   await announceResolution(marketId, trackedData, result);
 
-  // Remove from pending
+  // Remove from pending and cancel any scheduled job
   pendingResolutions.delete(marketId);
+  savePendingResolutions();
+  
+  if (scheduledJobs.has(marketId)) {
+    scheduledJobs.get(marketId).cancel();
+    scheduledJobs.delete(marketId);
+  }
 
   console.log(`[Webhook] Market ${marketId} final resolution announced`);
 
@@ -695,6 +915,13 @@ app.listen(PORT, () => {
 ╚═══════════════════════════════════════════════════════════╝
   `);
 
+  // Validate environment variables
+  const envValid = validateEnvironment();
+
+  // Reschedule all pending market resolutions from persistence
+  rescheduleAllMarkets();
+  console.log(`[Bot] Scheduled ${scheduledJobs.size} market resolutions at exact end times`);
+
   // Initial check
   if (process.env.TWITTER_BEARER_TOKEN) {
     console.log('[Bot] Twitter credentials configured, starting polling...');
@@ -703,20 +930,59 @@ app.listen(PORT, () => {
     const mentionJob = new CronJob('*/2 * * * *', checkMentions);
     mentionJob.start();
 
-    // Check resolutions every 15 minutes
-    const resolveJob = new CronJob('*/15 * * * *', checkResolutions);
+    // Check resolutions every minute (fallback for missed scheduled jobs)
+    // Primary resolution happens via node-schedule at exact end times
+    const resolveJob = new CronJob('* * * * *', checkResolutions);
     resolveJob.start();
 
     // Send market reminders every hour (for markets ending within 24h)
     const reminderJob = new CronJob('0 * * * *', sendMarketReminders);
     reminderJob.start();
 
+    // Save processed tweets periodically (every 5 minutes)
+    const saveJob = new CronJob('*/5 * * * *', () => {
+      saveProcessedTweets();
+    });
+    saveJob.start();
+
     // Initial check on startup
     setTimeout(checkMentions, 5000);
   } else {
     console.log('[Bot] No Twitter credentials - running in demo mode');
     console.log('[Bot] Set TWITTER_BEARER_TOKEN to enable Twitter integration');
+    
+    if (!envValid) {
+      console.error('[Bot] WARNING: Missing required environment variables for follower verification!');
+      console.error('[Bot] Bets requiring X API verification will fail to resolve.');
+    }
   }
+});
+
+// Graceful shutdown - save state before exit
+process.on('SIGTERM', () => {
+  console.log('[Bot] Received SIGTERM, saving state...');
+  savePendingResolutions();
+  saveProcessedTweets();
+  
+  // Cancel all scheduled jobs
+  for (const [marketId, job] of scheduledJobs) {
+    job.cancel();
+  }
+  
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('[Bot] Received SIGINT, saving state...');
+  savePendingResolutions();
+  saveProcessedTweets();
+  
+  // Cancel all scheduled jobs
+  for (const [marketId, job] of scheduledJobs) {
+    job.cancel();
+  }
+  
+  process.exit(0);
 });
 
 module.exports = app;

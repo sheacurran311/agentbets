@@ -39,13 +39,13 @@ const COLORS = {
 
   // Text - better contrast hierarchy
   textPrimary: '#FFFFFF',
-  textSecondary: '#B8B8C8',
-  textMuted: '#5A5A6E',
+  textSecondary: '#D0D0DC',
+  textMuted: '#9090A8',
   textAccent: '#14F195',
 
   // Borders
-  border: 'rgba(255, 255, 255, 0.04)',
-  borderLight: 'rgba(255, 255, 255, 0.08)',
+  border: 'rgba(255, 255, 255, 0.08)',
+  borderLight: 'rgba(255, 255, 255, 0.12)',
   borderGlow: 'rgba(20, 241, 149, 0.3)',
 
   // Gradients
@@ -342,6 +342,16 @@ const GlobalStyles = () => (
       color: ${COLORS.textPrimary};
     }
 
+    /* Prevent horizontal overflow */
+    html, body {
+      overflow-x: hidden !important;
+      max-width: 100vw !important;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
     /* Mobile Responsiveness */
     @media (max-width: 1024px) {
       .sidebar {
@@ -355,6 +365,8 @@ const GlobalStyles = () => (
       }
       .main {
         margin-left: 0 !important;
+        width: 100% !important;
+        max-width: 100vw !important;
       }
       .mobile-menu-btn {
         display: flex !important;
@@ -473,14 +485,196 @@ const GlobalStyles = () => (
     /* Smooth hover effects */
     .market-card:hover {
       box-shadow: 0 8px 32px rgba(20, 241, 149, 0.1);
+      transform: translateY(-4px);
+    }
+
+    /* Market Grid Responsive */
+    @media (max-width: 1200px) {
+      .market-grid {
+        grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)) !important;
+        gap: 20px !important;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .market-grid {
+        grid-template-columns: 1fr !important;
+        gap: 16px !important;
+        padding: 0 8px !important;
+      }
+      .market-card {
+        min-height: auto !important;
+        max-width: none !important;
+        padding: 20px !important;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .market-card {
+        padding: 16px !important;
+        border-radius: 16px !important;
+      }
+    }
+
+    /* Modal Responsive */
+    .bet-modal {
+      transition: all 0.3s ease;
+    }
+
+    /* Responsive modal for tablets */
+    @media (max-width: 900px) {
+      .bet-modal {
+        width: 95vw !important;
+        max-width: 95vw !important;
+      }
+      .modal-main-layout {
+        grid-template-columns: 1fr !important;
+        gap: 16px !important;
+      }
+      .modal-betting-panel {
+        order: -1 !important;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .bet-modal {
+        width: 100% !important;
+        max-width: 100% !important;
+        max-height: 95vh !important;
+        border-radius: 20px 20px 0 0 !important;
+        position: fixed !important;
+        bottom: 0 !important;
+        margin: 0 !important;
+        padding: 20px !important;
+      }
+      .modal-main-layout {
+        grid-template-columns: 1fr !important;
+        gap: 12px !important;
+      }
+      .pool-stats-row {
+        grid-template-columns: repeat(2, 1fr) !important;
+      }
+    }
+
+    /* Smooth scrolling for modal */
+    .bet-modal::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .bet-modal::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .bet-modal::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+    }
+
+    .bet-modal::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.2);
     }
   `}</style>
 )
 
+/**
+ * Mini Sparkline Chart Component
+ * Renders a small SVG line chart for odds or price history
+ */
+const MiniSparkline = memo(({ data, color = COLORS.primary, height = 32, showDots = false }) => {
+  if (!data || data.length < 2) {
+    // Show a flat line if no data
+    return (
+      <svg width="100%" height={height} viewBox="0 0 100 32" preserveAspectRatio="none">
+        <line x1="0" y1="16" x2="100" y2="16" stroke={color} strokeWidth="1.5" opacity="0.3" strokeDasharray="4" />
+      </svg>
+    );
+  }
+
+  const values = data.map(d => typeof d === 'number' ? d : d.value || d.yesOdds || 0);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  // Create path points
+  const points = values.map((val, i) => {
+    const x = (i / (values.length - 1)) * 100;
+    const y = 32 - ((val - min) / range) * 28 - 2; // 2px padding top/bottom
+    return `${x},${y}`;
+  });
+
+  const pathD = `M${points.join(' L')}`;
+
+  // Create area fill path
+  const areaD = `M0,32 L${points.join(' L')} L100,32 Z`;
+
+  return (
+    <svg width="100%" height={height} viewBox="0 0 100 32" preserveAspectRatio="none">
+      {/* Area fill */}
+      <path d={areaD} fill={`${color}15`} />
+      {/* Line */}
+      <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      {/* End dot */}
+      {showDots && values.length > 0 && (
+        <circle 
+          cx="100" 
+          cy={32 - ((values[values.length - 1] - min) / range) * 28 - 2} 
+          r="2.5" 
+          fill={color} 
+        />
+      )}
+    </svg>
+  );
+});
+
+/**
+ * Verification Badge Component
+ * Shows the verification source with appropriate icon
+ */
+const VerificationBadge = memo(({ source, url }) => {
+  const getSourceInfo = () => {
+    switch(source) {
+      case 'coingecko':
+        return { icon: '🦎', label: 'CoinGecko', color: COLORS.success };
+      case 'dexscreener':
+        return { icon: '📊', label: 'DexScreener', color: COLORS.secondary };
+      case 'x-api':
+        return { icon: '𝕏', label: 'X API', color: '#1DA1F2' };
+      case 'moltbook':
+        return { icon: '📖', label: 'Moltbook', color: COLORS.accent };
+      case 'github':
+        return { icon: '🐙', label: 'GitHub', color: '#6e5494' };
+      case 'colosseum':
+        return { icon: '🏛️', label: 'Colosseum', color: COLORS.warning };
+      default:
+        return { icon: '🔍', label: 'Manual', color: COLORS.textMuted };
+    }
+  };
+
+  const info = getSourceInfo();
+
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: '4px',
+      fontSize: '10px',
+      color: info.color,
+      background: `${info.color}15`,
+      padding: '3px 8px',
+      borderRadius: '4px',
+      fontWeight: '500'
+    }}>
+      <span>{info.icon}</span>
+      <span>{info.label}</span>
+    </div>
+  );
+});
+
 // Resolution source options for markets
 const RESOLUTION_SOURCES = [
   { id: 'manual', label: 'Manual Resolution', description: 'Resolved by platform admins' },
-  { id: 'dexscreener', label: 'DexScreener', description: 'Token price/mcap from DexScreener API' },
+  { id: 'coingecko', label: 'CoinGecko (Recommended)', description: 'Official TOKEN price/mcap - single source of truth' },
+  { id: 'dexscreener', label: 'DexScreener Pool', description: 'Specific POOL price only (requires exact pool URL)' },
   { id: 'x-api', label: 'X/Twitter API', description: 'Followers, engagement metrics' },
   { id: 'moltbook', label: 'Moltbook', description: 'Agent karma, stats from Moltbook' },
   { id: 'colosseum', label: 'Colosseum', description: 'Hackathon results from Colosseum' },
@@ -510,6 +704,7 @@ function App() {
   const [liveActivity, setLiveActivity] = useState([])
   const [isLive, setIsLive] = useState(true)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [oddsHistoryCache, setOddsHistoryCache] = useState({}) // Cache for odds history per market
 
   // Enhanced market creation form with useReducer for cleaner state management
   const initialMarketState = {
@@ -633,8 +828,8 @@ function App() {
     } catch (err) {
       // Generate mock activity if endpoint doesn't exist
       const mockActivities = [
-        { type: 'bet', user: '7xK...4Dm', market: 'Will $AIXBT reach $2B?', side: 'YES', amount: 0.5, time: Date.now() - 30000 },
-        { type: 'bet', user: '3Fg...9Jk', market: 'Will @truth_terminal post today?', side: 'NO', amount: 0.25, time: Date.now() - 120000 },
+        { type: 'bet', user: '7xK...4Dm', market: 'Will $AIXBT reach $2B?', side: 'YES', amount: 50, time: Date.now() - 30000 },
+        { type: 'bet', user: '3Fg...9Jk', market: 'Will @truth_terminal post today?', side: 'NO', amount: 25, time: Date.now() - 120000 },
         { type: 'market', user: '@AIButters', market: 'New market created', time: Date.now() - 300000 }
       ]
       setLiveActivity(mockActivities)
@@ -689,11 +884,52 @@ function App() {
     try {
       const res = await fetch(`${API_BASE}/markets`)
       const data = await res.json()
-      setMarkets(data.markets || [])
+      const marketList = data.markets || []
+      setMarkets(marketList)
+      
+      // Fetch odds history for first 12 markets (visible on initial load)
+      const historyPromises = marketList.slice(0, 12).map(async (market) => {
+        try {
+          const histRes = await fetch(`${API_BASE}/markets/${market.id}/history?limit=10`)
+          const histData = await histRes.json()
+          return { marketId: market.id, history: histData.history || [] }
+        } catch {
+          return { marketId: market.id, history: [] }
+        }
+      })
+      
+      const historyResults = await Promise.all(historyPromises)
+      const newCache = {}
+      historyResults.forEach(({ marketId, history }) => {
+        newCache[marketId] = history
+      })
+      setOddsHistoryCache(prev => ({ ...prev, ...newCache }))
     } catch (err) {
       console.error('Failed to fetch markets:', err)
     }
   }
+
+  // Fetch odds history for a specific market (for lazy loading)
+  const fetchOddsHistory = useCallback(async (marketId) => {
+    if (oddsHistoryCache[marketId]) return oddsHistoryCache[marketId]
+    
+    try {
+      const res = await fetch(`${API_BASE}/markets/${marketId}/history?limit=10`)
+      const data = await res.json()
+      const history = data.history || []
+      setOddsHistoryCache(prev => ({ ...prev, [marketId]: history }))
+      return history
+    } catch {
+      return []
+    }
+  }, [oddsHistoryCache])
+
+  // Fetch odds history when a market is selected (for modal)
+  useEffect(() => {
+    if (selectedMarket && !oddsHistoryCache[selectedMarket.id]) {
+      fetchOddsHistory(selectedMarket.id)
+    }
+  }, [selectedMarket, fetchOddsHistory, oddsHistoryCache])
 
   const fetchStats = async () => {
     try {
@@ -987,7 +1223,7 @@ function App() {
             </div>
             <div style={styles.statRow}>
               <span>Volume</span>
-              <span style={styles.statValue}>{stats.bets?.totalVolume?.toFixed(1) || 0} SOL</span>
+              <span style={styles.statValue}>${stats.bets?.totalVolumeUSDC?.toLocaleString() || 0}</span>
             </div>
             <div style={styles.statRow}>
               <span>Bets</span>
@@ -1010,7 +1246,7 @@ function App() {
                     <span style={{color: activity.side === 'YES' ? COLORS.success : COLORS.error}}>
                       {activity.side}
                     </span>
-                    <span style={styles.activityAmount}>{activity.amount} SOL</span>
+                    <span style={styles.activityAmount}>${activity.amount} USDC</span>
                     <span style={styles.activityMarket}>{activity.market?.substring(0, 20)}...</span>
                   </>
                 ) : (
@@ -1069,8 +1305,8 @@ function App() {
                   <span className="metric-value" style={{fontSize: '28px'}}>{filteredMarkets.filter(m => m.status === 'active' || !m.status).length}</span>
                 </div>
                 <div style={styles.heroStatCard}>
-                  <span className="step-num">24H VOLUME</span>
-                  <span className="metric-value" style={{fontSize: '28px'}}>{stats?.bets?.totalVolume ? (stats.bets.totalVolume / 1e9).toFixed(1) : '0'} SOL</span>
+                  <span className="step-num">VOLUME</span>
+                  <span className="metric-value" style={{fontSize: '28px'}}>${stats?.bets?.totalVolumeUSDC?.toLocaleString() || '0'}</span>
                 </div>
                 <div style={styles.heroStatCard}>
                   <span className="step-num">HOT</span>
@@ -1145,27 +1381,38 @@ function App() {
 
                       <h3 style={styles.marketQuestion}>{market.question}</h3>
 
-                      {/* Verification info - show if available */}
-                      {(market.verificationMethod || market.threshold) && (
-                        <div style={styles.verificationInfo}>
-                          {market.threshold && (
-                            <span style={styles.thresholdBadge}>
-                              {Icons2.check} {market.threshold}
-                            </span>
-                          )}
-                          {market.verificationUrl && (
-                            <a
-                              href={market.verificationUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={styles.verifyLink}
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              Verify {Icons2.externalLink}
-                            </a>
-                          )}
-                        </div>
-                      )}
+                      {/* Verification info and source badge */}
+                      <div style={styles.verificationInfo}>
+                        {market.resolutionSource && market.resolutionSource !== 'manual' && (
+                          <VerificationBadge source={market.resolutionSource} url={market.verificationUrl} />
+                        )}
+                        {market.threshold && (
+                          <span style={styles.thresholdBadge}>
+                            {Icons2.check} {market.threshold}
+                          </span>
+                        )}
+                        {market.verificationUrl && (
+                          <a
+                            href={market.verificationUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={styles.verifyLink}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            Verify {Icons2.externalLink}
+                          </a>
+                        )}
+                      </div>
+
+                      {/* Mini Sparkline Chart for Odds History */}
+                      <div style={styles.miniChartContainer}>
+                        <MiniSparkline 
+                          data={oddsHistoryCache[market.id] || []}
+                          color={market.yesOdds > 0.5 ? COLORS.success : COLORS.error}
+                          height={28}
+                          showDots={true}
+                        />
+                      </div>
 
                       <div style={styles.oddsBar}>
                         <div
@@ -1190,10 +1437,7 @@ function App() {
                         <span style={styles.footerStat}>
                           <span style={styles.footerIcon}>{Icons.dollarSign}</span>
                           <span style={{fontFamily: 'JetBrains Mono, monospace', color: COLORS.primary}}>
-                            {market.onChain || market.currency === 'USDC'
-                              ? `${(market.totalVolume / 1e6).toFixed(2)} USDC`
-                              : `${formatSOL(market.totalVolume)} SOL`
-                            }
+                            ${(market.totalVolume / 1e6).toFixed(0)} USDC
                           </span>
                         </span>
                         <span style={styles.footerStat}>
@@ -1209,7 +1453,7 @@ function App() {
 
                       {/* End date detail */}
                       <div style={styles.endDateRow}>
-                        <span style={{fontFamily: 'JetBrains Mono, monospace', fontSize: '10px', opacity: 0.6}}>ENDS (UTC)</span>
+                        <span style={{fontFamily: 'JetBrains Mono, monospace', fontSize: '10px', color: COLORS.textMuted}}>ENDS (UTC)</span>
                         <span style={{marginLeft: '8px'}}>
                           {new Date(market.endDate).toLocaleString('en-US', {
                             timeZone: 'UTC',
@@ -1252,7 +1496,7 @@ function App() {
                     // Token Templates
                     { icon: '&#128176;', label: 'Token Price', template: 'Will $TOKEN reach $X mcap by DATE?', category: 'token' },
                     { icon: '&#128640;', label: 'Token Launch', template: 'Will $TOKEN launch by DATE?', category: 'token' },
-                    { icon: '&#127775;', label: 'NFT Floor', template: 'Will COLLECTION NFT floor exceed X SOL by DATE?', category: 'token' },
+                    { icon: '&#127775;', label: 'NFT Floor', template: 'Will COLLECTION NFT floor exceed $X by DATE?', category: 'token' },
                     // Competition Templates
                     { icon: '&#127942;', label: 'Hackathon', template: 'Will PROJECT win the Colosseum hackathon?', category: 'competition' },
                     { icon: '&#127941;', label: 'Top 3', template: 'Will PROJECT finish top 3 in COMPETITION?', category: 'competition' },
@@ -1516,9 +1760,9 @@ function App() {
       {/* Bet Modal */}
       {selectedMarket && (
         <div style={styles.modalOverlay} onClick={() => { setSelectedMarket(null); setTxStatus(null); }}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+          <div style={styles.modal} className="bet-modal" onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
-              <h2>Place Your Bet</h2>
+              <h2 style={{fontSize: '20px', fontWeight: '600', color: COLORS.textPrimary}}>Place Your Bet</h2>
               <button style={styles.closeBtn} onClick={() => { setSelectedMarket(null); setTxStatus(null); }}>
                 {Icons.x}
               </button>
@@ -1565,235 +1809,216 @@ function App() {
               )}
             </div>
 
-            {/* Live Odds Chart - Visual representation of YES/NO pools */}
-            <div style={styles.chartSection}>
-              <h4 style={styles.chartTitle}>Odds History</h4>
+            {/* Main Content: Chart + Betting Side by Side */}
+            <div style={styles.modalMainLayout} className="modal-main-layout">
+              {/* LEFT: Chart Section - Main Focus */}
+              <div style={styles.modalChartSection}>
+                <h4 style={styles.chartTitle}>Odds History</h4>
 
-              {/* Mini Line Chart */}
-              <div style={styles.miniChartContainer}>
-                <svg width="100%" height="80" viewBox="0 0 300 80" preserveAspectRatio="none">
-                  {/* Grid lines */}
-                  <line x1="0" y1="20" x2="300" y2="20" stroke={COLORS.border} strokeWidth="1" strokeDasharray="4"/>
-                  <line x1="0" y1="40" x2="300" y2="40" stroke={COLORS.border} strokeWidth="1" strokeDasharray="4"/>
-                  <line x1="0" y1="60" x2="300" y2="60" stroke={COLORS.border} strokeWidth="1" strokeDasharray="4"/>
+                {/* Large Real-time Line Chart */}
+                <div style={styles.modalLargeChart}>
+                  {(() => {
+                    const history = oddsHistoryCache[selectedMarket.id] || [];
+                    const dataPoints = history.length >= 2 ? history : [
+                      { yesOdds: 0.5, noOdds: 0.5 },
+                      { yesOdds: selectedMarket.yesOdds, noOdds: selectedMarket.noOdds }
+                    ];
+                    
+                    const chartWidth = 500;
+                    const chartHeight = 200;
+                    const padding = { left: 35, right: 10, top: 10, bottom: 25 };
+                    const innerWidth = chartWidth - padding.left - padding.right;
+                    const innerHeight = chartHeight - padding.top - padding.bottom;
+                    
+                    // Calculate path points for YES and NO
+                    const yesPoints = dataPoints.map((d, i) => {
+                      const x = padding.left + (i / (dataPoints.length - 1)) * innerWidth;
+                      const y = padding.top + (1 - d.yesOdds) * innerHeight;
+                      return `${x},${y}`;
+                    });
+                    
+                    const noPoints = dataPoints.map((d, i) => {
+                      const x = padding.left + (i / (dataPoints.length - 1)) * innerWidth;
+                      const y = padding.top + (1 - d.noOdds) * innerHeight;
+                      return `${x},${y}`;
+                    });
+                    
+                    const yesPath = `M${yesPoints.join(' L')}`;
+                    const noPath = `M${noPoints.join(' L')}`;
+                    const yesAreaPath = `M${padding.left},${chartHeight - padding.bottom} L${yesPoints.join(' L')} L${chartWidth - padding.right},${chartHeight - padding.bottom} Z`;
+                    
+                    return (
+                      <svg width="100%" height="200" viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="xMidYMid meet" style={{display: 'block'}}>
+                        {/* Grid lines */}
+                        {[0, 25, 50, 75, 100].map(pct => {
+                          const y = padding.top + ((100 - pct) / 100) * innerHeight;
+                          return (
+                            <g key={pct}>
+                              <line x1={padding.left} y1={y} x2={chartWidth - padding.right} y2={y} stroke={COLORS.border} strokeWidth="1" strokeDasharray="4"/>
+                              <text x={padding.left - 5} y={y + 3} fill={COLORS.textMuted} fontSize="10" fontFamily="JetBrains Mono" textAnchor="end">{pct}%</text>
+                            </g>
+                          );
+                        })}
+                        
+                        {/* YES area fill */}
+                        <path d={yesAreaPath} fill={`${COLORS.success}15`} />
+                        
+                        {/* YES line */}
+                        <path d={yesPath} fill="none" stroke={COLORS.success} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                        
+                        {/* NO line */}
+                        <path d={noPath} fill="none" stroke={COLORS.error} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                        
+                        {/* Current value dots */}
+                        <circle cx={chartWidth - padding.right} cy={padding.top + (1 - selectedMarket.yesOdds) * innerHeight} r="6" fill={COLORS.success} />
+                        <circle cx={chartWidth - padding.right} cy={padding.top + (1 - selectedMarket.noOdds) * innerHeight} r="6" fill={COLORS.error} />
+                        
+                        {/* Data point indicator */}
+                        <text x={chartWidth - padding.right} y={chartHeight - 5} fill={COLORS.textMuted} fontSize="9" fontFamily="JetBrains Mono" textAnchor="end">
+                          {dataPoints.length} data points
+                        </text>
+                      </svg>
+                    );
+                  })()}
+                </div>
 
-                  {/* YES Line (green) - simulated history trending to current odds */}
-                  <path
-                    d={`M0,${80 - (selectedMarket.yesOdds * 0.7 + 0.1) * 80}
-                        Q50,${80 - (selectedMarket.yesOdds * 0.6 + 0.15) * 80}
-                        100,${80 - (selectedMarket.yesOdds * 0.8 + 0.05) * 80}
-                        T150,${80 - (selectedMarket.yesOdds * 0.75 + 0.1) * 80}
-                        T200,${80 - (selectedMarket.yesOdds * 0.9) * 80}
-                        T250,${80 - (selectedMarket.yesOdds * 0.95) * 80}
-                        T300,${80 - selectedMarket.yesOdds * 80}`}
-                    fill="none"
-                    stroke={COLORS.success}
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                  />
-                  {/* Area fill for YES */}
-                  <path
-                    d={`M0,${80 - (selectedMarket.yesOdds * 0.7 + 0.1) * 80}
-                        Q50,${80 - (selectedMarket.yesOdds * 0.6 + 0.15) * 80}
-                        100,${80 - (selectedMarket.yesOdds * 0.8 + 0.05) * 80}
-                        T150,${80 - (selectedMarket.yesOdds * 0.75 + 0.1) * 80}
-                        T200,${80 - (selectedMarket.yesOdds * 0.9) * 80}
-                        T250,${80 - (selectedMarket.yesOdds * 0.95) * 80}
-                        T300,${80 - selectedMarket.yesOdds * 80}
-                        L300,80 L0,80 Z`}
-                    fill={`${COLORS.success}15`}
-                  />
+                {/* Chart Legend */}
+                <div style={styles.chartLegendLarge}>
+                  <div style={styles.chartLegendItemLarge}>
+                    <span style={{...styles.chartLegendDotLarge, background: COLORS.success}}></span>
+                    <span style={{color: COLORS.success, fontWeight: '700', fontSize: '18px'}}>{formatOdds(selectedMarket.yesOdds)}</span>
+                    <span style={{color: COLORS.textMuted, fontSize: '13px', marginLeft: '4px'}}>YES</span>
+                  </div>
+                  <div style={styles.chartLegendItemLarge}>
+                    <span style={{...styles.chartLegendDotLarge, background: COLORS.error}}></span>
+                    <span style={{color: COLORS.error, fontWeight: '700', fontSize: '18px'}}>{formatOdds(selectedMarket.noOdds)}</span>
+                    <span style={{color: COLORS.textMuted, fontSize: '13px', marginLeft: '4px'}}>NO</span>
+                  </div>
+                </div>
 
-                  {/* NO Line (red) - inverse of YES */}
-                  <path
-                    d={`M0,${80 - (selectedMarket.noOdds * 0.7 + 0.1) * 80}
-                        Q50,${80 - (selectedMarket.noOdds * 0.6 + 0.15) * 80}
-                        100,${80 - (selectedMarket.noOdds * 0.8 + 0.05) * 80}
-                        T150,${80 - (selectedMarket.noOdds * 0.75 + 0.1) * 80}
-                        T200,${80 - (selectedMarket.noOdds * 0.9) * 80}
-                        T250,${80 - (selectedMarket.noOdds * 0.95) * 80}
-                        T300,${80 - selectedMarket.noOdds * 80}`}
-                    fill="none"
-                    stroke={COLORS.error}
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                  />
-
-                  {/* Current value dots */}
-                  <circle cx="300" cy={80 - selectedMarket.yesOdds * 80} r="4" fill={COLORS.success}/>
-                  <circle cx="300" cy={80 - selectedMarket.noOdds * 80} r="4" fill={COLORS.error}/>
-                </svg>
-                <div style={styles.chartLegend}>
-                  <span style={{...styles.chartLegendItem, color: COLORS.success}}>
-                    <span style={{...styles.chartLegendDot, background: COLORS.success}}></span>
-                    YES {formatOdds(selectedMarket.yesOdds)}
-                  </span>
-                  <span style={{...styles.chartLegendItem, color: COLORS.error}}>
-                    <span style={{...styles.chartLegendDot, background: COLORS.error}}></span>
-                    NO {formatOdds(selectedMarket.noOdds)}
-                  </span>
+                {/* Pool Stats Row */}
+                <div style={styles.poolStatsRow} className="pool-stats-row">
+                  <div style={styles.poolStatItemCompact}>
+                    <span style={styles.poolStatLabelSmall}>Volume</span>
+                    <span style={{...styles.poolStatValueSmall, color: COLORS.primary}}>
+                      ${(selectedMarket.totalVolume / 1e6).toFixed(0)}
+                    </span>
+                  </div>
+                  <div style={styles.poolStatItemCompact}>
+                    <span style={styles.poolStatLabelSmall}>Bets</span>
+                    <span style={styles.poolStatValueSmall}>{selectedMarket.totalBets || 0}</span>
+                  </div>
+                  <div style={styles.poolStatItemCompact}>
+                    <span style={styles.poolStatLabelSmall}>YES Pool</span>
+                    <span style={{...styles.poolStatValueSmall, color: COLORS.success}}>
+                      ${(selectedMarket.yesPool / 1e6).toFixed(0)}
+                    </span>
+                  </div>
+                  <div style={styles.poolStatItemCompact}>
+                    <span style={styles.poolStatLabelSmall}>NO Pool</span>
+                    <span style={{...styles.poolStatValueSmall, color: COLORS.error}}>
+                      ${(selectedMarket.noPool / 1e6).toFixed(0)}
+                    </span>
+                  </div>
                 </div>
               </div>
 
-              {/* Live Order Book Style Display */}
-              <div style={styles.orderBookContainer}>
-                <div style={styles.orderBookSide}>
-                  <div style={styles.orderBookHeader}>
-                    <span style={{color: COLORS.success}}>YES</span>
-                    <span>{formatOdds(selectedMarket.yesOdds)}</span>
-                  </div>
-                  <div style={{
-                    ...styles.orderBookBar,
-                    background: `linear-gradient(90deg, ${COLORS.success}40 ${selectedMarket.yesOdds * 100}%, transparent ${selectedMarket.yesOdds * 100}%)`
-                  }}>
-                    <span style={styles.orderBookPool}>{(selectedMarket.yesPool / 1e9).toFixed(2)} SOL</span>
-                  </div>
-                </div>
-                <div style={styles.orderBookSide}>
-                  <div style={styles.orderBookHeader}>
-                    <span style={{color: COLORS.error}}>NO</span>
-                    <span>{formatOdds(selectedMarket.noOdds)}</span>
-                  </div>
-                  <div style={{
-                    ...styles.orderBookBar,
-                    background: `linear-gradient(90deg, ${COLORS.error}40 ${selectedMarket.noOdds * 100}%, transparent ${selectedMarket.noOdds * 100}%)`
-                  }}>
-                    <span style={styles.orderBookPool}>{(selectedMarket.noPool / 1e9).toFixed(2)} SOL</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Pool Stats */}
-              <div style={styles.poolStats}>
-                <div style={styles.poolStatItem}>
-                  <span style={styles.poolStatLabel}>Total Volume</span>
-                  <span style={{...styles.poolStatValue, color: COLORS.primary}}>
-                    {(selectedMarket.totalVolume / 1e9).toFixed(2)} SOL
-                  </span>
-                </div>
-                <div style={styles.poolStatItem}>
-                  <span style={styles.poolStatLabel}>Total Bets</span>
-                  <span style={styles.poolStatValue}>{selectedMarket.totalBets || 0}</span>
-                </div>
-                <div style={styles.poolStatItem}>
-                  <span style={styles.poolStatLabel}>Created</span>
-                  <span style={styles.poolStatValue}>
-                    {new Date(selectedMarket.createdAt).toLocaleDateString('en-US', {month: 'short', day: 'numeric'})}
-                  </span>
-                </div>
-                <div style={styles.poolStatItem}>
-                  <span style={styles.poolStatLabel}>Ends</span>
-                  <span style={styles.poolStatValue}>
-                    {new Date(selectedMarket.endDate).toLocaleDateString('en-US', {month: 'short', day: 'numeric'})}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Recent Activity - Mini orderbook style */}
-            <div style={styles.modalActivitySection}>
-              <h4 style={styles.chartTitle}>Recent Activity</h4>
-              <div style={styles.modalActivityList}>
-                {selectedMarket.totalBets > 0 ? (
-                  <>
-                    <div style={styles.modalActivityItem}>
-                      <span style={{...styles.modalActivitySide, color: COLORS.success}}>YES</span>
-                      <span style={styles.modalActivityAmount}>0.5 SOL</span>
-                      <span style={styles.modalActivityTime}>2m ago</span>
-                    </div>
-                    <div style={styles.modalActivityItem}>
-                      <span style={{...styles.modalActivitySide, color: COLORS.error}}>NO</span>
-                      <span style={styles.modalActivityAmount}>0.25 SOL</span>
-                      <span style={styles.modalActivityTime}>5m ago</span>
-                    </div>
-                    <div style={styles.modalActivityItem}>
-                      <span style={{...styles.modalActivitySide, color: COLORS.success}}>YES</span>
-                      <span style={styles.modalActivityAmount}>1.0 SOL</span>
-                      <span style={styles.modalActivityTime}>12m ago</span>
-                    </div>
-                  </>
-                ) : (
-                  <div style={styles.noActivity}>
-                    <span style={{opacity: 0.6}}>No bets yet - be the first!</span>
+              {/* RIGHT: Betting Panel */}
+              <div style={styles.modalBettingPanel} className="modal-betting-panel">
+                {/* On-chain market badge */}
+                {selectedMarket.onChain && (
+                  <div style={styles.onchainIndicatorCompact}>
+                    {Icons2.onchain}
+                    <span>On-chain (USDC)</span>
                   </div>
                 )}
-              </div>
-            </div>
 
-            {txStatus && (
-              <div style={txStatusStyle}>
-                {txStatus.message}
-              </div>
-            )}
+                {/* Balance Display */}
+                {connected && walletBalance !== null && (
+                  <div style={styles.balanceDisplayCompact}>
+                    <span style={{color: COLORS.textMuted, fontSize: '12px'}}>Balance</span>
+                    <span style={{color: COLORS.primary, fontWeight: '600', fontSize: '14px'}}>{walletBalance?.toFixed(4)} SOL</span>
+                  </div>
+                )}
 
-            {/* Trading Interface - Always Visible */}
-            <div style={styles.tradingInterface}>
-              {/* On-chain market badge */}
-              {selectedMarket.onChain && (
-                <div style={styles.onchainIndicator}>
-                  {Icons2.onchain}
-                  <span>On-chain Market (USDC)</span>
-                  <span style={styles.onchainSubtext}>Powered by Poll.fun</span>
+                {/* Bet Amount Input */}
+                <div style={styles.betInputSection}>
+                  <label style={styles.labelCompact}>Amount (USDC)</label>
+                  <input
+                    style={styles.inputLarge}
+                    type="number"
+                    placeholder="10"
+                    step="1"
+                    min="1"
+                    value={betAmount}
+                    onChange={(e) => setBetAmount(e.target.value)}
+                    disabled={txStatus?.type === 'pending'}
+                  />
                 </div>
-              )}
 
-              {/* Balance Display - Only show if connected */}
-              {connected && walletBalance !== null && (
-                <div style={styles.balanceDisplay}>
-                  <span>Your Balance</span>
-                  <span style={{color: COLORS.primary, fontWeight: '600'}}>{walletBalance?.toFixed(4) || '0'} SOL</span>
+                {/* Large YES/NO Buttons */}
+                <div style={styles.bettingButtonsVertical}>
+                  <button
+                    style={{
+                      ...styles.betBtnYesLarge,
+                      opacity: txStatus?.type === 'pending' ? 0.6 : 1,
+                      cursor: txStatus?.type === 'pending' ? 'not-allowed' : 'pointer'
+                    }}
+                    onClick={() => placeBet('YES')}
+                    disabled={txStatus?.type === 'pending'}
+                    onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.02)'}
+                    onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                  >
+                    <span style={styles.betBtnLabelLarge}>BUY YES</span>
+                    <span style={styles.betBtnOddsLarge}>{formatOdds(selectedMarket.yesOdds)}</span>
+                  </button>
+                  <button
+                    style={{
+                      ...styles.betBtnNoLarge,
+                      opacity: txStatus?.type === 'pending' ? 0.6 : 1,
+                      cursor: txStatus?.type === 'pending' ? 'not-allowed' : 'pointer'
+                    }}
+                    onClick={() => placeBet('NO')}
+                    disabled={txStatus?.type === 'pending'}
+                    onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.02)'}
+                    onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                  >
+                    <span style={styles.betBtnLabelLarge}>BUY NO</span>
+                    <span style={styles.betBtnOddsLarge}>{formatOdds(selectedMarket.noOdds)}</span>
+                  </button>
                 </div>
-              )}
 
-              <label style={styles.label}>
-                Bet Amount ({selectedMarket.onChain || selectedMarket.currency === 'USDC' ? 'USDC' : 'SOL'})
-              </label>
-              <input
-                style={styles.input}
-                type="number"
-                placeholder={selectedMarket.onChain ? "10" : "0.1"}
-                step={selectedMarket.onChain ? "1" : "0.01"}
-                min={selectedMarket.onChain ? "1" : "0.01"}
-                value={betAmount}
-                onChange={(e) => setBetAmount(e.target.value)}
-                disabled={txStatus?.type === 'pending'}
-              />
+                {/* Wallet hint */}
+                {!connected && (
+                  <div style={styles.walletHintCompact}>
+                    {Icons.wallet}
+                    <span>Connect wallet to bet</span>
+                  </div>
+                )}
 
-              {/* Always visible bet buttons */}
-              <div style={styles.tradingButtons}>
-                <button
-                  style={{
-                    ...styles.tradingBtnYes,
-                    opacity: txStatus?.type === 'pending' ? 0.6 : 1,
-                    cursor: txStatus?.type === 'pending' ? 'not-allowed' : 'pointer'
-                  }}
-                  onClick={() => placeBet('YES')}
-                  disabled={txStatus?.type === 'pending'}
-                >
-                  <span style={styles.tradingBtnLabel}>BUY YES</span>
-                  <span style={styles.tradingBtnOdds}>{formatOdds(selectedMarket.yesOdds)}</span>
-                </button>
-                <button
-                  style={{
-                    ...styles.tradingBtnNo,
-                    opacity: txStatus?.type === 'pending' ? 0.6 : 1,
-                    cursor: txStatus?.type === 'pending' ? 'not-allowed' : 'pointer'
-                  }}
-                  onClick={() => placeBet('NO')}
-                  disabled={txStatus?.type === 'pending'}
-                >
-                  <span style={styles.tradingBtnLabel}>BUY NO</span>
-                  <span style={styles.tradingBtnOdds}>{formatOdds(selectedMarket.noOdds)}</span>
-                </button>
+                {/* TX Status */}
+                {txStatus && (
+                  <div style={{
+                    ...styles.txStatusCompact,
+                    background: txStatus.type === 'success' ? `${COLORS.success}15` : 
+                               txStatus.type === 'error' ? `${COLORS.error}15` : `${COLORS.primary}15`,
+                    borderColor: txStatus.type === 'success' ? COLORS.success : 
+                                txStatus.type === 'error' ? COLORS.error : COLORS.primary,
+                    color: txStatus.type === 'success' ? COLORS.success : 
+                          txStatus.type === 'error' ? COLORS.error : COLORS.primary
+                  }}>
+                    {txStatus.message}
+                  </div>
+                )}
+
+                {/* Market ends info */}
+                <div style={styles.marketEndsCompact}>
+                  <span style={{color: COLORS.textMuted, fontSize: '11px'}}>Ends</span>
+                  <span style={{color: COLORS.textSecondary, fontSize: '12px', fontWeight: '500'}}>
+                    {new Date(selectedMarket.endDate).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'})}
+                  </span>
+                </div>
               </div>
-
-              {/* Wallet status hint */}
-              {!connected && (
-                <div style={styles.walletHint}>
-                  <span style={styles.walletHintIcon}>{Icons.wallet}</span>
-                  <span>Click a button above to connect wallet & place bet</span>
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -1807,7 +2032,11 @@ const styles = {
   app: {
     display: 'flex',
     minHeight: '100vh',
-    background: COLORS.bgDark
+    background: COLORS.bgDark,
+    width: '100%',
+    maxWidth: '100vw',
+    overflowX: 'hidden',
+    boxSizing: 'border-box'
   },
   sidebar: {
     width: '260px',
@@ -1939,7 +2168,10 @@ const styles = {
   main: {
     flex: 1,
     marginLeft: '260px',
-    minHeight: '100vh'
+    minHeight: '100vh',
+    width: 'calc(100% - 260px)',
+    maxWidth: 'calc(100vw - 260px)',
+    overflowX: 'hidden'
   },
   topBar: {
     display: 'flex',
@@ -1950,7 +2182,11 @@ const styles = {
     background: COLORS.bgSidebar,
     position: 'sticky',
     top: 0,
-    zIndex: 100
+    zIndex: 100,
+    flexWrap: 'wrap',
+    gap: '12px',
+    boxSizing: 'border-box',
+    width: '100%'
   },
   searchContainer: {
     display: 'flex',
@@ -1966,7 +2202,7 @@ const styles = {
   },
   searchIcon: {
     display: 'flex',
-    opacity: 0.4,
+    opacity: 0.7,
     color: COLORS.textSecondary
   },
   searchInput: {
@@ -2019,7 +2255,10 @@ const styles = {
     opacity: 0.8
   },
   content: {
-    padding: '24px'
+    padding: '24px',
+    maxWidth: '100%',
+    overflowX: 'hidden',
+    boxSizing: 'border-box'
   },
   pageHeader: {
     display: 'flex',
@@ -2063,13 +2302,15 @@ const styles = {
   },
   marketsHeroBar: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(3, 1fr)',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
     gap: '16px',
     marginBottom: '32px',
     padding: '20px',
     background: COLORS.bgCard,
     borderRadius: '16px',
-    border: `1px solid ${COLORS.border}`
+    border: `1px solid ${COLORS.border}`,
+    width: '100%',
+    boxSizing: 'border-box'
   },
   heroStatCard: {
     display: 'flex',
@@ -2080,8 +2321,11 @@ const styles = {
   },
   marketGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
-    gap: '20px'
+    gridTemplateColumns: 'repeat(auto-fill, minmax(min(380px, 100%), 1fr))',
+    gap: '24px',
+    maxWidth: '1600px',
+    margin: '0 auto',
+    width: '100%'
   },
   marketCard: {
     background: COLORS.bgCard,
@@ -2091,14 +2335,18 @@ const styles = {
     cursor: 'pointer',
     transition: 'all 0.25s ease',
     position: 'relative',
-    animation: 'fadeIn 0.4s ease forwards'
+    animation: 'fadeIn 0.4s ease forwards',
+    minHeight: '280px',
+    maxWidth: '480px',
+    display: 'flex',
+    flexDirection: 'column'
   },
   cardNumberBadge: {
     position: 'absolute',
     top: '16px',
     right: '16px',
     fontSize: '12px',
-    opacity: 0.4
+    opacity: 0.6
   },
   cardHeader: {
     display: 'flex',
@@ -2116,7 +2364,7 @@ const styles = {
   },
   categoryTagIcon: {
     display: 'flex',
-    opacity: 0.6
+    opacity: 0.8
   },
   timeTag: {
     display: 'flex',
@@ -2135,17 +2383,36 @@ const styles = {
   marketQuestion: {
     fontSize: '16px',
     fontWeight: '600',
-    lineHeight: '1.4',
-    marginBottom: '12px',
-    minHeight: '44px',
-    color: COLORS.textPrimary
+    lineHeight: '1.5',
+    marginBottom: '16px',
+    color: COLORS.textPrimary,
+    flex: '1',
+    display: '-webkit-box',
+    WebkitLineClamp: 3,
+    WebkitBoxOrient: 'vertical',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis'
   },
   verificationInfo: {
     display: 'flex',
     alignItems: 'center',
-    gap: '10px',
+    gap: '8px',
     marginBottom: '12px',
     flexWrap: 'wrap'
+  },
+  miniChartContainer: {
+    marginBottom: '12px',
+    padding: '8px 0',
+    borderRadius: '8px',
+    background: `${COLORS.bgDark}50`,
+    height: '36px'
+  },
+  modalChartContainer: {
+    marginBottom: '16px',
+    padding: '16px',
+    borderRadius: '12px',
+    background: COLORS.bgDark,
+    border: `1px solid ${COLORS.border}`
   },
   thresholdBadge: {
     display: 'flex',
@@ -2170,11 +2437,13 @@ const styles = {
   },
   oddsBar: {
     display: 'flex',
-    height: '40px',
-    borderRadius: '10px',
+    height: '44px',
+    borderRadius: '12px',
     overflow: 'hidden',
-    marginBottom: '12px',
-    gap: '2px'
+    marginBottom: '16px',
+    marginTop: 'auto',
+    gap: '3px',
+    background: COLORS.bgDark
   },
   yesBar: {
     background: COLORS.gradientGreen,
@@ -2183,9 +2452,10 @@ const styles = {
     justifyContent: 'center',
     color: '#000',
     fontSize: '13px',
-    fontWeight: '600',
-    minWidth: '70px',
-    borderRadius: '8px 0 0 8px'
+    fontWeight: '700',
+    minWidth: '80px',
+    borderRadius: '10px 0 0 10px',
+    transition: 'width 0.3s ease'
   },
   noBar: {
     background: COLORS.gradientRed,
@@ -2194,9 +2464,10 @@ const styles = {
     justifyContent: 'center',
     color: '#fff',
     fontSize: '13px',
-    fontWeight: '600',
-    minWidth: '70px',
-    borderRadius: '0 8px 8px 0'
+    fontWeight: '700',
+    minWidth: '80px',
+    borderRadius: '0 10px 10px 0',
+    transition: 'width 0.3s ease'
   },
   cardFooter: {
     display: 'flex',
@@ -2220,7 +2491,7 @@ const styles = {
   footerIcon: {
     display: 'flex',
     transform: 'scale(0.8)',
-    opacity: 0.6
+    opacity: 0.8
   },
   onchainBadge: {
     display: 'flex',
@@ -2278,7 +2549,9 @@ const styles = {
     transition: 'all 0.2s ease'
   },
   formContainer: {
-    maxWidth: '700px'
+    maxWidth: '700px',
+    width: '100%',
+    boxSizing: 'border-box'
   },
   createMarketHeader: {
     marginBottom: '32px'
@@ -2458,26 +2731,31 @@ const styles = {
     right: 0,
     bottom: 0,
     background: 'rgba(0, 0, 0, 0.85)',
-    backdropFilter: 'blur(4px)',
+    backdropFilter: 'blur(8px)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 1000
+    zIndex: 1000,
+    padding: '20px'
   },
   modal: {
     background: COLORS.bgCard,
-    borderRadius: '20px',
-    padding: '28px',
-    width: '420px',
-    maxWidth: '90vw',
+    borderRadius: '24px',
+    padding: '32px',
+    width: '900px',
+    maxWidth: '95vw',
+    maxHeight: '90vh',
+    overflowY: 'auto',
     border: `1px solid ${COLORS.borderLight}`,
-    boxShadow: `0 25px 50px -12px rgba(0, 0, 0, 0.5)`
+    boxShadow: `0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(20, 241, 149, 0.1)`
   },
   modalHeader: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: '16px'
+    marginBottom: '20px',
+    paddingBottom: '16px',
+    borderBottom: `1px solid ${COLORS.border}`
   },
   closeBtn: {
     display: 'flex',
@@ -2492,35 +2770,39 @@ const styles = {
     transition: 'all 0.2s'
   },
   modalQuestion: {
-    fontSize: '16px',
-    color: COLORS.textSecondary,
-    marginBottom: '16px',
+    fontSize: '18px',
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+    marginBottom: '24px',
     lineHeight: '1.5'
   },
   modalDetails: {
-    background: `${COLORS.textPrimary}03`,
-    borderRadius: '10px',
-    padding: '12px 14px',
-    marginBottom: '16px',
+    background: COLORS.bgDark,
+    borderRadius: '16px',
+    padding: '20px',
+    marginBottom: '24px',
     border: `1px solid ${COLORS.border}`
   },
   modalDetailRow: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    padding: '6px 0',
-    fontSize: '12px',
-    gap: '12px'
+    padding: '10px 0',
+    fontSize: '14px',
+    gap: '16px',
+    borderBottom: `1px solid ${COLORS.border}08`
   },
   modalDetailLabel: {
-    color: COLORS.textMuted,
+    color: COLORS.textSecondary,
     fontWeight: '500',
-    flexShrink: 0
+    flexShrink: 0,
+    fontSize: '13px'
   },
   modalDetailValue: {
-    color: COLORS.textSecondary,
+    color: COLORS.textPrimary,
     textAlign: 'right',
-    wordBreak: 'break-word'
+    wordBreak: 'break-word',
+    fontWeight: '500'
   },
   txStatus: {
     padding: '12px 16px',
@@ -2538,23 +2820,25 @@ const styles = {
   balanceDisplay: {
     display: 'flex',
     justifyContent: 'space-between',
-    padding: '14px 16px',
-    background: `${COLORS.textPrimary}03`,
-    borderRadius: '10px',
-    marginBottom: '16px',
-    fontSize: '14px',
-    color: COLORS.textSecondary
+    padding: '16px 20px',
+    background: COLORS.bgDark,
+    borderRadius: '14px',
+    marginBottom: '20px',
+    fontSize: '15px',
+    color: COLORS.textSecondary,
+    border: `1px solid ${COLORS.border}`
   },
   betButtons: {
     display: 'grid',
     gridTemplateColumns: '1fr 1fr',
-    gap: '12px'
+    gap: '16px',
+    marginTop: '8px'
   },
   yesBtn: {
-    padding: '16px',
+    padding: '18px 24px',
     background: COLORS.gradientGreen,
     border: 'none',
-    borderRadius: '12px',
+    borderRadius: '14px',
     color: '#000',
     fontSize: '16px',
     fontWeight: '700',
@@ -2562,10 +2846,10 @@ const styles = {
     transition: 'all 0.2s ease'
   },
   noBtn: {
-    padding: '16px',
+    padding: '18px 24px',
     background: COLORS.gradientRed,
     border: 'none',
-    borderRadius: '12px',
+    borderRadius: '14px',
     color: '#fff',
     fontSize: '16px',
     fontWeight: '700',
@@ -2808,21 +3092,207 @@ const styles = {
     color: COLORS.textMuted,
     marginTop: '20px'
   },
+  // Modal Main Layout - Chart + Betting Side by Side
+  modalMainLayout: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 280px',
+    gap: '24px',
+    marginBottom: '16px'
+  },
+  modalChartSection: {
+    background: COLORS.bgDark,
+    borderRadius: '16px',
+    padding: '20px',
+    border: `1px solid ${COLORS.border}`,
+    display: 'flex',
+    flexDirection: 'column'
+  },
+  modalLargeChart: {
+    marginBottom: '16px',
+    padding: '12px',
+    background: `${COLORS.bgCard}50`,
+    borderRadius: '12px',
+    minHeight: '200px'
+  },
+  chartLegendLarge: {
+    display: 'flex',
+    justifyContent: 'center',
+    gap: '32px',
+    marginBottom: '16px'
+  },
+  chartLegendItemLarge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px'
+  },
+  chartLegendDotLarge: {
+    width: '12px',
+    height: '12px',
+    borderRadius: '50%'
+  },
+  poolStatsRow: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, 1fr)',
+    gap: '12px',
+    padding: '12px',
+    background: `${COLORS.bgCard}50`,
+    borderRadius: '10px'
+  },
+  poolStatItemCompact: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '2px'
+  },
+  poolStatLabelSmall: {
+    fontSize: '11px',
+    color: COLORS.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px'
+  },
+  poolStatValueSmall: {
+    fontSize: '14px',
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+    fontFamily: 'JetBrains Mono, monospace'
+  },
+  modalBettingPanel: {
+    background: COLORS.bgDark,
+    borderRadius: '16px',
+    padding: '20px',
+    border: `1px solid ${COLORS.border}`,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px'
+  },
+  onchainIndicatorCompact: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '8px 12px',
+    background: `${COLORS.primary}15`,
+    borderRadius: '8px',
+    fontSize: '12px',
+    color: COLORS.primary,
+    fontWeight: '500'
+  },
+  balanceDisplayCompact: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '10px 12px',
+    background: `${COLORS.bgCard}`,
+    borderRadius: '10px',
+    border: `1px solid ${COLORS.border}`
+  },
+  betInputSection: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px'
+  },
+  labelCompact: {
+    fontSize: '12px',
+    color: COLORS.textSecondary,
+    fontWeight: '500'
+  },
+  inputLarge: {
+    padding: '14px 16px',
+    background: COLORS.bgCard,
+    border: `2px solid ${COLORS.border}`,
+    borderRadius: '12px',
+    color: COLORS.textPrimary,
+    fontSize: '18px',
+    fontWeight: '600',
+    fontFamily: 'JetBrains Mono, monospace',
+    outline: 'none',
+    transition: 'border-color 0.2s',
+    textAlign: 'center'
+  },
+  bettingButtonsVertical: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    marginTop: '8px'
+  },
+  betBtnYesLarge: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '18px 20px',
+    background: `linear-gradient(135deg, ${COLORS.success} 0%, ${COLORS.success}dd 100%)`,
+    border: 'none',
+    borderRadius: '14px',
+    color: '#000',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    boxShadow: `0 4px 20px ${COLORS.success}40`
+  },
+  betBtnNoLarge: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '18px 20px',
+    background: `linear-gradient(135deg, ${COLORS.error} 0%, ${COLORS.error}dd 100%)`,
+    border: 'none',
+    borderRadius: '14px',
+    color: '#fff',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    boxShadow: `0 4px 20px ${COLORS.error}40`
+  },
+  betBtnLabelLarge: {
+    fontSize: '16px',
+    fontWeight: '700',
+    letterSpacing: '0.5px'
+  },
+  betBtnOddsLarge: {
+    fontSize: '18px',
+    fontWeight: '700',
+    fontFamily: 'JetBrains Mono, monospace'
+  },
+  walletHintCompact: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    padding: '10px',
+    background: `${COLORS.primary}10`,
+    borderRadius: '10px',
+    fontSize: '12px',
+    color: COLORS.textMuted
+  },
+  txStatusCompact: {
+    padding: '10px 14px',
+    borderRadius: '10px',
+    border: '1px solid',
+    fontSize: '12px',
+    fontWeight: '500',
+    textAlign: 'center'
+  },
+  marketEndsCompact: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '8px 12px',
+    background: `${COLORS.bgCard}50`,
+    borderRadius: '8px',
+    marginTop: 'auto'
+  },
   // Chart and Activity Styles
   chartSection: {
-    marginBottom: '20px',
-    padding: '16px',
-    background: `${COLORS.bgCard}`,
-    borderRadius: '12px',
+    marginBottom: '24px',
+    padding: '20px',
+    background: COLORS.bgDark,
+    borderRadius: '16px',
     border: `1px solid ${COLORS.border}`
   },
   chartTitle: {
     fontSize: '13px',
     fontWeight: '600',
     color: COLORS.textSecondary,
-    marginBottom: '12px',
+    marginBottom: '16px',
     textTransform: 'uppercase',
-    letterSpacing: '0.5px'
+    letterSpacing: '1px'
   },
   oddsChartContainer: {
     marginBottom: '16px'
@@ -2869,19 +3339,21 @@ const styles = {
   poolStats: {
     display: 'grid',
     gridTemplateColumns: 'repeat(4, 1fr)',
-    gap: '12px'
+    gap: '12px',
+    marginTop: '8px'
   },
   poolStatItem: {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    padding: '10px 8px',
-    background: COLORS.bgDark,
-    borderRadius: '8px'
+    padding: '14px 10px',
+    background: COLORS.bgCard,
+    borderRadius: '12px',
+    border: `1px solid ${COLORS.border}`
   },
   poolStatLabel: {
-    fontSize: '10px',
-    color: COLORS.textMuted,
+    fontSize: '11px',
+    color: COLORS.textSecondary,
     textTransform: 'uppercase',
     marginBottom: '4px'
   },
@@ -3007,13 +3479,7 @@ const styles = {
     transform: 'scale(0.9)',
     color: COLORS.secondary
   },
-  // Mini Chart Styles
-  miniChartContainer: {
-    background: COLORS.bgDark,
-    borderRadius: '10px',
-    padding: '16px',
-    marginBottom: '16px'
-  },
+  // Chart Styles (used in modal)
   chartLegend: {
     display: 'flex',
     justifyContent: 'center',
@@ -3037,12 +3503,12 @@ const styles = {
   orderBookContainer: {
     display: 'grid',
     gridTemplateColumns: '1fr 1fr',
-    gap: '12px',
-    marginBottom: '16px'
+    gap: '16px',
+    marginBottom: '20px'
   },
   orderBookSide: {
-    background: COLORS.bgDark,
-    borderRadius: '10px',
+    background: COLORS.bgCard,
+    borderRadius: '12px',
     padding: '12px',
     overflow: 'hidden'
   },

@@ -14,6 +14,67 @@
 
 const axios = require('axios');
 
+// CoinGecko API key (Demo/Free tier)
+const COINGECKO_API_KEY = 'CG-pXbU22MTv4u19sWoWCLQkbrj';
+
+// Extended token symbol to CoinGecko ID mapping
+const COINGECKO_TOKEN_MAP = {
+  'sol': 'solana',
+  'solana': 'solana',
+  'btc': 'bitcoin',
+  'bitcoin': 'bitcoin',
+  'eth': 'ethereum',
+  'ethereum': 'ethereum',
+  'usdc': 'usd-coin',
+  'usdt': 'tether',
+  'bonk': 'bonk',
+  'jup': 'jupiter-exchange-solana',
+  'jupiter': 'jupiter-exchange-solana',
+  'wif': 'dogwifcoin',
+  'dogwifhat': 'dogwifcoin',
+  'jto': 'jito-governance-token',
+  'jito': 'jito-governance-token',
+  'pyth': 'pyth-network',
+  'render': 'render-token',
+  'rndr': 'render-token',
+  'ray': 'raydium',
+  'raydium': 'raydium',
+  'orca': 'orca',
+  'marinade': 'marinade-staked-sol',
+  'msol': 'marinade-staked-sol',
+  'fida': 'bonfida',
+  'bonfida': 'bonfida',
+  'step': 'step-finance',
+  'atlas': 'star-atlas',
+  'polis': 'star-atlas-dao',
+  'samo': 'samoyedcoin',
+  'grape': 'grape-2',
+  'mango': 'mango-markets',
+  'srm': 'serum',
+  'serum': 'serum',
+  'hnt': 'helium',
+  'helium': 'helium',
+  'iot': 'helium-iot',
+  'mobile': 'helium-mobile',
+  'drift': 'drift-protocol',
+  'wen': 'wen-4',
+  'popcat': 'popcat',
+  'myro': 'myro',
+  'bome': 'book-of-meme',
+  'slerf': 'slerf',
+  'mew': 'cat-in-a-dogs-world',
+  'aixbt': 'aixbt',
+  'virtual': 'virtual-protocol',
+  'ai16z': 'ai16z',
+  'luna': 'luna-virtuals',
+  'zerebro': 'zerebro',
+  'goat': 'goatseus-maximus',
+  'fartcoin': 'fartcoin',
+  'act': 'act-i-the-ai-prophecy',
+  'griffain': 'griffain',
+  'arc': 'ai-rig-complex'
+};
+
 // Pyth price feed IDs for common tokens (Solana mainnet)
 const PYTH_PRICE_FEEDS = {
   'SOL': '0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d',
@@ -36,21 +97,47 @@ class ResolutionEngine {
 
   /**
    * Resolve a market based on its resolution source
+   * 
+   * IMPORTANT: Token Price Resolution Strategy
+   * - 'coingecko': Uses CoinGecko for official TOKEN prices (recommended)
+   *   This is the single source of truth for token prices, avoiding the
+   *   issue of multiple DEX pools having different prices.
+   * 
+   * - 'dexscreener': Only for SPECIFIC POOL prices when a pool URL is provided
+   *   This should only be used when betting on a specific liquidity pool's price,
+   *   not for general token prices. Falls back to CoinGecko if no pool specified.
    */
   async resolve(data) {
-    const { resolution, question, threshold, targetHandle, targetToken } = data;
+    const { resolution, question, threshold, targetHandle, targetToken, verificationUrl } = data;
 
     try {
       switch (resolution) {
+        case 'coingecko':
+          // Use CoinGecko for official TOKEN prices (single source of truth)
+          console.log(`[Resolver] Using CoinGecko for token price verification`);
+          return await this.resolveCoingecko(targetToken, threshold, question);
+
         case 'dexscreener':
+          // DexScreener should only be used for specific POOL prices
+          // If a specific pool URL is provided, use DexScreener
+          // Otherwise, use CoinGecko for the token price
+          if (verificationUrl && verificationUrl.includes('dexscreener.com') && verificationUrl.includes('/')) {
+            console.log(`[Resolver] Using DexScreener for specific pool: ${verificationUrl}`);
+            return await this.resolveDexScreener(targetToken, threshold, question);
+          }
+          // No specific pool URL - use CoinGecko for token price
+          console.log(`[Resolver] No specific pool URL, using CoinGecko for token price`);
+          const cgResult = await this.resolveCoingecko(targetToken, threshold, question);
+          if (cgResult.resolved) {
+            return cgResult;
+          }
+          // Fallback to DexScreener only if CoinGecko fails
+          console.log(`[Resolver] CoinGecko failed, falling back to DexScreener: ${cgResult.error}`);
           return await this.resolveDexScreener(targetToken, threshold, question);
 
         case 'pyth':
         case 'oracle':
           return await this.resolvePyth(targetToken, threshold, question);
-
-        case 'coingecko':
-          return await this.resolveCoingecko(targetToken, threshold, question);
 
         case 'x-api':
           return await this.resolveXApi(targetHandle, threshold, question);
@@ -212,11 +299,12 @@ class ResolutionEngine {
   }
 
   /**
-   * Resolve using CoinGecko API (free, good for major tokens)
+   * Resolve using CoinGecko API (PRIMARY source for token verification)
+   * Uses authenticated API with demo key for reliable access
    */
   async resolveCoingecko(token, threshold, question) {
     if (!token) {
-      const match = question.match(/\$([A-Z]+)/);
+      const match = question.match(/\$([A-Za-z0-9]+)/i);
       if (match) {
         token = match[1].toLowerCase();
       } else {
@@ -224,22 +312,9 @@ class ResolutionEngine {
       }
     }
 
-    // Map common symbols to CoinGecko IDs
-    const tokenMap = {
-      'sol': 'solana',
-      'btc': 'bitcoin',
-      'eth': 'ethereum',
-      'usdc': 'usd-coin',
-      'bonk': 'bonk',
-      'jup': 'jupiter-exchange-solana',
-      'wif': 'dogwifcoin',
-      'jto': 'jito-governance-token',
-      'pyth': 'pyth-network',
-      'render': 'render-token',
-      'rndr': 'render-token',
-    };
-
-    const coinId = tokenMap[token.toLowerCase()] || token.toLowerCase();
+    // Use the extended token mapping
+    const coinId = COINGECKO_TOKEN_MAP[token.toLowerCase()] || token.toLowerCase();
+    console.log(`[Resolver] CoinGecko lookup: ${token} -> ${coinId}`);
 
     try {
       const response = await axios.get(
@@ -249,7 +324,8 @@ class ResolutionEngine {
             ids: coinId,
             vs_currencies: 'usd',
             include_market_cap: true,
-            include_24hr_change: true
+            include_24hr_change: true,
+            x_cg_demo_api_key: COINGECKO_API_KEY
           },
           timeout: 10000
         }
@@ -272,6 +348,8 @@ class ResolutionEngine {
       const actualValue = isMcapQuestion ? mcap : price;
       const outcome = actualValue >= thresholdNum ? 'YES' : 'NO';
 
+      console.log(`[Resolver] CoinGecko result: ${token} ${isMcapQuestion ? 'mcap' : 'price'} = $${isMcapQuestion ? this.formatNumber(mcap) : price.toFixed(price < 1 ? 6 : 2)}, threshold = $${this.formatNumber(thresholdNum)}, outcome = ${outcome}`);
+
       return {
         resolved: true,
         outcome,
@@ -280,14 +358,18 @@ class ResolutionEngine {
           : `$${price.toFixed(price < 1 ? 6 : 2)}`,
         threshold: `$${this.formatNumber(thresholdNum)}`,
         source: 'CoinGecko',
+        verificationUrl: `https://www.coingecko.com/en/coins/${coinId}`,
         data: {
           token,
+          coinId,
           price,
           mcap,
-          change24h: data.usd_24h_change
+          change24h: data.usd_24h_change,
+          timestamp: new Date().toISOString()
         }
       };
     } catch (error) {
+      console.error(`[Resolver] CoinGecko error for ${token}:`, error.message);
       return { resolved: false, error: `CoinGecko API error: ${error.message}` };
     }
   }

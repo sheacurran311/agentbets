@@ -7,6 +7,7 @@
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const axios = require('axios');
 const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 
 // Escrow module for on-chain operations
@@ -49,11 +50,198 @@ const ESCROW_WALLET = process.env.ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzp
 const markets = new Map();
 const bets = new Map();
 const positions = new Map();
+const oddsHistory = new Map(); // marketId -> [{timestamp, yesOdds, noOdds, yesPool, noPool}]
+const priceHistoryCache = new Map(); // tokenId -> { data, fetchedAt }
+
+// CoinGecko API configuration
+const COINGECKO_API_KEY = 'CG-pXbU22MTv4u19sWoWCLQkbrj';
+const COINGECKO_API_BASE = 'https://api.coingecko.com/api/v3';
+
+// Token symbol to CoinGecko ID mapping
+const TOKEN_ID_MAP = {
+  'btc': 'bitcoin',
+  'bitcoin': 'bitcoin',
+  'eth': 'ethereum',
+  'ethereum': 'ethereum',
+  'sol': 'solana',
+  'solana': 'solana',
+  'usdc': 'usd-coin',
+  'bonk': 'bonk',
+  'jup': 'jupiter-exchange-solana',
+  'jupiter': 'jupiter-exchange-solana',
+  'wif': 'dogwifcoin',
+  'dogwifhat': 'dogwifcoin',
+  'jto': 'jito-governance-token',
+  'jito': 'jito-governance-token',
+  'pyth': 'pyth-network',
+  'render': 'render-token',
+  'rndr': 'render-token',
+  'ray': 'raydium',
+  'raydium': 'raydium',
+  'orca': 'orca',
+  'marinade': 'marinade-staked-sol',
+  'msol': 'marinade-staked-sol',
+  'fida': 'bonfida',
+  'bonfida': 'bonfida',
+  'step': 'step-finance',
+  'atlas': 'star-atlas',
+  'polis': 'star-atlas-dao',
+  'samo': 'samoyedcoin',
+  'grape': 'grape-2',
+  'mango': 'mango-markets',
+  'srm': 'serum',
+  'serum': 'serum',
+  'aixbt': 'aixbt',
+  'virtual': 'virtual-protocol',
+  'ai16z': 'ai16z',
+  'luna': 'luna-virtuals',
+  'zerebro': 'zerebro'
+};
+
+// Helper to extract token from market question
+function extractTokenFromQuestion(question) {
+  // Match $TOKEN patterns
+  const match = question.match(/\$([A-Za-z0-9]+)/i);
+  if (match) {
+    return match[1].toLowerCase();
+  }
+  return null;
+}
+
+// Helper to get CoinGecko ID from token symbol
+function getCoinGeckoId(token) {
+  if (!token) return null;
+  const lowerToken = token.toLowerCase();
+  return TOKEN_ID_MAP[lowerToken] || lowerToken;
+}
+
+// Helper function to record odds history for a market
+function recordOddsHistory(marketId, market) {
+  if (!oddsHistory.has(marketId)) {
+    oddsHistory.set(marketId, []);
+  }
+  const history = oddsHistory.get(marketId);
+  history.push({
+    timestamp: new Date().toISOString(),
+    yesOdds: market.yesOdds,
+    noOdds: market.noOdds,
+    yesPool: market.yesPool,
+    noPool: market.noPool,
+    totalVolume: market.totalVolume
+  });
+  // Keep only last 100 data points per market to prevent memory bloat
+  if (history.length > 100) {
+    history.shift();
+  }
+}
 
 // Expose storage to routers via app.locals
 app.locals.markets = markets;
 app.locals.bets = bets;
 app.locals.positions = positions;
+app.locals.oddsHistory = oddsHistory;
+
+/**
+ * Generate proper verification URL based on resolution source
+ * 
+ * TOKEN PRICE VERIFICATION STRATEGY:
+ * - CoinGecko provides official TOKEN prices (single source of truth)
+ * - DexScreener should only be used for SPECIFIC POOL prices
+ *   (multiple pools can have different prices for the same token)
+ * 
+ * If no specific pool URL is provided for DexScreener, we use CoinGecko instead
+ */
+function generateVerificationUrl(question, resolutionSource, providedUrl) {
+  // If a specific DexScreener pool URL is provided (with pool address), keep it
+  // This is for bets on specific pool prices, not token prices
+  if (providedUrl && providedUrl.includes('dexscreener.com') && 
+      (providedUrl.match(/dexscreener\.com\/[a-z]+\/[A-Za-z0-9]+/) || 
+       providedUrl.includes('pair'))) {
+    console.log(`[VerificationURL] Using specific pool URL: ${providedUrl}`);
+    return providedUrl;
+  }
+
+  // For token-related resolution sources, generate CoinGecko URL
+  // CoinGecko is the single source of truth for TOKEN prices
+  if (resolutionSource === 'coingecko' || resolutionSource === 'dexscreener') {
+    const token = extractTokenFromQuestion(question);
+    if (token) {
+      const coinId = getCoinGeckoId(token);
+      if (coinId) {
+        return `https://www.coingecko.com/en/coins/${coinId}`;
+      }
+    }
+  }
+
+  // For X-related markets
+  if (resolutionSource === 'x-api') {
+    const handleMatch = question.match(/@([A-Za-z0-9_]+)/);
+    if (handleMatch) {
+      return `https://x.com/${handleMatch[1]}`;
+    }
+  }
+
+  // For Moltbook markets
+  if (resolutionSource === 'moltbook') {
+    const handleMatch = question.match(/@([A-Za-z0-9_]+)/);
+    if (handleMatch) {
+      return `https://www.moltbook.com/u/${handleMatch[1]}`;
+    }
+    return 'https://www.moltbook.com/';
+  }
+
+  // For GitHub markets
+  if (resolutionSource === 'github') {
+    const repoMatch = question.match(/github\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_-]+)/i);
+    if (repoMatch) {
+      return `https://github.com/${repoMatch[1]}`;
+    }
+  }
+
+  return providedUrl || null;
+}
+
+/**
+ * Generate verification method description
+ */
+function generateVerificationMethod(question, resolutionSource, providedMethod, providedUrl) {
+  if (providedMethod) {
+    return providedMethod;
+  }
+
+  // For token prices, use CoinGecko as single source of truth
+  // DexScreener only for specific pool prices with URL
+  if (resolutionSource === 'coingecko' || resolutionSource === 'dexscreener') {
+    const isMcap = /mcap|market cap/i.test(question);
+    const isSpecificPool = providedUrl && providedUrl.includes('dexscreener.com');
+    
+    if (isSpecificPool) {
+      return isMcap 
+        ? 'Check specific pool market cap on DexScreener at resolution time'
+        : 'Check specific pool price on DexScreener at resolution time';
+    }
+    
+    return isMcap 
+      ? 'Check official market cap on CoinGecko at resolution time (single source of truth)'
+      : 'Check official token price on CoinGecko at resolution time (single source of truth)';
+  }
+
+  if (resolutionSource === 'x-api') {
+    if (/followers/i.test(question)) {
+      return 'Check X follower count via X API at resolution time';
+    }
+    if (/tweet|post/i.test(question)) {
+      return 'Check tweet count via X API at resolution time';
+    }
+    return 'Verify via X API at resolution time';
+  }
+
+  if (resolutionSource === 'moltbook') {
+    return 'Check Moltbook stats at resolution time';
+  }
+
+  return null;
+}
 
 // ==========================================
 // MARKET ENDPOINTS
@@ -82,13 +270,22 @@ app.post('/api/markets', async (req, res) => {
     const marketId = uuidv4();
     const now = new Date().toISOString();
 
+    // Generate proper verification URL and method
+    const finalResolutionSource = resolutionSource || 'manual';
+    const verificationUrl = generateVerificationUrl(question, finalResolutionSource, req.body.verificationUrl);
+    const verificationMethod = generateVerificationMethod(question, finalResolutionSource, req.body.verificationMethod, req.body.verificationUrl);
+
+    // Extract token ID for token markets (used for price history)
+    const tokenSymbol = extractTokenFromQuestion(question);
+    const tokenId = tokenSymbol ? getCoinGeckoId(tokenSymbol) : null;
+
     const market = {
       id: marketId,
       question,
       description: description || '',
       category: category || 'general', // performance, competition, token, milestone, head-to-head, app
       outcomes: ['YES', 'NO'],
-      resolutionSource: resolutionSource || 'manual',
+      resolutionSource: finalResolutionSource,
       endDate,
       createdAt: now,
       creatorWallet: creatorWallet || null,
@@ -98,9 +295,11 @@ app.post('/api/markets', async (req, res) => {
       resolvedAt: null,
 
       // Enhanced verification info
-      verificationUrl: req.body.verificationUrl || null, // URL to verify outcome
-      verificationMethod: req.body.verificationMethod || null, // How outcome is verified
+      verificationUrl, // Auto-generated or provided URL to verify outcome
+      verificationMethod, // Auto-generated or provided method description
       threshold: req.body.threshold || null, // Target value for resolution
+      tokenId, // CoinGecko token ID for price history (if token market)
+      tokenSymbol: tokenSymbol ? tokenSymbol.toUpperCase() : null, // Token symbol
       tags: req.body.tags || [], // Additional tags for filtering
 
       // Pool tracking
@@ -115,6 +314,9 @@ app.post('/api/markets', async (req, res) => {
     };
 
     markets.set(marketId, market);
+
+    // Record initial odds history
+    recordOddsHistory(marketId, market);
 
     // Record market creation for royalty tracking
     if (creatorAgent) {
@@ -194,6 +396,309 @@ app.get('/api/markets/:id', (req, res) => {
     betCount: marketBets.length
   });
 });
+
+/**
+ * Get market odds history
+ * GET /api/markets/:id/history
+ */
+app.get('/api/markets/:id/history', (req, res) => {
+  const market = markets.get(req.params.id);
+
+  if (!market) {
+    return res.status(404).json({ error: 'Market not found' });
+  }
+
+  const history = oddsHistory.get(req.params.id) || [];
+  
+  // Optional: limit the number of data points returned
+  const { limit = 50 } = req.query;
+  const limitedHistory = history.slice(-parseInt(limit));
+
+  res.json({
+    marketId: req.params.id,
+    question: market.question,
+    currentOdds: {
+      yesOdds: market.yesOdds,
+      noOdds: market.noOdds,
+      yesPool: market.yesPool,
+      noPool: market.noPool
+    },
+    history: limitedHistory,
+    totalDataPoints: history.length
+  });
+});
+
+/**
+ * Get token price history for a market
+ * GET /api/markets/:id/price-history
+ * 
+ * Fetches historical price data from CoinGecko for token-related markets.
+ * Results are cached for 5 minutes to avoid rate limits.
+ */
+app.get('/api/markets/:id/price-history', async (req, res) => {
+  try {
+    const market = markets.get(req.params.id);
+
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    // Check if this is a token-related market
+    const token = extractTokenFromQuestion(market.question);
+    if (!token) {
+      return res.status(400).json({ 
+        error: 'Not a token market',
+        message: 'This market does not appear to be about a specific token'
+      });
+    }
+
+    const coinId = getCoinGeckoId(token);
+    if (!coinId) {
+      return res.status(400).json({ 
+        error: 'Unknown token',
+        message: `Token ${token} is not recognized`
+      });
+    }
+
+    // Check cache (5 minute TTL)
+    const cacheKey = `${coinId}-${req.params.id}`;
+    const cached = priceHistoryCache.get(cacheKey);
+    const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+    if (cached && (Date.now() - cached.fetchedAt) < CACHE_TTL) {
+      return res.json({
+        marketId: req.params.id,
+        token: token.toUpperCase(),
+        coinId,
+        cached: true,
+        ...cached.data
+      });
+    }
+
+    // Calculate days since market creation (max 90 days for free tier)
+    const createdAt = new Date(market.createdAt);
+    const now = new Date();
+    const daysSinceCreation = Math.min(
+      Math.ceil((now - createdAt) / (1000 * 60 * 60 * 24)),
+      90
+    );
+    const days = Math.max(daysSinceCreation, 7); // At least 7 days
+
+    // Fetch from CoinGecko
+    const response = await axios.get(
+      `${COINGECKO_API_BASE}/coins/${coinId}/market_chart`,
+      {
+        params: {
+          vs_currency: 'usd',
+          days: days,
+          x_cg_demo_api_key: COINGECKO_API_KEY
+        },
+        timeout: 10000
+      }
+    );
+
+    const priceData = {
+      prices: response.data.prices.map(([timestamp, price]) => ({
+        timestamp: new Date(timestamp).toISOString(),
+        price
+      })),
+      marketCaps: response.data.market_caps.map(([timestamp, mcap]) => ({
+        timestamp: new Date(timestamp).toISOString(),
+        marketCap: mcap
+      })),
+      currentPrice: response.data.prices[response.data.prices.length - 1]?.[1],
+      currentMarketCap: response.data.market_caps[response.data.market_caps.length - 1]?.[1],
+      dataPoints: response.data.prices.length,
+      days
+    };
+
+    // Cache the result
+    priceHistoryCache.set(cacheKey, {
+      data: priceData,
+      fetchedAt: Date.now()
+    });
+
+    res.json({
+      marketId: req.params.id,
+      token: token.toUpperCase(),
+      coinId,
+      cached: false,
+      ...priceData
+    });
+
+  } catch (error) {
+    console.error('[PriceHistory] Error:', error.message);
+    
+    if (error.response?.status === 429) {
+      return res.status(429).json({ 
+        error: 'Rate limited',
+        message: 'CoinGecko API rate limit reached. Please try again in a minute.'
+      });
+    }
+
+    if (error.response?.status === 404) {
+      return res.status(404).json({ 
+        error: 'Token not found',
+        message: 'This token was not found on CoinGecko'
+      });
+    }
+
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get live verification status for a market
+ * GET /api/verify/:marketId
+ * 
+ * Returns current verified value, threshold comparison, and verification source.
+ * This is the trustworthy endpoint for checking market status in real-time.
+ */
+app.get('/api/verify/:marketId', async (req, res) => {
+  try {
+    const market = markets.get(req.params.marketId);
+
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    const result = {
+      marketId: req.params.marketId,
+      question: market.question,
+      status: market.status,
+      resolutionSource: market.resolutionSource,
+      threshold: market.threshold,
+      verificationUrl: market.verificationUrl,
+      endDate: market.endDate,
+      isEnded: new Date(market.endDate) < new Date(),
+      timestamp: new Date().toISOString()
+    };
+
+    // For token markets, fetch current value from CoinGecko
+    if (market.resolutionSource === 'coingecko' || market.resolutionSource === 'dexscreener') {
+      const token = market.tokenSymbol || extractTokenFromQuestion(market.question);
+      
+      if (token) {
+        const coinId = market.tokenId || getCoinGeckoId(token);
+        
+        if (coinId) {
+          try {
+            const response = await axios.get(
+              `${COINGECKO_API_BASE}/simple/price`,
+              {
+                params: {
+                  ids: coinId,
+                  vs_currencies: 'usd',
+                  include_market_cap: true,
+                  include_24hr_change: true,
+                  x_cg_demo_api_key: COINGECKO_API_KEY
+                },
+                timeout: 10000
+              }
+            );
+
+            const data = response.data?.[coinId];
+            if (data) {
+              const isMcapQuestion = /mcap|market cap/i.test(market.question);
+              const currentValue = isMcapQuestion ? data.usd_market_cap : data.usd;
+              
+              // Parse threshold for comparison
+              const thresholdNum = parseThreshold(market.threshold);
+              
+              result.verification = {
+                token: token.toUpperCase(),
+                coinId,
+                currentPrice: data.usd,
+                currentMarketCap: data.usd_market_cap,
+                change24h: data.usd_24h_change,
+                relevantValue: currentValue,
+                relevantValueFormatted: isMcapQuestion 
+                  ? `$${formatLargeNumber(data.usd_market_cap)} mcap`
+                  : `$${data.usd.toFixed(data.usd < 1 ? 6 : 2)}`,
+                thresholdValue: thresholdNum,
+                thresholdMet: thresholdNum ? currentValue >= thresholdNum : null,
+                source: 'CoinGecko',
+                sourceUrl: `https://www.coingecko.com/en/coins/${coinId}`,
+                fetchedAt: new Date().toISOString()
+              };
+            }
+          } catch (apiError) {
+            result.verification = {
+              error: 'Failed to fetch current value',
+              message: apiError.message
+            };
+          }
+        }
+      }
+    }
+
+    // For X API markets
+    if (market.resolutionSource === 'x-api') {
+      const handleMatch = market.question.match(/@([A-Za-z0-9_]+)/);
+      if (handleMatch) {
+        result.verification = {
+          handle: handleMatch[1],
+          source: 'X API',
+          sourceUrl: `https://x.com/${handleMatch[1]}`,
+          note: 'Live follower count requires X API access'
+        };
+      }
+    }
+
+    // For Moltbook markets
+    if (market.resolutionSource === 'moltbook') {
+      result.verification = {
+        source: 'Moltbook',
+        sourceUrl: market.verificationUrl || 'https://www.moltbook.com/',
+        note: 'Check Moltbook for current stats'
+      };
+    }
+
+    // Add resolution result if market is resolved
+    if (market.status === 'resolved') {
+      result.resolution = {
+        outcome: market.resolution,
+        resolvedAt: market.resolvedAt,
+        resolutionEvidence: market.resolutionEvidence
+      };
+    }
+
+    res.json(result);
+
+  } catch (error) {
+    console.error('[Verify] Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper function to parse threshold values
+function parseThreshold(threshold) {
+  if (!threshold) return null;
+  
+  // Remove common formatting
+  const cleaned = threshold.replace(/[,$]/g, '').toLowerCase();
+  
+  // Handle different formats: "100K", "1M", "1B", "100000"
+  const match = cleaned.match(/([\d.]+)\s*(k|m|b|billion|million|thousand)?/i);
+  if (!match) return null;
+  
+  let value = parseFloat(match[1]);
+  const suffix = match[2]?.toLowerCase();
+  
+  if (suffix === 'k' || suffix === 'thousand') value *= 1000;
+  else if (suffix === 'm' || suffix === 'million') value *= 1000000;
+  else if (suffix === 'b' || suffix === 'billion') value *= 1000000000;
+  
+  return value;
+}
+
+// Helper function to format large numbers
+function formatLargeNumber(num) {
+  if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+  if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+  if (num >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+  return num.toFixed(2);
+}
 
 // Admin wallet - ONLY this wallet can confirm resolutions
 const ADMIN_WALLET = 'ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG';
@@ -600,6 +1105,9 @@ app.post('/api/bets', async (req, res) => {
     }
 
     markets.set(marketId, market);
+
+    // Record odds history after bet
+    recordOddsHistory(marketId, market);
 
     // Update user positions
     const positionKey = `${wallet}-${marketId}-${outcome}`;
@@ -1935,6 +2443,41 @@ app.get('/api/verify/whitelist', (req, res) => {
 });
 
 /**
+ * Agent Info - Machine-readable platform metadata for AI agents
+ * GET /api/agent-info
+ */
+app.get('/api/agent-info', (req, res) => {
+  res.json({
+    name: 'AgentBets',
+    description: 'Prediction Markets for AI Agents on Solana',
+    version: '1.0.0',
+    skill_url: '/skill.md',
+    docs_url: '/docs/agent-api',
+    twitter_bot: '@AgentBetsBot',
+    auth: {
+      type: 'x402',
+      description: 'USDC payments over HTTP for betting actions',
+      read_requires_auth: false,
+      write_requires_auth: true
+    },
+    endpoints: {
+      list_markets: { method: 'GET', path: '/api/markets', auth: false },
+      get_market: { method: 'GET', path: '/api/markets/:id', auth: false },
+      place_bet: { method: 'POST', path: '/api/agent/bet/:marketId', auth: 'x402' },
+      create_and_bet: { method: 'POST', path: '/api/agent/create-and-bet', auth: 'x402' },
+      register_wallet: { method: 'POST', path: '/api/agent/wallet', auth: false },
+      verify_agent: { method: 'POST', path: '/api/verify/register', auth: false },
+      check_royalties: { method: 'GET', path: '/api/royalties/:handle', auth: false }
+    },
+    supported_tokens: ['SOL', 'USDC'],
+    networks: {
+      payments: 'Base Sepolia (testnet) / Base (mainnet)',
+      markets: 'Solana'
+    }
+  });
+});
+
+/**
  * Check if handle is whitelisted
  * GET /api/verify/whitelist/:handle
  */
@@ -2147,7 +2690,11 @@ app.get('/api/stats', (req, res) => {
   const allMarkets = Array.from(markets.values());
   const allBets = Array.from(bets.values());
 
-  const totalVolume = allMarkets.reduce((sum, m) => sum + m.totalVolume, 0);
+  // Calculate USDC volume from bets that have amountUSDC field
+  const totalVolumeUSDC = allBets
+    .filter(b => b.amountUSDC)
+    .reduce((sum, b) => sum + (b.amountUSDC || 0), 0);
+  
   const activeMarkets = allMarkets.filter(m => m.status === 'active').length;
   const resolvedMarkets = allMarkets.filter(m => m.status === 'resolved').length;
 
@@ -2159,7 +2706,7 @@ app.get('/api/stats', (req, res) => {
     },
     bets: {
       total: allBets.length,
-      totalVolume: totalVolume / LAMPORTS_PER_SOL
+      totalVolumeUSDC: Math.round(totalVolumeUSDC * 100) / 100
     },
     uniqueWallets: new Set(allBets.map(b => b.wallet)).size,
     agents: {
@@ -2289,12 +2836,12 @@ function initializeTestMarkets() {
       createdAt: new Date().toISOString(),
       creatorAgent: "@AIButters",
       status: "active",
-      yesPool: 1000000000,
-      noPool: 500000000,
-      totalVolume: 1500000000,
-      totalBets: 2,
-      yesOdds: 0.333,
-      noOdds: 0.667
+      yesPool: 150000000,   // 150 USDC (6 decimals)
+      noPool: 100000000,    // 100 USDC
+      totalVolume: 250000000, // 250 USDC total
+      totalBets: 5,
+      yesOdds: 0.4,
+      noOdds: 0.6
     },
     {
       id: uuidv4(),
@@ -2365,13 +2912,15 @@ function initializeTestMarkets() {
     {
       id: uuidv4(),
       question: "Will $BUTTERS token reach $100K market cap by Feb 15, 2026?",
-      description: "Resolution via DexScreener price data for $BUTTERS token.",
+      description: "Resolution via CoinGecko price data for $BUTTERS token.",
       category: "token",
       outcomes: ["YES", "NO"],
-      resolutionSource: "dexscreener",
-      verificationUrl: "https://dexscreener.com/solana/butters",
-      verificationMethod: "Check market cap on DexScreener at resolution time",
+      resolutionSource: "coingecko",
+      verificationUrl: "https://www.coingecko.com/en/coins/butters",
+      verificationMethod: "Check market cap on CoinGecko at resolution time",
       threshold: "$100,000 market cap",
+      tokenId: "butters",
+      tokenSymbol: "BUTTERS",
       tags: ["token", "butters", "price"],
       endDate: new Date("2026-02-15T23:59:59Z").toISOString(),
       createdAt: new Date().toISOString(),
@@ -2432,13 +2981,15 @@ function initializeTestMarkets() {
     {
       id: uuidv4(),
       question: "Will $AIXBT reach $2B market cap by March 2026?",
-      description: "The leading AI agent token. Resolution via DexScreener.",
+      description: "The leading AI agent token. Resolution via CoinGecko.",
       category: "token",
       outcomes: ["YES", "NO"],
-      resolutionSource: "dexscreener",
-      verificationUrl: "https://dexscreener.com/base/aixbt",
-      verificationMethod: "Check AIXBT market cap on DexScreener",
+      resolutionSource: "coingecko",
+      verificationUrl: "https://www.coingecko.com/en/coins/aixbt",
+      verificationMethod: "Check AIXBT market cap on CoinGecko at resolution time",
       threshold: "$2,000,000,000",
+      tokenId: "aixbt",
+      tokenSymbol: "AIXBT",
       tags: ["aixbt", "token", "ai16z"],
       endDate: new Date("2026-03-01T23:59:59Z").toISOString(),
       createdAt: new Date().toISOString(),
@@ -3071,8 +3622,8 @@ app.get('*', (req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
-  // Initialize test markets
-  initializeTestMarkets();
+  // Test markets removed for production - app starts with clean slate
+  // Real markets will be created by users and AI agents
 
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗

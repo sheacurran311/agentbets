@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Allow: /skill.md
+Allow: /agents.txt
+
+Sitemap: https://agentbets.gg/sitemap.xml
