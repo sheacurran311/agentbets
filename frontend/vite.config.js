@@ -12,6 +12,9 @@ export default defineConfig({
         target: 'http://localhost:3002',
         changeOrigin: true
       }
+    },
+    watch: {
+      ignored: ['**/node_modules_*/**', '**/node_modules_old/**']
     }
   },
   // Handle client-side routing - serve index.html for /app routes
@@ -19,5 +22,17 @@ export default defineConfig({
   define: {
     'process.env': {},
     global: 'globalThis'
+  },
+  optimizeDeps: {
+    esbuildOptions: {
+      define: {
+        global: 'globalThis'
+      }
+    }
+  },
+  build: {
+    commonjsOptions: {
+      transformMixedEsModules: true
+    }
   }
 })

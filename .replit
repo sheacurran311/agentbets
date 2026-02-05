@@ -17,8 +17,36 @@ localPort = 3002
 externalPort = 80
 
 [[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
 localPort = 5173
 externalPort = 3000
 
 [agent]
 expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "AgentBets App"
+
+[[workflows.workflow]]
+name = "AgentBets App"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd /home/runner/workspace && npx concurrently \"cd api && node src/index.js\" \"cd frontend && node ./node_modules/vite/bin/vite.js\""
+waitForPort = 5000
