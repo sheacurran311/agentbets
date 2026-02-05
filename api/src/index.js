@@ -4,11 +4,16 @@
  * Built by Butters (@AIButters) for Colosseum Agent Hackathon
  */
 
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+
+// Database
+const db = require('./db');
+const { Market, Bet, Agent, Royalty, Points, OddsHistory, Position } = require('./db/models');
 
 // Escrow module for on-chain operations
 const escrow = require('./escrow');
@@ -46,12 +51,11 @@ const connection = new Connection(SOLANA_RPC, 'confirmed');
 // Platform escrow wallet (in production, this would be a PDA)
 const ESCROW_WALLET = process.env.ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM';
 
-// In-memory storage (replace with PostgreSQL in production)
-const markets = new Map();
-const bets = new Map();
-const positions = new Map();
-const oddsHistory = new Map(); // marketId -> [{timestamp, yesOdds, noOdds, yesPool, noPool}]
+// In-memory cache for frequently accessed data (backed by PostgreSQL)
 const priceHistoryCache = new Map(); // tokenId -> { data, fetchedAt }
+
+// Database flag - set to true once connected
+let dbConnected = false;
 
 // CoinGecko API configuration
 const COINGECKO_API_KEY = 'CG-pXbU22MTv4u19sWoWCLQkbrj';
@@ -135,11 +139,9 @@ function recordOddsHistory(marketId, market) {
   }
 }
 
-// Expose storage to routers via app.locals
-app.locals.markets = markets;
-app.locals.bets = bets;
-app.locals.positions = positions;
-app.locals.oddsHistory = oddsHistory;
+// Expose database models to routers via app.locals
+app.locals.db = db;
+app.locals.models = { Market, Bet, Agent, Royalty, Points, OddsHistory, Position };
 
 /**
  * Generate proper verification URL based on resolution source
@@ -3620,23 +3622,70 @@ app.get('*', (req, res, next) => {
   }
 });
 
-// Start server
-app.listen(PORT, () => {
-  // Test markets removed for production - app starts with clean slate
-  // Real markets will be created by users and AI agents
+// Initialize database and start server
+async function startServer() {
+  try {
+    // Initialize database connection
+    if (process.env.DATABASE_URL) {
+      console.log('[DB] Connecting to PostgreSQL...');
+      const connected = await db.initDatabase();
+      
+      if (connected) {
+        dbConnected = true;
+        console.log('[DB] Running migrations...');
+        await db.runMigrations();
+        
+        // Seed default verified agents
+        const defaultAgents = [
+          'truth_terminal', 'aibutters', 'aikidonft', 'aethernet',
+          'luna_virtuals', 'zerebro', 'dolos_diary', 'freysa_ai'
+        ];
+        await Agent.seedWhitelist(defaultAgents);
+        console.log('[DB] Seeded default verified agents');
+      } else {
+        console.warn('[DB] Failed to connect - falling back to in-memory storage');
+      }
+    } else {
+      console.warn('[DB] DATABASE_URL not set - using in-memory storage');
+      console.warn('[DB] Data will be lost on restart!');
+    }
 
-  console.log(`
+    // Start server
+    app.listen(PORT, () => {
+      console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║          🎰 AgentBets API Server Running 🎰              ║
+║          AgentBets API Server Running                     ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                               ║
 ║  Network: Solana Devnet                                   ║
 ║  Escrow: ${ESCROW_WALLET.slice(0,8)}...                              ║
+║  Database: ${dbConnected ? 'PostgreSQL Connected' : 'In-Memory (no persistence)'}        ║
 ║                                                           ║
 ║  Prediction Markets for AI Agent Outcomes                 ║
-║  Built by Butters (@AIButters) 🦞                        ║
+║  Built by Butters (@AIButters)                            ║
 ╚═══════════════════════════════════════════════════════════╝
-  `);
+      `);
+    });
+  } catch (error) {
+    console.error('[Server] Failed to start:', error);
+    process.exit(1);
+  }
+}
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('[Server] Received SIGTERM, shutting down...');
+  await db.closePool();
+  process.exit(0);
 });
+
+process.on('SIGINT', async () => {
+  console.log('[Server] Received SIGINT, shutting down...');
+  await db.closePool();
+  process.exit(0);
+});
+
+// Start the server
+startServer();
 
 module.exports = app;
