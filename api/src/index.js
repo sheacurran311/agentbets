@@ -2161,7 +2161,10 @@ app.get('/api/stats', (req, res) => {
       total: allBets.length,
       totalVolume: totalVolume / LAMPORTS_PER_SOL
     },
-    uniqueWallets: new Set(allBets.map(b => b.wallet)).size
+    uniqueWallets: new Set(allBets.map(b => b.wallet)).size,
+    agents: {
+      verified: agentVerification.getWhitelist().length
+    }
   });
 });
 

@@ -31,10 +31,16 @@ export default function LandingPage() {
   const [stats, setStats] = useState(null)
 
   useEffect(() => {
-    fetch(`${API_BASE}/stats`)
-      .then(res => res.json())
-      .then(data => setStats(data))
-      .catch(err => console.error('Failed to fetch stats:', err))
+    const fetchStats = () => {
+      fetch(`${API_BASE}/stats`)
+        .then(res => res.json())
+        .then(data => setStats(data))
+        .catch(err => console.error('Failed to fetch stats:', err))
+    }
+    
+    fetchStats() // Initial fetch
+    const interval = setInterval(fetchStats, 60000) // Poll every 60 seconds
+    return () => clearInterval(interval)
   }, [])
 
   const enterApp = (type) => {
@@ -74,7 +80,7 @@ export default function LandingPage() {
           </div>
           <div style={styles.metricCard}>
             <span className="step-num">AGENTS</span>
-            <span className="metric-value">25+</span>
+            <span className="metric-value">{stats?.agents?.verified || '25'}+</span>
             <span style={{color: COLORS.textMuted, fontSize: '13px'}}>Verified creators</span>
           </div>
         </div>

@@ -7,14 +7,15 @@
  * Flow:
  * 1. Agent calls POST /api/agent/bet with bet details
  * 2. Server returns 402 with payment requirements
- * 3. Agent signs payment with their Solana wallet
- * 4. Agent retries with PAYMENT-SIGNATURE header
- * 5. Server records bet and returns confirmation
+ * 3. Agent signs USDC transfer transaction
+ * 4. Agent retries with PAYMENT-SIGNATURE header (containing tx signature)
+ * 5. Server verifies on-chain transaction, records bet, and returns confirmation
  */
 
 const { readFileSync, existsSync } = require('fs');
 const { join } = require('path');
 const { homedir } = require('os');
+const { Connection, PublicKey } = require('@solana/web3.js');
 
 const WALLET_FILE = join(homedir(), '.agentbets', 'solana-wallet.json');
 
@@ -158,26 +159,161 @@ function getPaymentHeader(req) {
 }
 
 /**
- * Parse and validate payment from header
- * Returns payment details or null if invalid
+ * Parse payment from header (without verification)
+ * Returns payment details - use verifyPaymentOnChain for actual verification
  */
 function parsePaymentHeader(paymentHeader) {
   try {
     // Payment header is base64 encoded JSON with signature
     const decoded = JSON.parse(Buffer.from(paymentHeader, 'base64').toString());
     return {
-      valid: true,
-      signature: decoded.signature || paymentHeader,
+      parsed: true,
+      signature: decoded.signature || decoded.txSignature || paymentHeader,
       payload: decoded.payload || decoded,
       network: decoded.network || 'solana:devnet',
-      amount: decoded.amount || decoded.payload?.amount
+      amount: decoded.amount || decoded.payload?.amount,
+      payer: decoded.payer || decoded.from || null
     };
   } catch (e) {
-    // Might be raw signature string
+    // Might be raw signature string (base58 Solana tx signature)
+    if (paymentHeader && paymentHeader.length >= 64 && paymentHeader.length <= 128) {
+      return {
+        parsed: true,
+        signature: paymentHeader,
+        payload: null,
+        network: 'solana:devnet'
+      };
+    }
+    return {
+      parsed: false,
+      error: 'Invalid payment header format'
+    };
+  }
+}
+
+/**
+ * Verify USDC transfer on-chain
+ * 
+ * @param {string} signature - Transaction signature to verify
+ * @param {object} options - Verification options
+ * @param {number} options.expectedAmount - Expected USDC amount (human readable)
+ * @param {string} options.expectedRecipient - Expected recipient address
+ * @param {string} options.network - Network ('solana:devnet' or 'solana:mainnet')
+ * @returns {Promise<object>} Verification result
+ */
+async function verifyPaymentOnChain(signature, options = {}) {
+  const {
+    expectedAmount,
+    expectedRecipient,
+    network = 'solana:devnet'
+  } = options;
+
+  const rpcUrl = SOLANA_RPC[network] || SOLANA_RPC['solana:devnet'];
+  const connection = new Connection(rpcUrl, 'confirmed');
+
+  try {
+    console.log(`[x402] Verifying transaction: ${signature.slice(0, 16)}...`);
+
+    // Fetch transaction with retry
+    let txInfo = null;
+    let retries = 3;
+    
+    while (retries > 0 && !txInfo) {
+      txInfo = await connection.getTransaction(signature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0
+      });
+      
+      if (!txInfo) {
+        retries--;
+        if (retries > 0) {
+          console.log(`[x402] Transaction not found, retrying in 2s... (${retries} retries left)`);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+    }
+
+    if (!txInfo) {
+      return {
+        valid: false,
+        error: 'Transaction not found on-chain. It may still be processing.',
+        code: 'TX_NOT_FOUND'
+      };
+    }
+
+    // Check transaction succeeded
+    if (txInfo.meta?.err) {
+      return {
+        valid: false,
+        error: `Transaction failed on-chain: ${JSON.stringify(txInfo.meta.err)}`,
+        code: 'TX_FAILED'
+      };
+    }
+
+    // Get pre/post token balances for USDC verification
+    const preBalances = txInfo.meta?.preTokenBalances || [];
+    const postBalances = txInfo.meta?.postTokenBalances || [];
+    const usdcMint = USDC_TOKENS[network];
+
+    // Find USDC transfers
+    let usdcTransferred = 0;
+    let recipientReceived = false;
+
+    for (const postBal of postBalances) {
+      if (postBal.mint === usdcMint) {
+        const preBal = preBalances.find(
+          p => p.accountIndex === postBal.accountIndex && p.mint === usdcMint
+        );
+        const preAmount = preBal?.uiTokenAmount?.uiAmount || 0;
+        const postAmount = postBal.uiTokenAmount?.uiAmount || 0;
+        const diff = postAmount - preAmount;
+
+        if (diff > 0) {
+          usdcTransferred += diff;
+          // Check if this is our recipient
+          const accountKey = txInfo.transaction?.message?.staticAccountKeys?.[postBal.accountIndex] ||
+                           txInfo.transaction?.message?.accountKeys?.[postBal.accountIndex];
+          if (accountKey && expectedRecipient && 
+              accountKey.toString() === expectedRecipient) {
+            recipientReceived = true;
+          }
+        }
+      }
+    }
+
+    // Validate amount if specified
+    if (expectedAmount && usdcTransferred < expectedAmount * 0.99) { // 1% tolerance
+      return {
+        valid: false,
+        error: `Insufficient USDC transferred. Expected: ${expectedAmount}, Got: ${usdcTransferred}`,
+        code: 'INSUFFICIENT_AMOUNT',
+        received: usdcTransferred,
+        expected: expectedAmount
+      };
+    }
+
+    // Get payer from transaction
+    const payer = txInfo.transaction?.message?.staticAccountKeys?.[0] ||
+                  txInfo.transaction?.message?.accountKeys?.[0];
+
+    console.log(`[x402] Payment verified: ${usdcTransferred} USDC from ${payer?.toString()?.slice(0, 8)}...`);
+
     return {
       valid: true,
-      signature: paymentHeader,
-      payload: null
+      signature,
+      amount: usdcTransferred,
+      payer: payer?.toString(),
+      blockTime: txInfo.blockTime,
+      slot: txInfo.slot,
+      network
+    };
+
+  } catch (error) {
+    console.error('[x402] Verification error:', error);
+    return {
+      valid: false,
+      error: error.message,
+      code: 'VERIFICATION_ERROR'
     };
   }
 }
@@ -187,16 +323,28 @@ function parsePaymentHeader(paymentHeader) {
  *
  * Usage:
  *   app.post('/api/agent/bet/:marketId',
- *     x402BetGate({ minAmount: 1, maxAmount: 1000 }),
+ *     x402BetGate({ minAmount: 1, maxAmount: 1000, verifyOnChain: true }),
  *     (req, res) => { ... handle bet ... }
  *   );
+ * 
+ * Options:
+ *   - minAmount: Minimum bet amount in USDC (default: 0.01)
+ *   - maxAmount: Maximum bet amount in USDC (default: 10000)
+ *   - verifyOnChain: Whether to verify payment on-chain (default: true for production)
+ *   - skipVerification: Skip verification for testing (default: false)
  */
 function x402BetGate(options = {}) {
-  const { minAmount = 0.01, maxAmount = 10000 } = options;
+  const { 
+    minAmount = 0.01, 
+    maxAmount = 10000,
+    verifyOnChain = process.env.NODE_ENV === 'production',
+    skipVerification = process.env.SKIP_X402_VERIFICATION === 'true'
+  } = options;
 
   return async (req, res, next) => {
     const { marketId } = req.params;
     const { outcome, amount, agentHandle } = req.body;
+    const network = req.body.network || 'solana:devnet';
 
     // Validate bet parameters
     if (!outcome || !['YES', 'NO'].includes(outcome.toUpperCase())) {
@@ -220,24 +368,53 @@ function x402BetGate(options = {}) {
         marketId,
         outcome: outcome.toUpperCase(),
         agentHandle,
-        network: req.body.network || 'solana:devnet'
+        network
       });
     }
 
-    // Payment header present - parse and validate
+    // Payment header present - parse it
     const payment = parsePaymentHeader(paymentHeader);
 
-    if (!payment.valid) {
-      return res.status(400).json({ error: 'Invalid payment signature' });
+    if (!payment.parsed) {
+      return res.status(400).json({ 
+        error: 'Invalid payment header format',
+        details: payment.error 
+      });
+    }
+
+    // Verify payment on-chain if enabled
+    let verification = { valid: true, skipped: true };
+    
+    if (verifyOnChain && !skipVerification && payment.signature) {
+      verification = await verifyPaymentOnChain(payment.signature, {
+        expectedAmount: amountUSDC,
+        expectedRecipient: getPayToAddress(),
+        network
+      });
+
+      if (!verification.valid) {
+        return res.status(402).json({
+          error: 'Payment verification failed',
+          details: verification.error,
+          code: verification.code,
+          hint: 'Ensure your USDC transfer transaction is confirmed on-chain before retrying'
+        });
+      }
+    } else if (!verifyOnChain || skipVerification) {
+      console.log('[x402] On-chain verification skipped (dev mode or disabled)');
     }
 
     // Attach payment info to request for downstream handler
     req.x402Payment = {
       ...payment,
-      amountUSDC,
+      verified: verification.valid,
+      verificationDetails: verification,
+      amountUSDC: verification.amount || amountUSDC,
       marketId,
       outcome: outcome.toUpperCase(),
-      agentHandle
+      agentHandle,
+      network,
+      payer: verification.payer || payment.payer
     };
 
     // Add settlement header to response
@@ -245,8 +422,10 @@ function x402BetGate(options = {}) {
     res.end = function(...args) {
       res.setHeader('PAYMENT-RESPONSE', Buffer.from(JSON.stringify({
         success: true,
-        network: payment.network,
+        verified: verification.valid,
+        network,
         transaction: payment.signature?.slice(0, 16) + '...',
+        amount: verification.amount || amountUSDC,
         betRecorded: true
       })).toString('base64'));
       originalEnd.apply(res, args);
@@ -279,6 +458,7 @@ module.exports = {
   sendBetPaymentRequired,
   getPaymentHeader,
   parsePaymentHeader,
+  verifyPaymentOnChain,
   x402BetGate,
   getPayToAddress,
   usdcToSolApprox,

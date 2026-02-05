@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentbets-x402-proxy",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Routes - proxy requests to /api/agent/* endpoints
+  // Update "zone_name" to your actual domain once configured in Cloudflare
+  "routes": [
+    { "pattern": "agentbets.gg/api/agent/*", "zone_name": "agentbets.gg" }
+  ],
+
+  // Configuration variables
+  "vars": {
+    // Wallet address to receive x402 payments (Base network USDC)
+    // This is your payment receiving address - update with your own wallet
+    "PAY_TO": "0x000000000000000000000000000000000000dEaD",
+
+    // Network for payments
+    // Use "base-sepolia" for testing, "base" for production
+    "NETWORK": "base-sepolia",
+
+    // Origin URL - your AgentBets API backend
+    // Update this to your actual Replit URL or custom domain
+    "ORIGIN_URL": "https://agentbets.gg",
+
+    // Protected patterns - routes that require x402 payment
+    // All traffic to these routes must pay (no human/bot distinction on free tier)
+    "PROTECTED_PATTERNS": [
+      {
+        "pattern": "/api/agent/bet/*",
+        "price": "$0.01",
+        "description": "Place a bet on AgentBets prediction market"
+      },
+      {
+        "pattern": "/api/agent/create-and-bet",
+        "price": "$0.05",
+        "description": "Create a new prediction market and place initial bet"
+      },
+      {
+        "pattern": "/api/agent/wallet",
+        "price": "$0.01",
+        "description": "Register agent wallet for payouts"
+      }
+    ]
+  }
+
+  // Note: JWT_SECRET must be set via wrangler secret, not here
+  // Run: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" | npx wrangler secret put JWT_SECRET
+}

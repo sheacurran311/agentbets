@@ -1045,7 +1045,7 @@ function App() {
           <div style={styles.topBarRight}>
             <div style={styles.networkBadge}>
               <span style={styles.networkDot}></span>
-              Mainnet
+              DEVNET
             </div>
             {connected && walletBalance !== null && (
               <div style={styles.balanceBadge}>
@@ -1988,17 +1988,19 @@ const styles = {
     alignItems: 'center',
     gap: '8px',
     padding: '8px 14px',
-    background: `${COLORS.secondary}20`,
+    background: `${COLORS.warning}20`,
     borderRadius: '20px',
     fontSize: '12px',
-    color: COLORS.secondary,
-    fontWeight: '500'
+    color: COLORS.warning,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px'
   },
   networkDot: {
     width: '8px',
     height: '8px',
     borderRadius: '50%',
-    background: COLORS.secondary,
+    background: COLORS.warning,
     animation: 'pulse 2s infinite'
   },
   balanceBadge: {

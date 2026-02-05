@@ -1,0 +1,4 @@
+# Copy this file to .dev.vars for local development
+# Generate JWT_SECRET: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+JWT_SECRET=your_64_char_hex_secret_here

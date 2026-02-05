@@ -1,6 +1,14 @@
 {
   "rules": [
     {
+      "pathPattern": "/create",
+      "apiPath": "/api/actions/create"
+    },
+    {
+      "pathPattern": "/create/*",
+      "apiPath": "/api/actions/create/*"
+    },
+    {
       "pathPattern": "/bet/*",
       "apiPath": "/api/actions/bet/*"
     },

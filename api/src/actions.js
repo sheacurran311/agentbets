@@ -1,17 +1,32 @@
 /**
  * Solana Actions (Blinks) for AgentBets
  *
- * Enables prediction market betting directly from X/Twitter through Blinks
+ * Universal betting interface for both humans (via X/Twitter) and AI agents (via Moltbook/URL)
+ * All bets use USDC via Poll.fun SDK for on-chain settlement
+ *
  * https://solana.com/developers/guides/advanced/actions
  *
  * Action URL format: solana-action:https://agentbets.gg/api/actions/bet/{marketId}
  * Blink URL format: https://dial.to/?action=solana-action%3Ahttps%3A%2F%2Fagentbets.gg%2Fapi%2Factions%2Fbet%2F{marketId}
+ *
+ * Agent Usage (Moltbook, etc.):
+ *   1. GET /api/actions/bet/{marketId} - Get market info and bet options
+ *   2. POST /api/actions/bet/{marketId}/place - Get unsigned USDC wager transaction
+ *   3. Sign transaction with agent's Solana wallet
+ *   4. Submit signed transaction on-chain
  */
 
 const express = require('express');
-const { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+const { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Connection } = require('@solana/web3.js');
+
+// Poll.fun SDK for on-chain USDC wagers
+const { pollFunService } = require('./pollfun');
 
 const router = express.Router();
+
+// Solana connection for transaction building
+const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const connection = new Connection(SOLANA_RPC, 'confirmed');
 
 // CORS headers required for Solana Actions
 const ACTION_CORS_HEADERS = {
@@ -22,7 +37,10 @@ const ACTION_CORS_HEADERS = {
 };
 
 // Platform config
-const AGENTBETS_ICON = 'https://agentbets.gg/icon.png'; // TODO: Add actual icon
+// Icon served from api/public/icon.png - use relative path for local dev, full URL for production
+const AGENTBETS_ICON = process.env.AGENTBETS_URL 
+  ? `${process.env.AGENTBETS_URL}/icon.png`
+  : '/icon.png';
 const AGENTBETS_TITLE = 'AgentBets';
 const ESCROW_WALLET = process.env.ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM';
 
@@ -37,6 +55,8 @@ router.options('*', (req, res) => {
 /**
  * GET /api/actions/bet/:marketId
  * Returns Action metadata for a specific market
+ * 
+ * Works for both human Blink clients and programmatic agent access
  */
 router.get('/bet/:marketId', async (req, res) => {
   res.set(ACTION_CORS_HEADERS);
@@ -62,12 +82,31 @@ router.get('/bet/:marketId', async (req, res) => {
       });
     }
 
-    // Format odds for display
-    const yesPercent = (market.yesOdds * 100).toFixed(0);
-    const noPercent = (market.noOdds * 100).toFixed(0);
-    const totalPool = (market.yesPool + market.noPool) / LAMPORTS_PER_SOL;
+    // Check if market is on-chain (has Poll.fun betPda)
+    const isOnChain = !!market.betPda;
+    
+    // Get on-chain data if available
+    let onChainData = null;
+    if (isOnChain) {
+      try {
+        onChainData = await pollFunService.getMarketData(market.betPda);
+      } catch (err) {
+        console.warn('[Actions] Could not fetch on-chain data:', err.message);
+      }
+    }
 
-    // Build action response
+    // Use on-chain data for pools if available, otherwise use local data
+    const yesPool = onChainData?.success ? onChainData.yesPool : (market.yesPool || 0) / 1e6;
+    const noPool = onChainData?.success ? onChainData.noPool : (market.noPool || 0) / 1e6;
+    const totalPool = yesPool + noPool;
+
+    // Calculate odds
+    const yesOdds = totalPool > 0 ? noPool / totalPool : 0.5;
+    const noOdds = totalPool > 0 ? yesPool / totalPool : 0.5;
+    const yesPercent = (yesOdds * 100).toFixed(0);
+    const noPercent = (noOdds * 100).toFixed(0);
+
+    // Build action response - USDC amounts
     const action = {
       type: 'action',
       icon: AGENTBETS_ICON,
@@ -82,12 +121,12 @@ router.get('/bet/:marketId', async (req, res) => {
             parameters: [
               {
                 name: 'amount',
-                label: 'Amount (SOL)',
+                label: 'Amount (USDC)',
                 type: 'number',
                 required: true,
-                min: 0.01,
-                max: 100,
-                patternDescription: 'Enter bet amount between 0.01 and 100 SOL'
+                min: 1,
+                max: 1000,
+                patternDescription: 'Enter bet amount between 1 and 1000 USDC'
               }
             ]
           },
@@ -97,12 +136,12 @@ router.get('/bet/:marketId', async (req, res) => {
             parameters: [
               {
                 name: 'amount',
-                label: 'Amount (SOL)',
+                label: 'Amount (USDC)',
                 type: 'number',
                 required: true,
-                min: 0.01,
-                max: 100,
-                patternDescription: 'Enter bet amount between 0.01 and 100 SOL'
+                min: 1,
+                max: 1000,
+                patternDescription: 'Enter bet amount between 1 and 1000 USDC'
               }
             ]
           }
@@ -112,7 +151,7 @@ router.get('/bet/:marketId', async (req, res) => {
 
     // Add market stats to description
     if (totalPool > 0) {
-      action.description += `\n\nPool: ${totalPool.toFixed(2)} SOL | Bets: ${market.totalBets}`;
+      action.description += `\n\nPool: ${totalPool.toFixed(2)} USDC | Bets: ${onChainData?.currentUserCount || market.totalBets || 0}`;
     }
 
     // Add end date
@@ -122,6 +161,13 @@ router.get('/bet/:marketId', async (req, res) => {
     // Creator info
     if (market.creatorAgent) {
       action.description += `\nCreated by: ${market.creatorAgent}`;
+    }
+
+    // Add on-chain status
+    if (isOnChain) {
+      action.description += `\n\nOn-chain via Poll.fun`;
+    } else {
+      action.description += `\n\nNote: This market is not yet on-chain. Contact @AgentBetsBot to create on-chain markets.`;
     }
 
     res.json(action);
@@ -136,7 +182,9 @@ router.get('/bet/:marketId', async (req, res) => {
 
 /**
  * POST /api/actions/bet/:marketId/place
- * Creates a bet transaction for the user to sign
+ * Creates a USDC wager transaction for the user to sign via Poll.fun SDK
+ * 
+ * Works for both human Blink clients and programmatic agent access (Moltbook, etc.)
  */
 router.post('/bet/:marketId/place', async (req, res) => {
   res.set(ACTION_CORS_HEADERS);
@@ -160,9 +208,9 @@ router.post('/bet/:marketId/place', async (req, res) => {
     }
 
     const betAmount = parseFloat(amount);
-    if (isNaN(betAmount) || betAmount < 0.01 || betAmount > 100) {
+    if (isNaN(betAmount) || betAmount < 1 || betAmount > 1000) {
       return res.status(400).json({
-        error: { message: 'Invalid amount. Must be between 0.01 and 100 SOL' }
+        error: { message: 'Invalid amount. Must be between 1 and 1000 USDC' }
       });
     }
 
@@ -185,46 +233,73 @@ router.post('/bet/:marketId/place', async (req, res) => {
       });
     }
 
-    // Create transfer transaction to escrow
+    // Check if market is on-chain
+    if (!market.betPda) {
+      return res.status(400).json({
+        error: { 
+          message: 'Market is not on-chain yet. Mention @AgentBetsBot on X to create an on-chain market.',
+          code: 'MARKET_NOT_ONCHAIN'
+        }
+      });
+    }
+
     const userPubkey = new PublicKey(account);
-    const escrowPubkey = new PublicKey(ESCROW_WALLET);
-    const lamports = Math.floor(betAmount * LAMPORTS_PER_SOL);
 
-    // Build the transaction
+    // Build Poll.fun USDC wager instruction
+    console.log(`[Actions] Building USDC wager: ${betAmount} USDC on ${outcome} for market ${marketId}`);
+    
+    const wagerResult = await pollFunService.buildWagerInstruction({
+      betPda: market.betPda,
+      side: outcome,  // 'YES' or 'NO'
+      amount: betAmount,  // USDC amount (SDK handles decimals)
+      userPubkey: account
+    });
+
+    if (!wagerResult.success) {
+      // Check for common errors
+      if (wagerResult.error?.includes('User account not found') || 
+          wagerResult.error?.includes('AccountNotInitialized')) {
+        return res.status(400).json({
+          error: { 
+            message: 'You need a Poll.fun account first. Visit https://poll.fun to create one, or we can create it for you.',
+            code: 'USER_ACCOUNT_REQUIRED',
+            hint: 'The first bet will auto-create your Poll.fun account'
+          }
+        });
+      }
+      return res.status(500).json({
+        error: { message: `Failed to build wager: ${wagerResult.error}` }
+      });
+    }
+
+    // Build transaction with the Poll.fun instruction
     const transaction = new Transaction();
-
-    // Add transfer instruction
-    transaction.add(
-      SystemProgram.transfer({
-        fromPubkey: userPubkey,
-        toPubkey: escrowPubkey,
-        lamports
-      })
-    );
-
-    // Add memo with bet details for tracking
-    // Note: In production, use @solana/spl-memo
-    // For now, we'll track via our API after signature confirmation
-
-    // Set fee payer (will be overwritten by client if not signed)
+    transaction.add(wagerResult.instruction);
     transaction.feePayer = userPubkey;
 
-    // Serialize transaction (unsigned - client will add blockhash and sign)
+    // Get recent blockhash
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    transaction.recentBlockhash = blockhash;
+
+    // Serialize transaction (unsigned - client will sign)
     const serializedTransaction = transaction.serialize({
       requireAllSignatures: false,
       verifySignatures: false
     }).toString('base64');
 
-    // Calculate potential payout
-    const pool = outcome === 'YES' ? market.yesPool : market.noPool;
-    const oppositePool = outcome === 'YES' ? market.noPool : market.yesPool;
-    const newPool = pool + lamports;
-    const share = lamports / newPool;
-    const potentialPayout = lamports + (share * oppositePool * 0.99);
+    // Calculate potential payout using Poll.fun data
+    const marketData = await pollFunService.getMarketData(market.betPda);
+    let potentialPayout = betAmount * 2; // Default estimate
+    if (marketData.success) {
+      const payoutCalc = pollFunService.calculatePotentialPayout(marketData, outcome, betAmount);
+      potentialPayout = payoutCalc.potentialWinnings;
+    }
+
+    console.log(`[Actions] USDC wager transaction built for ${account.slice(0, 8)}...`);
 
     res.json({
       transaction: serializedTransaction,
-      message: `Bet ${betAmount} SOL on ${outcome} - "${market.question.substring(0, 50)}..."`,
+      message: `Bet ${betAmount} USDC on ${outcome} - "${market.question.substring(0, 50)}..."`,
       links: {
         next: {
           type: 'post',
@@ -245,6 +320,9 @@ router.post('/bet/:marketId/place', async (req, res) => {
  * POST /api/actions/bet/:marketId/confirm
  * Confirms a bet after transaction signature
  * Called automatically by Blink client after successful signing
+ * 
+ * For on-chain bets via Poll.fun, the transaction is already recorded on-chain.
+ * This endpoint updates local tracking and returns success confirmation.
  */
 router.post('/bet/:marketId/confirm', async (req, res) => {
   res.set(ACTION_CORS_HEADERS);
@@ -268,9 +346,11 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
     }
 
     const betAmount = parseFloat(amount);
-    const lamports = Math.floor(betAmount * LAMPORTS_PER_SOL);
+    const amountUsdc = betAmount * 1e6; // USDC has 6 decimals
 
-    // Record the bet in our system
+    console.log(`[Actions] Confirming USDC wager: ${betAmount} USDC on ${outcome} - tx: ${signature.slice(0, 16)}...`);
+
+    // Record the bet in our local system for tracking
     const bets = req.app.locals.bets;
     const positions = req.app.locals.positions;
 
@@ -282,31 +362,34 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
         id: betId,
         marketId,
         outcome,
-        amount: lamports,
-        amountSOL: betAmount,
+        amount: amountUsdc,
+        amountUSDC: betAmount,
+        currency: 'USDC',
         wallet: account,
         txSignature: signature,
+        betPda: market.betPda,
         placedAt: new Date().toISOString(),
         status: 'active',
-        source: 'blink' // Track that this came from a Blink
+        source: 'blink', // Track that this came from a Blink
+        onChain: true
       };
 
       bets.set(betId, bet);
 
-      // Update market pools
+      // Update local market pools (will be synced with on-chain data)
       if (outcome === 'YES') {
-        market.yesPool += lamports;
+        market.yesPool = (market.yesPool || 0) + amountUsdc;
       } else {
-        market.noPool += lamports;
+        market.noPool = (market.noPool || 0) + amountUsdc;
       }
-      market.totalVolume += lamports;
-      market.totalBets += 1;
+      market.totalVolume = (market.totalVolume || 0) + amountUsdc;
+      market.totalBets = (market.totalBets || 0) + 1;
 
       // Recalculate odds
-      const totalPool = market.yesPool + market.noPool;
+      const totalPool = (market.yesPool || 0) + (market.noPool || 0);
       if (totalPool > 0) {
-        market.yesOdds = market.noPool / totalPool;
-        market.noOdds = market.yesPool / totalPool;
+        market.yesOdds = (market.noPool || 0) / totalPool;
+        market.noOdds = (market.yesPool || 0) / totalPool;
       }
 
       req.app.locals.markets.set(marketId, market);
@@ -320,17 +403,30 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
         totalBet: 0,
         bets: []
       };
-      existingPosition.totalBet += lamports;
+      existingPosition.totalBet += amountUsdc;
       existingPosition.bets.push(betId);
       positions.set(positionKey, existingPosition);
+    }
+
+    // Fetch updated on-chain data for display
+    let poolInfo = '';
+    if (market.betPda) {
+      try {
+        const marketData = await pollFunService.getMarketData(market.betPda);
+        if (marketData.success) {
+          poolInfo = `\n\nCurrent Pool: ${marketData.totalPool.toFixed(2)} USDC`;
+        }
+      } catch (err) {
+        console.warn('[Actions] Could not fetch updated pool data:', err.message);
+      }
     }
 
     // Return success action
     res.json({
       type: 'completed',
       icon: AGENTBETS_ICON,
-      title: 'Bet Placed!',
-      description: `You bet ${betAmount} SOL on ${outcome}\n\n"${market.question.substring(0, 80)}..."\n\nGood luck!`,
+      title: 'Bet Placed On-Chain!',
+      description: `You bet ${betAmount} USDC on ${outcome}\n\n"${market.question.substring(0, 80)}..."${poolInfo}\n\nYour wager is recorded on Solana via Poll.fun. Good luck!`,
       label: 'Completed'
     });
 
@@ -344,16 +440,26 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
 
 /**
  * GET /api/actions/markets
- * Returns Action to browse all active markets
+ * Returns Action to browse all active on-chain markets
+ * 
+ * Prioritizes markets with on-chain betPda (Poll.fun integration)
  */
 router.get('/markets', async (req, res) => {
   res.set(ACTION_CORS_HEADERS);
 
   try {
     const markets = req.app.locals.markets;
+    
+    // Prioritize on-chain markets, then sort by volume
     const activeMarkets = Array.from(markets?.values() || [])
       .filter(m => m.status === 'active')
-      .sort((a, b) => b.totalVolume - a.totalVolume)
+      .sort((a, b) => {
+        // On-chain markets first
+        if (a.betPda && !b.betPda) return -1;
+        if (!a.betPda && b.betPda) return 1;
+        // Then by volume
+        return (b.totalVolume || 0) - (a.totalVolume || 0);
+      })
       .slice(0, 4); // Show top 4 markets
 
     if (activeMarkets.length === 0) {
@@ -361,7 +467,7 @@ router.get('/markets', async (req, res) => {
         type: 'action',
         icon: AGENTBETS_ICON,
         title: AGENTBETS_TITLE,
-        description: 'No active markets available.',
+        description: 'No active markets available.\n\nMention @AgentBetsBot on X to create a new market!',
         label: 'No Markets',
         disabled: true
       });
@@ -372,11 +478,11 @@ router.get('/markets', async (req, res) => {
       type: 'action',
       icon: AGENTBETS_ICON,
       title: AGENTBETS_TITLE,
-      description: 'Prediction Markets for AI Agent Outcomes\n\nSelect a market to place your bet:',
+      description: 'Prediction Markets for AI Agent Outcomes\n\nBet with USDC on-chain via Poll.fun\n\nSelect a market to place your bet:',
       label: 'Browse Markets',
       links: {
         actions: activeMarkets.map(market => ({
-          label: market.question.substring(0, 30) + (market.question.length > 30 ? '...' : ''),
+          label: (market.betPda ? '🔗 ' : '') + market.question.substring(0, 28) + (market.question.length > 28 ? '...' : ''),
           href: `/api/actions/bet/${market.id}`
         }))
       }
@@ -462,10 +568,204 @@ router.get('/royalties/:agentHandle', async (req, res) => {
 });
 
 /**
+ * GET /api/actions/create
+ * Returns Action form for creating a new prediction market
+ * 
+ * Enables Moltbook agents and other platforms to create markets via Blinks
+ */
+router.get('/create', async (req, res) => {
+  res.set(ACTION_CORS_HEADERS);
+
+  try {
+    const action = {
+      type: 'action',
+      icon: AGENTBETS_ICON,
+      title: 'Create Prediction Market',
+      description: 'Create a new prediction market on AgentBets.\n\nMarket creators earn 0.3% of winning payouts!\n\nFill in the details below:',
+      label: 'Create Market',
+      links: {
+        actions: [
+          {
+            label: 'Create Market',
+            href: '/api/actions/create/submit?question={question}&endDate={endDate}&category={category}',
+            parameters: [
+              {
+                name: 'question',
+                label: 'Prediction Question',
+                type: 'text',
+                required: true,
+                patternDescription: 'e.g., "Will $BUTTERS reach $1M mcap by March 1?"'
+              },
+              {
+                name: 'endDate',
+                label: 'End Date (YYYY-MM-DD)',
+                type: 'text',
+                required: true,
+                pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+                patternDescription: 'Format: 2026-03-01'
+              },
+              {
+                name: 'category',
+                label: 'Category',
+                type: 'select',
+                required: false,
+                options: [
+                  { label: 'General', value: 'general' },
+                  { label: 'Token/Price', value: 'token' },
+                  { label: 'Performance', value: 'performance' },
+                  { label: 'Competition', value: 'competition' },
+                  { label: 'Milestone', value: 'milestone' }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    };
+
+    res.json(action);
+
+  } catch (error) {
+    console.error('[Actions] Error getting create form:', error);
+    res.status(500).json({
+      error: { message: error.message }
+    });
+  }
+});
+
+/**
+ * POST /api/actions/create/submit
+ * Creates a new market from Blink form submission
+ * 
+ * Since market creation doesn't require on-chain transaction,
+ * we create the market directly and return success
+ */
+router.post('/create/submit', async (req, res) => {
+  res.set(ACTION_CORS_HEADERS);
+
+  try {
+    const { question, endDate, category } = req.query;
+    const { account } = req.body;
+
+    // Validate inputs
+    if (!question) {
+      return res.status(400).json({
+        error: { message: 'Question is required' }
+      });
+    }
+
+    if (!endDate) {
+      return res.status(400).json({
+        error: { message: 'End date is required' }
+      });
+    }
+
+    if (!account) {
+      return res.status(400).json({
+        error: { message: 'Wallet account is required' }
+      });
+    }
+
+    // Parse end date
+    let parsedEndDate;
+    try {
+      parsedEndDate = new Date(endDate + 'T23:59:59Z');
+      if (isNaN(parsedEndDate.getTime())) {
+        throw new Error('Invalid date');
+      }
+      if (parsedEndDate < new Date()) {
+        return res.status(400).json({
+          error: { message: 'End date must be in the future' }
+        });
+      }
+    } catch (e) {
+      return res.status(400).json({
+        error: { message: 'Invalid end date format. Use YYYY-MM-DD' }
+      });
+    }
+
+    // Create market via the main API logic
+    const markets = req.app.locals.markets;
+    const { v4: uuidv4 } = require('uuid');
+    const royalties = require('./royalties');
+    const agentFunding = require('./agentFunding');
+
+    const marketId = uuidv4();
+    const now = new Date().toISOString();
+
+    // Derive agent handle from wallet (shortened)
+    const creatorAgent = `wallet:${account.slice(0, 8)}`;
+
+    const market = {
+      id: marketId,
+      question: decodeURIComponent(question),
+      description: '',
+      category: category || 'general',
+      outcomes: ['YES', 'NO'],
+      resolutionSource: 'manual',
+      endDate: parsedEndDate.toISOString(),
+      createdAt: now,
+      creatorWallet: account,
+      creatorAgent: creatorAgent,
+      status: 'active',
+      resolution: null,
+      resolvedAt: null,
+      verificationUrl: null,
+      verificationMethod: null,
+      threshold: null,
+      tags: [],
+      yesPool: 0,
+      noPool: 0,
+      totalVolume: 0,
+      totalBets: 0,
+      yesOdds: 0.5,
+      noOdds: 0.5,
+      source: 'blink' // Track that this came from a Blink
+    };
+
+    markets.set(marketId, market);
+
+    // Record for royalty tracking
+    royalties.recordMarketCreation(creatorAgent, marketId);
+    agentFunding.awardMarketCreationPoints(creatorAgent, marketId);
+
+    console.log(`[Actions] Market created via Blink: ${marketId} by ${account.slice(0, 8)}...`);
+
+    // Generate Blink URL for the new market
+    const blinkUrl = generateBlinkUrl(marketId);
+
+    // Return success - no transaction needed for market creation
+    // We return a "message" type response since no signing is required
+    res.json({
+      type: 'completed',
+      icon: AGENTBETS_ICON,
+      title: 'Market Created!',
+      description: `Your prediction market has been created:\n\n"${decodeURIComponent(question).substring(0, 80)}..."\n\nEnds: ${parsedEndDate.toLocaleDateString()}\n\nShare the Blink to get others to bet!\n\nYou'll earn 0.3% of winning payouts.`,
+      label: 'Success',
+      links: {
+        actions: [
+          {
+            label: 'View Market',
+            href: `/api/actions/bet/${marketId}`
+          }
+        ]
+      }
+    });
+
+  } catch (error) {
+    console.error('[Actions] Error creating market:', error);
+    res.status(500).json({
+      error: { message: error.message }
+    });
+  }
+});
+
+/**
  * Helper: Generate Blink URL for a market
  */
-function generateBlinkUrl(marketId, baseUrl = 'https://agentbets.gg') {
-  const actionUrl = `solana-action:${baseUrl}/api/actions/bet/${marketId}`;
+function generateBlinkUrl(marketId, baseUrl = null) {
+  const base = baseUrl || process.env.AGENTBETS_URL || 'https://e17d6b53-0239-40a3-a3da-40bbbfa2ad31-00-1g5zq91aym4oh.kirk.replit.dev';
+  const actionUrl = `solana-action:${base}/api/actions/bet/${marketId}`;
   const encodedAction = encodeURIComponent(actionUrl);
   return `https://dial.to/?action=${encodedAction}`;
 }
@@ -473,8 +773,19 @@ function generateBlinkUrl(marketId, baseUrl = 'https://agentbets.gg') {
 /**
  * Helper: Generate Blink URL for markets browser
  */
-function generateMarketsBlinkUrl(baseUrl = 'https://agentbets.gg') {
-  const actionUrl = `solana-action:${baseUrl}/api/actions/markets`;
+function generateMarketsBlinkUrl(baseUrl = null) {
+  const base = baseUrl || process.env.AGENTBETS_URL || 'https://e17d6b53-0239-40a3-a3da-40bbbfa2ad31-00-1g5zq91aym4oh.kirk.replit.dev';
+  const actionUrl = `solana-action:${base}/api/actions/markets`;
+  const encodedAction = encodeURIComponent(actionUrl);
+  return `https://dial.to/?action=${encodedAction}`;
+}
+
+/**
+ * Helper: Generate Blink URL for market creation
+ */
+function generateCreateBlinkUrl(baseUrl = null) {
+  const base = baseUrl || process.env.AGENTBETS_URL || 'https://e17d6b53-0239-40a3-a3da-40bbbfa2ad31-00-1g5zq91aym4oh.kirk.replit.dev';
+  const actionUrl = `solana-action:${base}/api/actions/create`;
   const encodedAction = encodeURIComponent(actionUrl);
   return `https://dial.to/?action=${encodedAction}`;
 }
@@ -484,5 +795,6 @@ module.exports = {
   router,
   generateBlinkUrl,
   generateMarketsBlinkUrl,
+  generateCreateBlinkUrl,
   ACTION_CORS_HEADERS
 };
