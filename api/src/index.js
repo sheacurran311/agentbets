@@ -13,7 +13,11 @@ const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER
 
 // Database
 const db = require('./db');
+const dbCompat = require('./db/compat');
 const { Market, Bet, Agent, Royalty, Points, OddsHistory, Position } = require('./db/models');
+
+// Use compatibility layer for storage (works with both DB and in-memory)
+const { markets, bets, positions, oddsHistory } = dbCompat;
 
 // Escrow module for on-chain operations
 const escrow = require('./escrow');
@@ -139,9 +143,15 @@ function recordOddsHistory(marketId, market) {
   }
 }
 
-// Expose database models to routers via app.locals
+// Expose database models and compatibility layer to routers via app.locals
 app.locals.db = db;
+app.locals.dbCompat = dbCompat;
 app.locals.models = { Market, Bet, Agent, Royalty, Points, OddsHistory, Position };
+// Expose storage interfaces (these are async-compatible)
+app.locals.markets = markets;
+app.locals.bets = bets;
+app.locals.positions = positions;
+app.locals.oddsHistory = oddsHistory;
 
 /**
  * Generate proper verification URL based on resolution source
@@ -356,78 +366,85 @@ app.post('/api/markets', async (req, res) => {
  * Get all markets
  * GET /api/markets
  */
-app.get('/api/markets', (req, res) => {
-  const { status, category, limit = 50 } = req.query;
+app.get('/api/markets', async (req, res) => {
+  try {
+    const { status, category, limit = 50 } = req.query;
 
-  let results = Array.from(markets.values());
+    let results = await markets.findAll({ status, category, limit: parseInt(limit) });
 
-  if (status) {
-    results = results.filter(m => m.status === status);
+    // Sort by volume (most active first)
+    results.sort((a, b) => (b.totalVolume || 0) - (a.totalVolume || 0));
+
+    res.json({
+      markets: results,
+      total: results.length
+    });
+  } catch (error) {
+    console.error('[API] Error fetching markets:', error);
+    res.status(500).json({ error: 'Failed to fetch markets' });
   }
-
-  if (category) {
-    results = results.filter(m => m.category === category);
-  }
-
-  // Sort by volume (most active first)
-  results.sort((a, b) => b.totalVolume - a.totalVolume);
-
-  res.json({
-    markets: results.slice(0, parseInt(limit)),
-    total: results.length
-  });
 });
 
 /**
  * Get market by ID
  * GET /api/markets/:id
  */
-app.get('/api/markets/:id', (req, res) => {
-  const market = markets.get(req.params.id);
+app.get('/api/markets/:id', async (req, res) => {
+  try {
+    const market = await markets.get(req.params.id);
 
-  if (!market) {
-    return res.status(404).json({ error: 'Market not found' });
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    // Get bets for this market
+    const marketBets = await bets.findByMarketId(market.id);
+
+    res.json({
+      ...market,
+      bets: marketBets,
+      betCount: marketBets.length
+    });
+  } catch (error) {
+    console.error('[API] Error fetching market:', error);
+    res.status(500).json({ error: 'Failed to fetch market' });
   }
-
-  // Get bets for this market
-  const marketBets = Array.from(bets.values()).filter(b => b.marketId === market.id);
-
-  res.json({
-    ...market,
-    bets: marketBets,
-    betCount: marketBets.length
-  });
 });
 
 /**
  * Get market odds history
  * GET /api/markets/:id/history
  */
-app.get('/api/markets/:id/history', (req, res) => {
-  const market = markets.get(req.params.id);
+app.get('/api/markets/:id/history', async (req, res) => {
+  try {
+    const market = await markets.get(req.params.id);
 
-  if (!market) {
-    return res.status(404).json({ error: 'Market not found' });
-  }
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
 
-  const history = oddsHistory.get(req.params.id) || [];
+    const history = await oddsHistory.getByMarketId(req.params.id) || [];
   
-  // Optional: limit the number of data points returned
-  const { limit = 50 } = req.query;
-  const limitedHistory = history.slice(-parseInt(limit));
+    // Optional: limit the number of data points returned
+    const { limit = 50 } = req.query;
+    const limitedHistory = history.slice(-parseInt(limit));
 
-  res.json({
-    marketId: req.params.id,
-    question: market.question,
-    currentOdds: {
-      yesOdds: market.yesOdds,
-      noOdds: market.noOdds,
-      yesPool: market.yesPool,
-      noPool: market.noPool
-    },
-    history: limitedHistory,
-    totalDataPoints: history.length
-  });
+    res.json({
+      marketId: req.params.id,
+      question: market.question,
+      currentOdds: {
+        yesOdds: market.yesOdds,
+        noOdds: market.noOdds,
+        yesPool: market.yesPool,
+        noPool: market.noPool
+      },
+      history: limitedHistory,
+      totalDataPoints: history.length
+    });
+  } catch (error) {
+    console.error('[API] Error fetching history:', error);
+    res.status(500).json({ error: 'Failed to fetch history' });
+  }
 });
 
 /**
@@ -439,7 +456,7 @@ app.get('/api/markets/:id/history', (req, res) => {
  */
 app.get('/api/markets/:id/price-history', async (req, res) => {
   try {
-    const market = markets.get(req.params.id);
+    const market = await markets.get(req.params.id);
 
     if (!market) {
       return res.status(404).json({ error: 'Market not found' });
@@ -558,7 +575,7 @@ app.get('/api/markets/:id/price-history', async (req, res) => {
  */
 app.get('/api/verify/:marketId', async (req, res) => {
   try {
-    const market = markets.get(req.params.marketId);
+    const market = await markets.get(req.params.marketId);
 
     if (!market) {
       return res.status(404).json({ error: 'Market not found' });
@@ -736,7 +753,7 @@ function requireAdmin(req, res, next) {
 app.put('/api/markets/:id/propose-resolution', async (req, res) => {
   try {
     const { proposedOutcome, confidence, evidence, proposedBy } = req.body;
-    const market = markets.get(req.params.id);
+    const market = await markets.get(req.params.id);
 
     if (!market) {
       return res.status(404).json({ error: 'Market not found' });
@@ -751,16 +768,16 @@ app.put('/api/markets/:id/propose-resolution', async (req, res) => {
     }
 
     // Move to pending confirmation state
-    market.status = 'pending_confirmation';
-    market.proposedResolution = {
-      outcome: proposedOutcome,
-      confidence: confidence || 0,
-      evidence: evidence || {},
-      proposedAt: new Date().toISOString(),
-      proposedBy: proposedBy || 'manual'
-    };
-
-    markets.set(market.id, market);
+    await markets.update(market.id, {
+      status: 'pending_confirmation',
+      proposedResolution: {
+        outcome: proposedOutcome,
+        confidence: confidence || 0,
+        evidence: evidence || {},
+        proposedAt: new Date().toISOString(),
+        proposedBy: proposedBy || 'manual'
+      }
+    });
 
     console.log(`[Resolution] Market ${market.id} proposed: ${proposedOutcome} (by ${proposedBy})`);
 
@@ -3632,6 +3649,7 @@ async function startServer() {
       
       if (connected) {
         dbConnected = true;
+        dbCompat.setDbConnected(true);
         console.log('[DB] Running migrations...');
         await db.runMigrations();
         

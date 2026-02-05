@@ -20,11 +20,18 @@ const AgentVerifier = require('./verifier');
 const ResolutionEngine = require('./resolver');
 const AgentBetsAPI = require('./api-client');
 
+// Database (shared with API)
+const db = require('../../api/src/db');
+const { Resolution, ProcessedTweet } = require('../../api/src/db/models');
+
 const app = express();
 app.use(express.json());
 const PORT = process.env.BOT_PORT || 3003;
 
-// Persistence file path
+// Database connection flag
+let dbConnected = false;
+
+// Fallback file paths (used when database not available)
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const PENDING_RESOLUTIONS_FILE = path.join(DATA_DIR, 'pending-resolutions.json');
 const PROCESSED_TWEETS_FILE = path.join(DATA_DIR, 'processed-tweets.json');
@@ -79,7 +86,7 @@ function validateEnvironment() {
 }
 
 /**
- * Ensure data directory exists
+ * Ensure data directory exists (fallback)
  */
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -89,9 +96,24 @@ function ensureDataDir() {
 }
 
 /**
- * Load pending resolutions from disk
+ * Load pending resolutions from database (or disk as fallback)
  */
-function loadPendingResolutions() {
+async function loadPendingResolutions() {
+  if (dbConnected) {
+    try {
+      const resolutions = await Resolution.getPending();
+      console.log(`[Persistence] Loaded ${resolutions.length} pending resolutions from database`);
+      const map = new Map();
+      for (const r of resolutions) {
+        map.set(r.marketId, r);
+      }
+      return map;
+    } catch (error) {
+      console.error('[Persistence] Error loading from database:', error.message);
+    }
+  }
+  
+  // Fallback to file
   try {
     if (fs.existsSync(PENDING_RESOLUTIONS_FILE)) {
       const data = JSON.parse(fs.readFileSync(PENDING_RESOLUTIONS_FILE, 'utf8'));
@@ -99,28 +121,85 @@ function loadPendingResolutions() {
       return new Map(Object.entries(data));
     }
   } catch (error) {
-    console.error('[Persistence] Error loading pending resolutions:', error.message);
+    console.error('[Persistence] Error loading from disk:', error.message);
   }
   return new Map();
 }
 
 /**
- * Save pending resolutions to disk
+ * Save pending resolutions to database (or disk as fallback)
  */
-function savePendingResolutions() {
+async function savePendingResolutions() {
+  if (dbConnected) {
+    try {
+      for (const [marketId, data] of pendingResolutions) {
+        await Resolution.create({ ...data, marketId });
+      }
+      return;
+    } catch (error) {
+      console.error('[Persistence] Error saving to database:', error.message);
+    }
+  }
+  
+  // Fallback to file
   try {
     ensureDataDir();
     const data = Object.fromEntries(pendingResolutions);
     fs.writeFileSync(PENDING_RESOLUTIONS_FILE, JSON.stringify(data, null, 2));
   } catch (error) {
-    console.error('[Persistence] Error saving pending resolutions:', error.message);
+    console.error('[Persistence] Error saving to disk:', error.message);
   }
 }
 
 /**
- * Load processed tweets from disk
+ * Save a single pending resolution to database
  */
-function loadProcessedTweets() {
+async function savePendingResolution(marketId, data) {
+  if (dbConnected) {
+    try {
+      await Resolution.create({ ...data, marketId });
+    } catch (error) {
+      console.error('[Persistence] Error saving resolution to database:', error.message);
+    }
+  }
+  // Always update the in-memory map
+  pendingResolutions.set(marketId, data);
+  
+  // Also save to file as backup
+  if (!dbConnected) {
+    savePendingResolutions();
+  }
+}
+
+/**
+ * Delete a pending resolution from database
+ */
+async function deletePendingResolution(marketId) {
+  if (dbConnected) {
+    try {
+      await Resolution.delete(marketId);
+    } catch (error) {
+      console.error('[Persistence] Error deleting resolution from database:', error.message);
+    }
+  }
+  pendingResolutions.delete(marketId);
+}
+
+/**
+ * Load processed tweets from database (or disk as fallback)
+ */
+async function loadProcessedTweets() {
+  if (dbConnected) {
+    try {
+      const tweetSet = await ProcessedTweet.toSet();
+      console.log(`[Persistence] Loaded ${tweetSet.size} processed tweet IDs from database`);
+      return tweetSet;
+    } catch (error) {
+      console.error('[Persistence] Error loading tweets from database:', error.message);
+    }
+  }
+  
+  // Fallback to file
   try {
     if (fs.existsSync(PROCESSED_TWEETS_FILE)) {
       const data = JSON.parse(fs.readFileSync(PROCESSED_TWEETS_FILE, 'utf8'));
@@ -128,21 +207,56 @@ function loadProcessedTweets() {
       return new Set(data);
     }
   } catch (error) {
-    console.error('[Persistence] Error loading processed tweets:', error.message);
+    console.error('[Persistence] Error loading tweets from disk:', error.message);
   }
   return new Set();
+}
+
+/**
+ * Mark a tweet as processed
+ */
+async function markTweetProcessed(tweetId) {
+  processedTweets.add(tweetId);
+  if (dbConnected) {
+    try {
+      await ProcessedTweet.add(tweetId);
+    } catch (error) {
+      console.error('[Persistence] Error marking tweet in database:', error.message);
+    }
+  }
+}
+
+/**
+ * Check if a tweet has been processed
+ */
+async function isTweetProcessed(tweetId) {
+  if (processedTweets.has(tweetId)) {
+    return true;
+  }
+  if (dbConnected) {
+    try {
+      return await ProcessedTweet.has(tweetId);
+    } catch (error) {
+      console.error('[Persistence] Error checking tweet in database:', error.message);
+    }
+  }
+  return false;
 }
 
 /**
  * Save processed tweets to disk (keep last 10000 to prevent unbounded growth)
  */
 function saveProcessedTweets() {
+  if (dbConnected) {
+    // Database handles this automatically
+    return;
+  }
   try {
     ensureDataDir();
     const tweets = Array.from(processedTweets).slice(-10000);
     fs.writeFileSync(PROCESSED_TWEETS_FILE, JSON.stringify(tweets));
   } catch (error) {
-    console.error('[Persistence] Error saving processed tweets:', error.message);
+    console.error('[Persistence] Error saving tweets to disk:', error.message);
   }
 }
 
@@ -153,12 +267,38 @@ const verifier = new AgentVerifier();
 const resolver = new ResolutionEngine();
 const agentbets = new AgentBetsAPI();
 
-// Load persisted data
-ensureDataDir();
-const processedTweets = loadProcessedTweets();
-const pendingResolutions = loadPendingResolutions();
+// Storage - will be initialized async on startup
+let processedTweets = new Set();
+let pendingResolutions = new Map();
 const notifiedMarkets = new Set(); // Track which markets we've sent reminders for
 const scheduledJobs = new Map(); // Track scheduled resolution jobs
+
+/**
+ * Initialize storage (database or file-based)
+ */
+async function initializeStorage() {
+  // Try to connect to database
+  if (process.env.DATABASE_URL) {
+    console.log('[Bot] Connecting to PostgreSQL...');
+    const connected = await db.initDatabase();
+    if (connected) {
+      dbConnected = true;
+      console.log('[Bot] Database connected successfully');
+    } else {
+      console.warn('[Bot] Database connection failed, using file-based storage');
+    }
+  } else {
+    console.warn('[Bot] DATABASE_URL not set, using file-based storage');
+    ensureDataDir();
+  }
+  
+  // Load persisted data
+  processedTweets = await loadProcessedTweets();
+  pendingResolutions = await loadPendingResolutions();
+  
+  console.log(`[Bot] Loaded ${processedTweets.size} processed tweets`);
+  console.log(`[Bot] Loaded ${pendingResolutions.size} pending resolutions`);
+}
 
 /**
  * Extract @handles from text (excluding the bot itself)
@@ -901,85 +1041,112 @@ app.post('/webhook/resolution-confirmed', async (req, res) => {
   res.json({ success: true, message: 'Resolution announced' });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`
+// Start server with async initialization
+async function startBot() {
+  try {
+    // Initialize storage (database or file-based)
+    await initializeStorage();
+    
+    // Start Express server
+    app.listen(PORT, () => {
+      console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║           AgentBets X Bot Running                         ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                                ║
 ║  Mode: ${process.env.NODE_ENV || 'development'}                                      ║
+║  Storage: ${dbConnected ? 'PostgreSQL' : 'File-based'}                                ║
 ║                                                           ║
 ║  Agent-created prediction markets via X/Twitter           ║
-║  Built by Butters (@AIButters)                           ║
+║  Built by Butters (@AIButters)                            ║
 ╚═══════════════════════════════════════════════════════════╝
-  `);
+      `);
 
-  // Validate environment variables
-  const envValid = validateEnvironment();
+      // Validate environment variables
+      const envValid = validateEnvironment();
 
-  // Reschedule all pending market resolutions from persistence
-  rescheduleAllMarkets();
-  console.log(`[Bot] Scheduled ${scheduledJobs.size} market resolutions at exact end times`);
+      // Reschedule all pending market resolutions from persistence
+      rescheduleAllMarkets();
+      console.log(`[Bot] Scheduled ${scheduledJobs.size} market resolutions at exact end times`);
 
-  // Initial check
-  if (process.env.TWITTER_BEARER_TOKEN) {
-    console.log('[Bot] Twitter credentials configured, starting polling...');
+      // Initial check
+      if (process.env.TWITTER_BEARER_TOKEN) {
+        console.log('[Bot] Twitter credentials configured, starting polling...');
 
-    // Check mentions every 2 minutes
-    const mentionJob = new CronJob('*/2 * * * *', checkMentions);
-    mentionJob.start();
+        // Check mentions every 2 minutes
+        const mentionJob = new CronJob('*/2 * * * *', checkMentions);
+        mentionJob.start();
 
-    // Check resolutions every minute (fallback for missed scheduled jobs)
-    // Primary resolution happens via node-schedule at exact end times
-    const resolveJob = new CronJob('* * * * *', checkResolutions);
-    resolveJob.start();
+        // Check resolutions every minute (fallback for missed scheduled jobs)
+        // Primary resolution happens via node-schedule at exact end times
+        const resolveJob = new CronJob('* * * * *', checkResolutions);
+        resolveJob.start();
 
-    // Send market reminders every hour (for markets ending within 24h)
-    const reminderJob = new CronJob('0 * * * *', sendMarketReminders);
-    reminderJob.start();
+        // Send market reminders every hour (for markets ending within 24h)
+        const reminderJob = new CronJob('0 * * * *', sendMarketReminders);
+        reminderJob.start();
 
-    // Save processed tweets periodically (every 5 minutes)
-    const saveJob = new CronJob('*/5 * * * *', () => {
-      saveProcessedTweets();
+        // Save processed tweets periodically (every 5 minutes) - only for file-based
+        if (!dbConnected) {
+          const saveJob = new CronJob('*/5 * * * *', () => {
+            saveProcessedTweets();
+          });
+          saveJob.start();
+        }
+
+        // Initial check on startup
+        setTimeout(checkMentions, 5000);
+      } else {
+        console.log('[Bot] No Twitter credentials - running in demo mode');
+        console.log('[Bot] Set TWITTER_BEARER_TOKEN to enable Twitter integration');
+        
+        if (!envValid) {
+          console.error('[Bot] WARNING: Missing required environment variables for follower verification!');
+          console.error('[Bot] Bets requiring X API verification will fail to resolve.');
+        }
+      }
     });
-    saveJob.start();
-
-    // Initial check on startup
-    setTimeout(checkMentions, 5000);
-  } else {
-    console.log('[Bot] No Twitter credentials - running in demo mode');
-    console.log('[Bot] Set TWITTER_BEARER_TOKEN to enable Twitter integration');
-    
-    if (!envValid) {
-      console.error('[Bot] WARNING: Missing required environment variables for follower verification!');
-      console.error('[Bot] Bets requiring X API verification will fail to resolve.');
-    }
+  } catch (error) {
+    console.error('[Bot] Failed to start:', error);
+    process.exit(1);
   }
-});
+}
+
+// Start the bot
+startBot();
 
 // Graceful shutdown - save state before exit
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('[Bot] Received SIGTERM, saving state...');
-  savePendingResolutions();
+  await savePendingResolutions();
   saveProcessedTweets();
   
   // Cancel all scheduled jobs
   for (const [marketId, job] of scheduledJobs) {
     job.cancel();
+  }
+  
+  // Close database connection
+  if (dbConnected) {
+    await db.closePool();
   }
   
   process.exit(0);
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('[Bot] Received SIGINT, saving state...');
-  savePendingResolutions();
+  await savePendingResolutions();
   saveProcessedTweets();
   
   // Cancel all scheduled jobs
   for (const [marketId, job] of scheduledJobs) {
     job.cancel();
+  }
+  
+  // Close database connection
+  if (dbConnected) {
+    await db.closePool();
   }
   
   process.exit(0);
