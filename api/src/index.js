@@ -3639,6 +3639,9 @@ app.get('*', (req, res, next) => {
   }
 });
 
+// Store server reference for graceful shutdown
+let server = null;
+
 // Initialize database and start server
 async function startServer() {
   try {
@@ -3668,8 +3671,8 @@ async function startServer() {
       console.warn('[DB] Data will be lost on restart!');
     }
 
-    // Start server
-    app.listen(PORT, () => {
+    // Start server and store reference
+    server = app.listen(PORT, () => {
       console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║          AgentBets API Server Running                     ║
@@ -3690,18 +3693,39 @@ async function startServer() {
   }
 }
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('[Server] Received SIGTERM, shutting down...');
-  await db.closePool();
+// Graceful shutdown function
+async function gracefulShutdown(signal) {
+  console.log(`[Server] Received ${signal}, shutting down gracefully...`);
+  
+  // Close HTTP server first (stop accepting new connections)
+  if (server) {
+    await new Promise((resolve) => {
+      server.close((err) => {
+        if (err) {
+          console.error('[Server] Error closing HTTP server:', err);
+        } else {
+          console.log('[Server] HTTP server closed');
+        }
+        resolve();
+      });
+    });
+  }
+  
+  // Close database connection
+  try {
+    await db.closePool();
+    console.log('[Server] Database connection closed');
+  } catch (err) {
+    console.error('[Server] Error closing database:', err);
+  }
+  
+  console.log('[Server] Shutdown complete');
   process.exit(0);
-});
+}
 
-process.on('SIGINT', async () => {
-  console.log('[Server] Received SIGINT, shutting down...');
-  await db.closePool();
-  process.exit(0);
-});
+// Handle shutdown signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Start the server
 startServer();

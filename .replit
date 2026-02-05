@@ -8,21 +8,17 @@ hidden = [".config", "package-lock.json"]
 channel = "stable-25_05"
 
 [deployment]
-run = ["sh", "-c", "npm run start"]
+run = ["sh", "-c", "cd api && node src/index.js"]
 deploymentTarget = "cloudrun"
 ignorePorts = false
 
 [[ports]]
 localPort = 3002
-externalPort = 80
+externalPort = 3002
 
 [[ports]]
 localPort = 5000
 externalPort = 80
-
-[[ports]]
-localPort = 5173
-externalPort = 3000
 
 [agent]
 expertMode = true
@@ -32,21 +28,13 @@ runButton = "Project"
 
 [[workflows.workflow]]
 name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "AgentBets App"
-
-[[workflows.workflow]]
-name = "AgentBets App"
 author = "agent"
 
 [workflows.workflow.metadata]
 outputType = "webview"
+port = 5000
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd /home/runner/workspace && npx concurrently \"cd api && node src/index.js\" \"cd frontend && node ./node_modules/vite/bin/vite.js\""
+args = "cd /home/runner/workspace && npx concurrently --kill-others --kill-signal SIGTERM \"cd api && node src/index.js\" \"cd frontend && npm run dev\""
 waitForPort = 5000
