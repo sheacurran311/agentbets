@@ -5,7 +5,7 @@ import { WalletMultiButton, useWalletModal } from '@solana/wallet-adapter-react-
 import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js'
 
 const API_BASE = '/api'
-const ESCROW_WALLET = 'Ds9gRNjHufEa918D2HJSbE9AQo8wpqsor9g8rbH6Xwfw'
+const ESCROW_WALLET = '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM'
 
 // USDC Token Mint (devnet)
 const USDC_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'

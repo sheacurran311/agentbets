@@ -110,15 +110,18 @@ class AgentBetsAPI {
   }
 
   /**
-   * Resolve a market
+   * Propose a resolution for a market (two-phase resolution)
+   * Bot proposes outcome but does NOT finalize - admin must confirm
    */
-  async resolveMarket(marketId, resolution, resolverWallet = null) {
+  async proposeResolution(marketId, proposedOutcome, confidence = 90, evidence = {}) {
     try {
       const response = await axios.put(
-        `${this.baseUrl}/markets/${marketId}/resolve`,
+        `${this.baseUrl}/markets/${marketId}/propose-resolution`,
         {
-          resolution, // 'YES' or 'NO'
-          resolverWallet: resolverWallet || 'bot-auto-resolve'
+          proposedOutcome, // 'YES' or 'NO'
+          confidence, // 0-100
+          evidence, // { source, actualValue, threshold, data }
+          proposedBy: 'bot-auto-resolver'
         },
         {
           headers: this.getHeaders()
@@ -128,12 +131,26 @@ class AgentBetsAPI {
       return response.data;
 
     } catch (error) {
-      console.error('[API] Error resolving market:', error.response?.data || error.message);
+      console.error('[API] Error proposing resolution:', error.response?.data || error.message);
       return {
         success: false,
         error: error.response?.data?.error || error.message
       };
     }
+  }
+
+  /**
+   * DEPRECATED: Use proposeResolution() instead
+   * This method is kept for backwards compatibility but will be removed
+   */
+  async resolveMarket(marketId, resolution, resolverWallet = null) {
+    console.warn('[API] WARNING: resolveMarket() is deprecated. Use proposeResolution() instead.');
+    console.warn('[API] This method now calls proposeResolution() and does NOT finalize markets.');
+
+    return this.proposeResolution(marketId, resolution, 80, {
+      source: 'legacy-resolve-method',
+      note: 'Called via deprecated resolveMarket() method'
+    });
   }
 
   /**

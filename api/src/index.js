@@ -43,7 +43,7 @@ const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com'
 const connection = new Connection(SOLANA_RPC, 'confirmed');
 
 // Platform escrow wallet (in production, this would be a PDA)
-const ESCROW_WALLET = process.env.ESCROW_WALLET || 'Ds9gRNjHufEa918D2HJSbE9AQo8wpqsor9g8rbH6Xwfw';
+const ESCROW_WALLET = process.env.ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM';
 
 // In-memory storage (replace with PostgreSQL in production)
 const markets = new Map();
@@ -195,13 +195,40 @@ app.get('/api/markets/:id', (req, res) => {
   });
 });
 
+// Admin wallet - ONLY this wallet can confirm resolutions
+const ADMIN_WALLET = 'ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG';
+
+// Middleware to check if wallet is admin
+function requireAdmin(req, res, next) {
+  const { adminWallet } = req.body;
+
+  if (!adminWallet) {
+    return res.status(401).json({
+      error: 'Admin wallet required',
+      message: 'You must provide adminWallet in request body'
+    });
+  }
+
+  if (adminWallet !== ADMIN_WALLET) {
+    return res.status(403).json({
+      error: 'Unauthorized',
+      message: 'Only the platform admin can perform this action'
+    });
+  }
+
+  next();
+}
+
 /**
- * Resolve a market
- * PUT /api/markets/:id/resolve
+ * Propose a resolution (bot or manual)
+ * PUT /api/markets/:id/propose-resolution
+ *
+ * This does NOT settle the market - it only proposes an outcome
+ * Admin must confirm via /confirm-resolution before funds are distributed
  */
-app.put('/api/markets/:id/resolve', async (req, res) => {
+app.put('/api/markets/:id/propose-resolution', async (req, res) => {
   try {
-    const { resolution, resolverWallet } = req.body;
+    const { proposedOutcome, confidence, evidence, proposedBy } = req.body;
     const market = markets.get(req.params.id);
 
     if (!market) {
@@ -212,34 +239,161 @@ app.put('/api/markets/:id/resolve', async (req, res) => {
       return res.status(400).json({ error: 'Market already resolved or cancelled' });
     }
 
-    if (!['YES', 'NO'].includes(resolution)) {
-      return res.status(400).json({ error: 'Resolution must be YES or NO' });
+    if (!['YES', 'NO'].includes(proposedOutcome)) {
+      return res.status(400).json({ error: 'Proposed outcome must be YES or NO' });
     }
 
-    // Update market
-    market.resolution = resolution;
-    market.status = 'resolved';
-    market.resolvedAt = new Date().toISOString();
-    market.resolverWallet = resolverWallet;
+    // Move to pending confirmation state
+    market.status = 'pending_confirmation';
+    market.proposedResolution = {
+      outcome: proposedOutcome,
+      confidence: confidence || 0,
+      evidence: evidence || {},
+      proposedAt: new Date().toISOString(),
+      proposedBy: proposedBy || 'manual'
+    };
 
     markets.set(market.id, market);
 
-    // Calculate payouts with creator royalties
-    const marketBets = Array.from(bets.values()).filter(b => b.marketId === market.id);
-    const winningBets = marketBets.filter(b => b.outcome === resolution);
-    const losingPool = resolution === 'YES' ? market.noPool : market.yesPool;
-    const winningPool = resolution === 'YES' ? market.yesPool : market.noPool;
+    console.log(`[Resolution] Market ${market.id} proposed: ${proposedOutcome} (by ${proposedBy})`);
 
-    // Track total royalties for this resolution
+    res.json({
+      success: true,
+      market,
+      message: `Resolution proposed: ${proposedOutcome}. Awaiting admin confirmation.`,
+      nextStep: 'Admin must call POST /api/markets/:id/confirm-resolution to finalize'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get pending resolutions (admin only)
+ * GET /api/markets/pending-resolutions
+ */
+app.get('/api/markets/pending-resolutions', async (req, res) => {
+  const pendingMarkets = Array.from(markets.values())
+    .filter(m => m.status === 'pending_confirmation')
+    .map(m => ({
+      id: m.id,
+      question: m.question,
+      category: m.category,
+      proposedResolution: m.proposedResolution,
+      totalVolume: m.totalVolume / LAMPORTS_PER_SOL,
+      totalBets: m.totalBets,
+      yesPool: m.yesPool / LAMPORTS_PER_SOL,
+      noPool: m.noPool / LAMPORTS_PER_SOL,
+      endDate: m.endDate,
+      verificationUrl: m.verificationUrl,
+      verificationMethod: m.verificationMethod
+    }))
+    .sort((a, b) => new Date(a.proposedResolution.proposedAt) - new Date(b.proposedResolution.proposedAt));
+
+  res.json({
+    pendingCount: pendingMarkets.length,
+    markets: pendingMarkets
+  });
+});
+
+/**
+ * Confirm and finalize resolution (ADMIN ONLY)
+ * POST /api/markets/:id/confirm-resolution
+ *
+ * Body: {
+ *   finalOutcome: "YES"|"NO",
+ *   adminWallet: "ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG",
+ *   adminNotes: "optional notes"
+ * }
+ *
+ * This FINALIZES the market and triggers settlement
+ */
+app.post('/api/markets/:id/confirm-resolution', requireAdmin, async (req, res) => {
+  try {
+    const { finalOutcome, adminNotes, adminWallet } = req.body;
+    const market = markets.get(req.params.id);
+
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    if (market.status !== 'pending_confirmation') {
+      return res.status(400).json({
+        error: `Market must be in pending_confirmation status. Current status: ${market.status}`
+      });
+    }
+
+    if (!['YES', 'NO'].includes(finalOutcome)) {
+      return res.status(400).json({ error: 'Final outcome must be YES or NO' });
+    }
+
+    // FINALIZE THE MARKET
+    market.status = 'resolved';
+    market.resolution = finalOutcome;
+    market.resolvedAt = new Date().toISOString();
+    market.resolverWallet = adminWallet;
+    market.adminNotes = adminNotes || null;
+    market.confirmedBy = 'admin';
+
+    // If this is an on-chain market, resolve it on-chain
+    if (market.betPda) {
+      console.log(`[Resolution] Resolving on-chain market: ${market.betPda}`);
+
+      const onChainResult = await pollFunService.resolveMarket({
+        betPda: market.betPda,
+        winningOutcome: finalOutcome
+      });
+
+      if (!onChainResult.success) {
+        return res.status(500).json({
+          error: 'Failed to resolve on-chain',
+          details: onChainResult.error
+        });
+      }
+
+      market.onChainResolutionTx = onChainResult.txSignature;
+
+      // Auto-settle all batches for on-chain market
+      console.log(`[Resolution] Auto-settling on-chain market: ${market.betPda}`);
+
+      const marketData = await pollFunService.getMarketData(market.betPda);
+      if (marketData.success) {
+        const totalUsers = marketData.currentUserCount || 0;
+        const totalBatches = Math.ceil(totalUsers / 10);
+
+        for (let batchNumber = 0; batchNumber < totalBatches; batchNumber++) {
+          try {
+            await pollFunService.settleBatch({
+              betPda: market.betPda,
+              batchNumber,
+              usersPerBatch: 10
+            });
+            console.log(`[Resolution] Settled batch ${batchNumber}/${totalBatches}`);
+          } catch (err) {
+            console.error(`[Resolution] Error settling batch ${batchNumber}:`, err.message);
+          }
+        }
+
+        market.settlementStatus = 'settled';
+        market.settledAt = new Date().toISOString();
+      }
+    }
+
+    markets.set(market.id, market);
+
+    // Calculate payouts for off-chain markets
+    const marketBets = Array.from(bets.values()).filter(b => b.marketId === market.id);
+    const winningBets = marketBets.filter(b => b.outcome === finalOutcome);
+    const losingPool = finalOutcome === 'YES' ? market.noPool : market.yesPool;
+    const winningPool = finalOutcome === 'YES' ? market.yesPool : market.noPool;
+
     let totalCreatorRoyalty = 0;
     let totalPlatformFee = 0;
 
-    // Calculate each winner's share with royalty deduction
     const payouts = winningBets.map(bet => {
       const share = bet.amount / winningPool;
       const grossWinnings = bet.amount + (share * losingPool);
 
-      // Calculate royalties for this payout
       const royaltyInfo = royalties.calculateRoyalties(market.creatorAgent, grossWinnings);
       totalCreatorRoyalty += royaltyInfo.creatorRoyalty;
       totalPlatformFee += royaltyInfo.platformShare;
@@ -255,7 +409,6 @@ app.put('/api/markets/:id/resolve', async (req, res) => {
       };
     });
 
-    // Royalty summary
     const royaltySummary = {
       creatorAgent: market.creatorAgent,
       creatorRoyalty: totalCreatorRoyalty,
@@ -265,17 +418,114 @@ app.put('/api/markets/:id/resolve', async (req, res) => {
       feeBreakdown: '1% total fee: 0.3% to creator, 0.7% to platform'
     };
 
+    console.log(`[Resolution] Market ${market.id} CONFIRMED: ${finalOutcome} by admin`);
+
+    // Notify bot via webhook to announce final resolution
+    if (process.env.BOT_WEBHOOK_URL) {
+      try {
+        await axios.post(`${process.env.BOT_WEBHOOK_URL}/webhook/resolution-confirmed`, {
+          marketId: market.id,
+          outcome: finalOutcome,
+          actualValue: market.proposedResolution?.evidence?.actualValue || finalOutcome,
+          source: market.proposedResolution?.evidence?.source || 'manual',
+          data: market
+        });
+        console.log(`[Resolution] Webhook sent to bot for market ${market.id}`);
+      } catch (webhookError) {
+        console.error(`[Resolution] Failed to notify bot webhook:`, webhookError.message);
+        // Don't fail the resolution if webhook fails
+      }
+    }
+
     res.json({
       success: true,
       market,
-      resolution,
+      resolution: finalOutcome,
       payouts,
       royalties: royaltySummary,
-      message: `Market resolved: ${resolution}! ${winningBets.length} winners. Creator @${market.creatorAgent || 'unknown'} earned ${royaltySummary.creatorRoyaltySOL.toFixed(4)} SOL in royalties!`
+      onChainSettlement: market.betPda ? {
+        resolved: true,
+        settled: market.settlementStatus === 'settled',
+        txSignature: market.onChainResolutionTx
+      } : null,
+      message: `Market resolved and confirmed: ${finalOutcome}! ${winningBets.length} winners. ${
+        market.betPda ? 'On-chain settlement completed.' : 'Off-chain payouts calculated.'
+      }`
+    });
+  } catch (error) {
+    console.error('[Resolution] Confirmation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Override proposed resolution (ADMIN ONLY)
+ * POST /api/markets/:id/override-resolution
+ *
+ * Use this if you disagree with the bot's proposed resolution
+ */
+app.post('/api/markets/:id/override-resolution', requireAdmin, async (req, res) => {
+  try {
+    const { overrideOutcome, reason, adminWallet } = req.body;
+    const market = markets.get(req.params.id);
+
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    if (market.status !== 'pending_confirmation') {
+      return res.status(400).json({
+        error: `Market must be in pending_confirmation status. Current status: ${market.status}`
+      });
+    }
+
+    if (!['YES', 'NO'].includes(overrideOutcome)) {
+      return res.status(400).json({ error: 'Override outcome must be YES or NO' });
+    }
+
+    // Update proposed resolution with override
+    const originalProposal = market.proposedResolution;
+    market.proposedResolution = {
+      outcome: overrideOutcome,
+      confidence: 100, // Admin override = 100% confidence
+      evidence: {
+        type: 'admin_override',
+        originalProposal: originalProposal,
+        reason: reason || 'Admin manual override'
+      },
+      proposedAt: new Date().toISOString(),
+      proposedBy: 'admin_override'
+    };
+
+    markets.set(market.id, market);
+
+    console.log(`[Resolution] Market ${market.id} OVERRIDDEN: ${originalProposal.outcome} → ${overrideOutcome}`);
+
+    res.json({
+      success: true,
+      market,
+      message: `Resolution overridden to ${overrideOutcome}. Original proposal was ${originalProposal.outcome}.`,
+      nextStep: 'Call POST /api/markets/:id/confirm-resolution to finalize with the new outcome'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+/**
+ * DEPRECATED: Old resolve endpoint (kept for backwards compatibility)
+ * Use propose-resolution + confirm-resolution instead
+ */
+app.put('/api/markets/:id/resolve', async (req, res) => {
+  res.status(410).json({
+    error: 'This endpoint is deprecated',
+    message: 'Use two-phase resolution: POST /api/markets/:id/propose-resolution, then POST /api/markets/:id/confirm-resolution',
+    migration: {
+      step1: 'Bot calls PUT /api/markets/:id/propose-resolution with proposed outcome',
+      step2: 'Admin reviews at GET /api/markets/pending-resolutions',
+      step3: 'Admin confirms via POST /api/markets/:id/confirm-resolution with adminWallet'
+    }
+  });
 });
 
 // ==========================================
@@ -926,7 +1176,9 @@ app.post('/api/onchain/markets', async (req, res) => {
       verificationUrl,
       verificationMethod,
       threshold,
-      tags
+      tags,
+      creatorAgent, // NEW: track who proposed it
+      proposerWallet // NEW: proposer's wallet (for UI display, NOT for resolution)
     } = req.body;
 
     if (!question || !endDate) {
@@ -937,11 +1189,13 @@ app.post('/api/onchain/markets', async (req, res) => {
       return res.status(400).json({ error: 'Question must be 256 characters or less' });
     }
 
-    // Create on-chain market with creator resolution (our oracle decides)
+    // SECURITY: Bot ALWAYS creates markets with its keypair
+    // User is just a "proposer" - they cannot resolve their own markets
     const result = await pollFunService.createMarket({
       question,
       expectedUserCount: Math.min(expectedUserCount, 50), // Max 50 users per Poll.fun
-      minimumVoteCount: 1 // Not used since isCreatorResolver=true
+      minimumVoteCount: 1, // Not used since isCreatorResolver=true
+      proposerAgent: creatorAgent // Track who proposed it (for royalties)
     });
 
     if (!result.success) {
@@ -962,7 +1216,9 @@ app.post('/api/onchain/markets', async (req, res) => {
       resolutionSource: 'pollfun', // On-chain resolution
       endDate,
       createdAt: now,
-      creatorWallet: result.creator,
+      creatorWallet: result.creator, // Bot's wallet (on-chain creator)
+      proposerWallet: proposerWallet || null, // Who proposed it (UI only)
+      creatorAgent: creatorAgent || null, // Agent who proposed it (for royalties)
       status: 'active',
       resolution: null,
       resolvedAt: null,
@@ -980,10 +1236,18 @@ app.post('/api/onchain/markets', async (req, res) => {
       // On-chain metadata
       onChain: true,
       txSignature: result.txSignature,
-      currency: 'USDC'
+      currency: 'USDC',
+      // SECURITY NOTE: Bot is on-chain creator, can resolve
+      securityNote: 'Bot-created market. Only bot can resolve (isCreatorResolver).'
     };
 
     markets.set(marketId, market);
+
+    // Track market creation for royalties (proposer gets credit, not bot)
+    if (creatorAgent) {
+      royalties.recordMarketCreation(creatorAgent, marketId);
+      agentFunding.awardMarketCreationPoints(creatorAgent, marketId);
+    }
 
     res.status(201).json({
       success: true,
@@ -991,8 +1255,15 @@ app.post('/api/onchain/markets', async (req, res) => {
       onChainData: {
         betPda: result.betPda,
         txSignature: result.txSignature,
-        network: pollFunService.network
+        network: pollFunService.network,
+        creator: result.creator, // Bot's address
+        proposer: creatorAgent || proposerWallet || 'anonymous'
       },
+      royaltyInfo: creatorAgent ? {
+        proposer: creatorAgent,
+        message: `${creatorAgent} will earn 0.3% royalties from this market`,
+        note: 'Bot is the on-chain creator for security, but royalties go to proposer'
+      } : null,
       message: `On-chain market created! Bet with USDC on: "${question}"`
     });
   } catch (error) {

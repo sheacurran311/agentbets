@@ -111,11 +111,15 @@ class PollFunService {
    * Initialize a new prediction market on-chain
    * Uses isCreatorResolver=true so our oracle can resolve without voting
    *
+   * SECURITY: The bot ALWAYS creates markets with its own keypair.
+   * Users are "proposers" not creators - they cannot resolve markets they suggest.
+   * This prevents conflict of interest and manipulation.
+   *
    * @param {Object} params Market parameters
    * @param {string} params.question The market question (max 256 chars)
    * @param {number} params.expectedUserCount Max participants (1-50)
    * @param {number} params.minimumVoteCount Min votes needed (only matters if !isCreatorResolver)
-   * @param {Keypair} params.creatorKeypair Creator's keypair for signing
+   * @param {string} params.proposerAgent Optional: agent who proposed this market (for royalties)
    * @returns {Object} Market creation result with bet PDA
    */
   async createMarket(params) {
@@ -123,12 +127,17 @@ class PollFunService {
       question,
       expectedUserCount = 50,
       minimumVoteCount = 1,
-      creatorKeypair
+      proposerAgent // NEW: track who proposed it, but they don't create it
     } = params;
 
-    const creator = creatorKeypair || this.creatorKeypair;
+    // SECURITY: ALWAYS use the bot's keypair as creator
+    // Never allow user-provided keypairs to create markets
+    const creator = this.creatorKeypair;
     if (!creator) {
-      return { success: false, error: 'Creator keypair required to create market' };
+      return {
+        success: false,
+        error: 'Bot creator keypair not configured (SOLANA_PRIVATE_KEY env var missing)'
+      };
     }
 
     if (question.length > 256) {
@@ -147,20 +156,25 @@ class PollFunService {
         signers: [creator]
       });
 
-      console.log('[PollFun] Market created!');
+      console.log('[PollFun] Market created by bot!');
       console.log('[PollFun] Bet PDA:', result.bet.toBase58());
       console.log('[PollFun] Fee Pool:', result.feePool.toBase58());
       console.log('[PollFun] Tx:', result.tx);
+      if (proposerAgent) {
+        console.log('[PollFun] Proposed by:', proposerAgent);
+      }
 
       return {
         success: true,
         betPda: result.bet.toBase58(),
         feePool: result.feePool.toBase58(),
         txSignature: result.tx,
-        creator: creator.publicKey.toBase58(),
+        creator: creator.publicKey.toBase58(), // Bot's address
+        proposerAgent: proposerAgent || null, // Who proposed it (for royalties)
         question,
         expectedUserCount,
-        isCreatorResolver: true
+        isCreatorResolver: true,
+        note: 'Market created by AgentBets bot. Only bot can resolve.'
       };
     } catch (error) {
       console.error('[PollFun] Failed to create market:', error);

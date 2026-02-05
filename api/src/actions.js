@@ -24,7 +24,7 @@ const ACTION_CORS_HEADERS = {
 // Platform config
 const AGENTBETS_ICON = 'https://agentbets.gg/icon.png'; // TODO: Add actual icon
 const AGENTBETS_TITLE = 'AgentBets';
-const ESCROW_WALLET = process.env.ESCROW_WALLET || 'Ds9gRNjHufEa918D2HJSbE9AQo8wpqsor9g8rbH6Xwfw';
+const ESCROW_WALLET = process.env.ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM';
 
 /**
  * CORS preflight for all actions

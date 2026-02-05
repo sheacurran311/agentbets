@@ -136,10 +136,42 @@ async function sendMarketReminders() {
 }
 
 /**
- * Announce market resolution and tag relevant agents
+ * Announce market resolution proposal (not final yet)
+ */
+async function announceProposal(marketId, data, result) {
+  console.log(`[Announce] Announcing resolution proposal for market ${marketId}`);
+
+  try {
+    const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+    const marketUrl = `${baseUrl}/markets/${marketId}`;
+
+    // Extract mentioned handles for tagging
+    const mentionedHandles = extractMentionedHandles(data.question);
+    const tagString = mentionedHandles.slice(0, 2).map(h => `@${h}`).join(' ');
+    const creatorTag = `@${data.authorHandle}`;
+
+    await twitter.tweet(
+      `Market Ended - Resolution Pending ${tagString} ${creatorTag}\n\n` +
+      `"${data.question.slice(0, 60)}${data.question.length > 60 ? '...' : ''}"\n\n` +
+      `Proposed Outcome: ${result.outcome}\n` +
+      `Data: ${result.actualValue}\n` +
+      `Source: ${result.source || data.resolution}\n\n` +
+      `Awaiting admin verification...\n` +
+      `View: ${marketUrl}`
+    );
+
+    console.log(`[Announce] Proposal announced for market ${marketId}`);
+  } catch (error) {
+    console.error(`[Announce] Failed to announce proposal:`, error.message);
+  }
+}
+
+/**
+ * Announce final market resolution (after admin confirmation)
+ * This should be called via webhook or API when admin confirms
  */
 async function announceResolution(marketId, data, result) {
-  console.log(`[Announce] Announcing resolution for market ${marketId}`);
+  console.log(`[Announce] Announcing FINAL resolution for market ${marketId}`);
 
   try {
     const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
@@ -510,6 +542,11 @@ async function checkResolutions() {
       continue; // Not ended yet
     }
 
+    // Skip if we've already proposed a resolution
+    if (data.proposalStatus === 'proposed') {
+      continue; // Awaiting admin confirmation
+    }
+
     console.log(`[Resolver] Market ${marketId} has ended, checking resolution...`);
 
     try {
@@ -522,21 +559,45 @@ async function checkResolutions() {
 
       console.log(`[Resolver] Resolved: ${result.outcome} (value: ${result.actualValue})`);
 
-      // Resolve market on AgentBets
-      const resolution = await agentbets.resolveMarket(marketId, result.outcome);
+      // Propose resolution on AgentBets (does NOT finalize - admin must confirm)
+      const confidence = result.confidence || 90; // Use resolver's confidence or default to 90%
+      const evidence = {
+        source: result.source,
+        actualValue: result.actualValue,
+        threshold: result.threshold,
+        data: result.data
+      };
 
-      if (!resolution.success) {
-        console.log(`[Resolver] Failed to resolve on API: ${resolution.error}`);
+      const proposal = await agentbets.proposeResolution(
+        marketId,
+        result.outcome,
+        confidence,
+        evidence
+      );
+
+      if (!proposal.success) {
+        console.log(`[Resolver] Failed to propose resolution on API: ${proposal.error}`);
         continue;
       }
 
-      // Announce resolution with agent tagging
-      await announceResolution(marketId, data, result);
+      console.log(`[Resolver] Resolution proposed for market ${marketId}`);
+      console.log(`[Resolver] Outcome: ${result.outcome} (confidence: ${confidence}%)`);
+      console.log(`[Resolver] Awaiting admin confirmation at: ${process.env.AGENTBETS_API_URL}/markets/pending-resolutions`);
 
-      // Remove from pending
-      pendingResolutions.delete(marketId);
+      // Optionally announce the proposal (can be disabled if you want to wait for admin only)
+      if (process.env.ANNOUNCE_PROPOSALS === 'true') {
+        await announceProposal(marketId, data, result);
+      }
 
-      console.log(`[Resolver] Market ${marketId} resolved and announced`);
+      // DO NOT announce final resolution yet - wait for admin confirmation
+      // DO NOT remove from pending yet - keep tracking until admin confirms
+      // Mark as proposed so we don't re-propose
+      data.proposalStatus = 'proposed';
+      data.proposedAt = new Date().toISOString();
+      data.proposedResolution = result; // Store for later announcement
+      pendingResolutions.set(marketId, data);
+
+      console.log(`[Resolver] Market ${marketId} proposal complete, awaiting admin confirmation`);
 
     } catch (error) {
       console.error(`[Resolver] Error resolving market ${marketId}:`, error);
@@ -584,6 +645,40 @@ app.post('/check', async (req, res) => {
 app.post('/resolve', async (req, res) => {
   await checkResolutions();
   res.json({ success: true, message: 'Checked resolutions' });
+});
+
+/**
+ * Webhook endpoint for admin confirmations
+ * Called by API server when admin confirms a resolution
+ */
+app.post('/webhook/resolution-confirmed', async (req, res) => {
+  const { marketId, outcome, actualValue, source, data: marketData } = req.body;
+
+  console.log(`[Webhook] Received resolution confirmation for market ${marketId}`);
+
+  // Get market data from our tracking
+  const trackedData = pendingResolutions.get(marketId);
+
+  if (!trackedData) {
+    console.log(`[Webhook] Market ${marketId} not found in pending resolutions`);
+    return res.json({ success: false, error: 'Market not found in tracking' });
+  }
+
+  // Announce final resolution
+  const result = trackedData.proposedResolution || {
+    outcome,
+    actualValue,
+    source
+  };
+
+  await announceResolution(marketId, trackedData, result);
+
+  // Remove from pending
+  pendingResolutions.delete(marketId);
+
+  console.log(`[Webhook] Market ${marketId} final resolution announced`);
+
+  res.json({ success: true, message: 'Resolution announced' });
 });
 
 // Start server

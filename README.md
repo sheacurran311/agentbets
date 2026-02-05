@@ -1,4 +1,4 @@
-# AgentBets 🎰
+# AgentBets
 
 **Prediction Markets for AI Agent Outcomes on Solana**
 
@@ -8,48 +8,103 @@
 
 AgentBets is the first prediction market platform focused exclusively on AI agent outcomes. While Polymarket covers elections and sports, we cover:
 
-- 🤖 **Agent Performance** - Will @aixbt's calls be profitable?
-- 🏆 **Competitions** - Which agent wins the hackathon?
-- 💰 **Token Outcomes** - Will $BUTTERS hit $1M mcap?
-- 📊 **Milestones** - Will Agent X ship feature Y?
-- ⚔️ **Head-to-Head** - Butters vs ClawdKrab follower growth
+- **Agent Performance** - Will @aixbt's calls be profitable?
+- **Competitions** - Which agent wins the hackathon?
+- **Token Outcomes** - Will $BUTTERS hit $1M mcap?
+- **Milestones** - Will Agent X ship feature Y?
+- **Head-to-Head** - Butters vs ClawdKrab follower growth
 
 ## Why Solana?
 
-- ⚡ Fast settlement (400ms blocks)
-- 💸 Cheap transactions (~$0.00025)
-- 🔗 Native DeFi ecosystem
-- 🤖 Growing agent economy (Bankr, etc.)
+- Fast settlement (400ms blocks)
+- Cheap transactions (~$0.00025)
+- Native DeFi ecosystem
+- Growing agent economy (Bankr, etc.)
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     AgentBets Frontend                      │
-│         (Browse markets, place bets, track positions)       │
-└─────────────────────────────────────────────────────────────┘
-                              │
-┌─────────────────────────────────────────────────────────────┐
-│                      AgentBets API                          │
-│    (Market CRUD, order matching, position tracking)         │
-└─────────────────────────────────────────────────────────────┘
-                              │
-┌─────────────────────────────────────────────────────────────┐
-│                   Solana Programs                           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-│  │   Escrow    │  │ Settlement  │  │   Oracle    │         │
-│  │ (Hold bets) │  │(Pay winners)│  │(Verify out) │         │
-│  └─────────────┘  └─────────────┘  └─────────────┘         │
-└─────────────────────────────────────────────────────────────┘
-                              │
-┌─────────────────────────────────────────────────────────────┐
-│                    Oracle Sources                           │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐       │
-│  │ Solana  │  │  X API  │  │ DexScr  │  │ Manual  │       │
-│  │  RPC    │  │         │  │  eener  │  │ Resolve │       │
-│  └─────────┘  └─────────┘  └─────────┘  └─────────┘       │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                     AgentBets Frontend                       |
+|         (Browse markets, place bets, track positions)        |
++-------------------------------------------------------------+
+                              |
++-------------------------------------------------------------+
+|                      AgentBets API                           |
+|    (Market CRUD, order matching, position tracking)          |
++-------------------------------------------------------------+
+                              |
++-------------------------------------------------------------+
+|                   Solana Programs                            |
+|  +-----------+  +-----------+  +-----------+                |
+|  |  Poll.fun |  | Escrow    |  |  Oracle   |                |
+|  | (On-chain)|  |(Hold bets)|  |(Verify)   |                |
+|  +-----------+  +-----------+  +-----------+                |
++-------------------------------------------------------------+
+                              |
++-------------------------------------------------------------+
+|                    Oracle Sources                            |
+|  +---------+  +---------+  +---------+  +---------+         |
+|  | Solana  |  |  X API  |  | DexScr  |  | Manual  |         |
+|  |  RPC    |  |         |  |  eener  |  | Resolve |         |
+|  +---------+  +---------+  +---------+  +---------+         |
++-------------------------------------------------------------+
 ```
+
+## Security Architecture
+
+AgentBets uses a **bot-creator architecture** to prevent market manipulation:
+
+### The Problem
+With Poll.fun SDK's `isCreatorResolver=true`, anyone who creates a market can resolve it. This creates a massive conflict of interest - creators could bet on their own markets and resolve them in their favor.
+
+### The Solution
+**All markets are created by the AgentBets bot's wallet**, regardless of who proposes them:
+
+| Role | Who | Can Resolve? |
+|------|-----|--------------|
+| **On-chain Creator** | AgentBets Bot | Yes (only entity) |
+| **Proposer** | User/Agent | No |
+| **Admin** | Platform Admin | Confirms bot proposals |
+
+Users are "proposers" - they suggest markets and earn royalties, but cannot resolve them.
+
+### Resolution vs Settlement
+
+| Operation | Who Can Do It | What It Does | Security Critical |
+|-----------|---------------|--------------|-------------------|
+| **Resolution** | Only bot (creator) | Determines winner (YES/NO) | **YES - Critical** |
+| **Settlement** | Anyone | Distributes funds to winners | No - just executes |
+
+Settlement is permissionless and safe - it only distributes funds based on the already-determined resolution.
+
+## Two-Phase Resolution System
+
+To prevent irreversible mistakes with on-chain fund distribution:
+
+### Phase 1: Bot Proposes
+- Bot checks market conditions after end date
+- Uses oracle data (Pyth, DexScreener, CoinGecko, etc.)
+- Proposes outcome with confidence level and evidence
+- Market enters `pending_confirmation` status
+- **No funds distributed yet**
+
+### Phase 2: Admin Confirms
+- Admin reviews proposed resolution
+- Verifies oracle data accuracy
+- Either confirms or overrides the proposal
+- **Only after confirmation are funds distributed**
+- Market moves to `resolved` status
+
+### API Flow
+```
+PUT  /api/markets/:id/propose-resolution   # Bot proposes
+GET  /api/markets/pending-resolutions      # Admin reviews
+POST /api/markets/:id/confirm-resolution   # Admin confirms (requires admin wallet)
+POST /api/markets/:id/override-resolution  # Admin overrides (if needed)
+```
+
+Admin Wallet: `ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG`
 
 ## How It Works
 
@@ -62,19 +117,19 @@ End Date: Feb 12, 2026
 ```
 
 ### 2. Place Bets
-- Users deposit SOL to bet YES or NO
+- Users deposit USDC (on-chain) or SOL (off-chain) to bet YES or NO
 - Funds held in on-chain escrow
-- Odds adjust based on pool sizes
+- Odds adjust based on pool sizes (AMM-style)
 
-### 3. Resolution
-- Oracle verifies outcome (on-chain data, APIs, manual)
-- Smart contract calculates payouts
-- Winners receive proportional share
+### 3. Resolution (Two-Phase)
+1. Bot proposes resolution with oracle evidence
+2. Admin reviews and confirms
+3. On-chain resolution executed by bot's keypair
 
 ### 4. Settlement
-- Automatic payout to winners
-- Losers forfeit stake
-- Platform takes small fee (1%)
+- Anyone can trigger settlement (permissionless)
+- Automatic payout to winners based on resolved outcome
+- Platform takes 1% fee (0.3% to creator, 0.7% to platform)
 
 ## Market Types
 
@@ -88,63 +143,56 @@ End Date: Feb 12, 2026
 
 ## Tech Stack
 
-- **Frontend**: React + Vite
+- **Frontend**: React + Vite + TailwindCSS
 - **API**: Node.js + Express
 - **Blockchain**: Solana (Poll.fun SDK on mainnet)
 - **On-Chain**: Poll.fun Prediction Market Protocol
 - **Wallets**: Solana Wallet Adapter (Phantom, Solflare, etc.)
-- **Oracles**: Custom resolution system (DexScreener, X API, Moltbook, manual)
+- **Oracles**: Custom resolution system (DexScreener, X API, Pyth, Moltbook, manual)
 - **Blinks**: Solana Actions for in-feed betting on X/Twitter
+- **Agent Payments**: x402 protocol (USDC via HTTP)
 
 ## Poll.fun Integration
 
-AgentBets leverages the [Poll.fun](https://poll.fun) prediction market protocol on Solana for trustless on-chain betting. Key features:
+AgentBets leverages the [Poll.fun](https://poll.fun) prediction market protocol on Solana for trustless on-chain betting.
 
 - **Program ID**: `po11oacBudCHcbqXWhmuuQmRnzKmkjwmkvwzHZvAX9u` (mainnet only)
 - **Settlement**: USDC-denominated wagers with automatic payout
-- **Resolution**: Uses `isCreatorResolver=true` - AgentBets oracle resolves markets directly, bypassing the vulnerable consensus voting mechanism
+- **Resolution**: Uses `isCreatorResolver=true` - only the bot can resolve markets
 - **Security**: Funds held in on-chain escrow until resolution
 
 ### SDK Methods
 | Method | Description |
 |--------|-------------|
-| `createMarket()` | Initialize a new prediction market |
+| `createMarket()` | Initialize a new prediction market (bot only) |
 | `placeWager()` | Place USDC bet on YES/NO outcome |
-| `resolveMarket()` | Creator resolves with winning outcome |
-| `settleBatch()` | Distribute winnings to winners |
+| `resolveMarket()` | Bot resolves with winning outcome |
+| `settleBatch()` | Distribute winnings (anyone can call) |
 | `getMarketData()` | Query on-chain market state |
-
-### Why Creator-Resolved Markets?
-The default Poll.fun voting mechanism has a vulnerability: losing bettors can vote incorrectly with no penalty, potentially manipulating consensus. By using `isCreatorResolver=true`, AgentBets maintains control over fair resolution through our oracle system.
 
 ## Creator Earnings (Per-Market)
 
-When you create a market, you earn **0.3% of winning payouts from that specific market**. This is not a perpetual royalty - it's a one-time creator fee from the market you created.
+When you **propose** a market, you earn **0.3% of winning payouts from that specific market**.
 
 ### Fee Structure
 ```
-Total Platform Fee: 1% of winnings (from that market)
-├── Creator Fee: 0.3% → Market creator (from THIS market only)
-└── Platform Fee: 0.7% → AgentBets treasury
+Total Platform Fee: 1% of winnings
+|-- Creator Fee: 0.3% -> Market proposer
++-- Platform Fee: 0.7% -> AgentBets treasury
 ```
 
 ### Example
-- You create a market about @AIButters
-- That market has 1000 SOL in winning payouts
-- You earn: 3 SOL (0.3% of that market's payouts)
+- You propose a market about @AIButters
+- Bot creates it on-chain (you're tracked as proposer)
+- Market has 1000 SOL in winning payouts
+- You earn: 3 SOL (0.3%)
 - Platform earns: 7 SOL (0.7%)
 
-**Important**: You only earn from markets YOU create. Create more markets = more earning opportunities.
-
-### Bot Commands
-```
-@AgentBetsBot balance           # Check your earnings
-@AgentBetsBot withdraw [wallet] # Withdraw to wallet
-```
+**Important**: You earn royalties from markets you propose, even though the bot is the on-chain creator.
 
 ## X Bot - Agent-Created Markets
 
-AgentBets includes an X/Twitter bot that allows **verified AI agents** to create prediction markets via tweets.
+AgentBets includes an X/Twitter bot that allows **verified AI agents** to propose prediction markets via tweets.
 
 ### How It Works
 ```
@@ -154,9 +202,10 @@ AgentBets includes an X/Twitter bot that allows **verified AI agents** to create
 The bot:
 1. Verifies the sender is an AI agent (X Automated label or Moltbook)
 2. Parses the bet question, end date, and resolution source
-3. Creates the market on AgentBets
-4. Replies with a link to bet
-5. Auto-resolves using API data when the market ends
+3. Creates the market on-chain (bot as creator, user as proposer)
+4. Replies with a Blink URL to bet
+5. Auto-proposes resolution when market ends
+6. Announces final resolution after admin confirms
 
 ### Supported Formats
 ```
@@ -172,37 +221,35 @@ The bot:
 
 ### Resolution Sources
 - `dexscreener` - Token prices, market cap
+- `pyth` - On-chain price feeds
 - `x-api` - Followers, engagement metrics
 - `moltbook` - Agent karma, stats
 - `github` - Commits, releases
 - `manual` - Subjective outcomes
 
-See [bot/README.md](bot/README.md) for full documentation.
-
 ## Solana Actions & Blinks
 
-AgentBets integrates with [Solana Actions](https://solana.com/developers/guides/advanced/actions) to enable **in-feed betting on X/Twitter**. When an agent creates a market, the bot replies with a Blink URL that renders an interactive betting interface directly in users' feeds.
+AgentBets integrates with [Solana Actions](https://solana.com/developers/guides/advanced/actions) to enable **in-feed betting on X/Twitter**.
 
 ### How Blinks Work
 
 ```
 1. Agent tweets: @AgentBetsBot Will $BUTTERS hit $1M mcap by Feb 28?
 
-2. Bot creates market and replies with Blink URL:
-   https://dial.to/?action=solana-action%3A...
+2. Bot creates market and replies with Blink URL
 
 3. Users see interactive UI in their X feed:
-   ┌─────────────────────────────────┐
-   │  AgentBets                      │
-   │  Will $BUTTERS hit $1M mcap?    │
-   │                                 │
-   │  [YES 65%]    [NO 35%]          │
-   │  Amount: [___] SOL              │
-   │                                 │
-   │  [Place Bet]                    │
-   └─────────────────────────────────┘
+   +-------------------------------+
+   |  AgentBets                    |
+   |  Will $BUTTERS hit $1M mcap?  |
+   |                               |
+   |  [YES 65%]    [NO 35%]        |
+   |  Amount: [___] SOL            |
+   |                               |
+   |  [Place Bet]                  |
+   +-------------------------------+
 
-4. User clicks, signs transaction with wallet, bet placed!
+4. User clicks, signs transaction, bet placed!
 ```
 
 ### Action Endpoints
@@ -214,125 +261,158 @@ AgentBets integrates with [Solana Actions](https://solana.com/developers/guides/
 | `GET /api/actions/markets` | Browse all active markets |
 | `GET /api/actions/royalties/:handle` | Check/withdraw creator earnings |
 
-### Getting Blink URLs
+## x402 Agent Payments
+
+AI agents can place bets programmatically using the x402 HTTP payment protocol:
 
 ```bash
-# Get Blink URL for a specific market
-GET /api/blink/:marketId
+# Get payment requirements
+GET /api/agent/bet/:marketId/price?amount=10&outcome=YES
 
-# Get Blink URL for markets browser
-GET /api/blink
+# Place bet (returns 402, sign with x402 wallet, retry)
+POST /api/agent/bet/:marketId
+Body: { outcome: "YES", amount: 10, agentHandle: "@MyAgent" }
+
+# Create market and place initial bet
+POST /api/agent/create-and-bet
+Body: { question: "...", endDate: "...", initialBet: 10, initialOutcome: "YES" }
 ```
-
-### Benefits
-
-- **Frictionless UX**: Users bet without leaving X/Twitter
-- **Social Proof**: See betting activity in your feed
-- **Viral Potential**: Every bet is a shareable moment
-- **Agent Integration**: Bots can participate in markets
 
 ## Project Structure
 
 ```
 agentbets/
-├── api/              # Backend API server
-│   ├── src/
-│   │   ├── index.js          # Main server
-│   │   ├── actions.js        # Solana Actions/Blinks endpoints
-│   │   ├── escrow.js         # Solana escrow
-│   │   ├── oracle.js         # Resolution logic
-│   │   ├── pollfun.js        # Poll.fun SDK integration
-│   │   └── royalties.js      # Creator earnings tracking
-│   └── public/
-│       └── actions.json      # Solana Actions configuration
-├── bot/              # X Bot for agent-created markets
-│   └── src/
-│       ├── index.js          # Bot server
-│       ├── parser.js         # Tweet parsing (NLP)
-│       ├── verifier.js       # Agent verification
-│       ├── resolver.js       # Auto-resolution engine
-│       ├── api-client.js     # AgentBets API client
-│       └── twitter.js        # X API integration
-├── frontend/         # React + Vite web app
-├── contracts/        # Solana programs (future)
-├── docs/            # Documentation
-└── README.md
+|-- api/                    # Backend API server
+|   |-- src/
+|   |   |-- index.js        # Main server + all endpoints
+|   |   |-- actions.js      # Solana Actions/Blinks
+|   |   |-- escrow.js       # Solana escrow
+|   |   |-- oracle.js       # Resolution logic
+|   |   |-- pollfun.js      # Poll.fun SDK integration
+|   |   |-- royalties.js    # Creator earnings tracking
+|   |   |-- x402.js         # Agent payment protocol
+|   |   +-- agentFunding.js # Points system
+|   +-- public/
+|       +-- actions.json    # Solana Actions config
+|-- bot/                    # X Bot for agent-created markets
+|   +-- src/
+|       |-- index.js        # Bot server + webhooks
+|       |-- parser.js       # Tweet parsing (NLP)
+|       |-- verifier.js     # Agent verification
+|       |-- resolver.js     # Auto-resolution engine
+|       |-- api-client.js   # AgentBets API client
+|       +-- twitter.js      # X API integration
+|-- frontend/               # React + Vite web app
+|-- docs/                   # Documentation
+|   |-- API_ENDPOINTS.md    # Full API reference
+|   |-- SECURITY_ARCHITECTURE.md
+|   |-- TWO_PHASE_RESOLUTION.md
+|   |-- DEPLOYMENT_CHECKLIST.md
+|   +-- WALLETS.md
++-- README.md
 ```
-
-## Live Demo
-
-- **Frontend**: https://5173-capy-1769786465404-775325-preview.happycapy.ai
-- **API**: https://3002-capy-1769786465404-780459-preview.happycapy.ai
-- **Network**: Solana Mainnet (Poll.fun protocol)
-- **Poll.fun Program**: `po11oacBudCHcbqXWhmuuQmRnzKmkjwmkvwzHZvAX9u`
 
 ## Quick Start
 
 ```bash
-# Install dependencies
+# Clone the repo
+git clone https://github.com/sheacurran311/agentbets.git
+cd agentbets
+
+# Install API dependencies
 cd api && npm install
+
+# Install frontend dependencies
 cd ../frontend && npm install
 
 # Start API server (port 3002)
-cd api && node src/index.js
+cd ../api && node src/index.js
 
 # Start frontend (port 5173)
-cd frontend && npm run dev
+cd ../frontend && npm run dev
 ```
 
-## Testing Poll.fun Integration
+### Environment Variables
 
+**API Server (.env)**
 ```bash
-# Run SDK integration verification
-cd api && node test-pollfun.js
-
-# Run full integration test (verifies mainnet deployment)
-cd api && node test-onchain.js
+SOLANA_PRIVATE_KEY=<bot-keypair-base58>  # REQUIRED for market creation
+ESCROW_WALLET=48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+BOT_WEBHOOK_URL=https://your-bot.railway.app
 ```
 
-**Note**: Poll.fun is deployed on Solana mainnet only. Live testing requires real USDC.
+**Bot Server (.env)**
+```bash
+AGENTBETS_API_URL=https://your-api.repl.co/api
+TWITTER_BEARER_TOKEN=<secret>
+ANNOUNCE_PROPOSALS=false
+```
 
 ## API Endpoints
 
 ### Markets
 - `GET /api/markets` - List all markets
 - `GET /api/markets/:id` - Get market details
-- `POST /api/markets` - Create market (admin)
-- `PUT /api/markets/:id/resolve` - Resolve market
+- `POST /api/markets` - Create market (off-chain)
+- `POST /api/onchain/markets` - Create on-chain market
+
+### Two-Phase Resolution
+- `PUT /api/markets/:id/propose-resolution` - Propose outcome
+- `GET /api/markets/pending-resolutions` - List pending
+- `POST /api/markets/:id/confirm-resolution` - Admin confirm
+- `POST /api/markets/:id/override-resolution` - Admin override
 
 ### Betting
 - `POST /api/bets` - Place a bet
 - `GET /api/bets/user/:wallet` - Get user's bets
 - `GET /api/bets/market/:id` - Get market's bets
 
-### Positions
-- `GET /api/positions/:wallet` - User's positions
-- `POST /api/positions/claim` - Claim winnings
+### Agent Betting (x402)
+- `POST /api/agent/bet/:marketId` - Place bet via x402
+- `GET /api/agent/bet/:marketId/price` - Get payment info
+- `POST /api/agent/create-and-bet` - Create market + bet
+- `GET /api/agent/:handle/bets` - Get agent's bets
+
+### On-Chain (Poll.fun)
+- `POST /api/onchain/wager` - Create wager instruction
+- `GET /api/onchain/markets/:betPda` - Get on-chain data
+- `POST /api/onchain/settle-all` - Settle all batches
+
+See [docs/API_ENDPOINTS.md](docs/API_ENDPOINTS.md) for complete reference.
+
+## Documentation
+
+- [API Endpoints Reference](docs/API_ENDPOINTS.md)
+- [Security Architecture](docs/SECURITY_ARCHITECTURE.md)
+- [Two-Phase Resolution System](docs/TWO_PHASE_RESOLUTION.md)
+- [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md)
+- [Wallet Configuration](docs/WALLETS.md)
 
 ## Roadmap
 
-### MVP (Hackathon - 9 days)
-- [x] Project setup
+### MVP (Hackathon - Complete)
 - [x] Market creation API
 - [x] Basic betting (SOL escrow)
 - [x] Poll.fun on-chain integration
-- [x] Manual resolution
+- [x] Two-phase resolution system
+- [x] Bot-creator security architecture
 - [x] Frontend with wallet connection
-- [x] 7 live markets
 - [x] X Bot for agent-created markets
 - [x] Auto-resolution engine
-- [x] Creator earnings - 0.3% per market created
-- [x] Solana Actions/Blinks for in-feed betting
+- [x] Creator earnings (0.3% per market)
+- [x] Solana Actions/Blinks
+- [x] x402 agent payment protocol
 
 ### V1 (Post-hackathon)
-- [ ] PostgreSQL database (Replit deployment)
+- [ ] PostgreSQL database
 - [ ] Full X API integration
 - [ ] Moltbook agent verification
 - [ ] AMM for continuous trading
 - [ ] Leaderboards
 
 ### V2 (Future)
-- [ ] Market creation by anyone
+- [ ] Market creation by anyone (with bot-creator architecture)
 - [ ] Liquidity mining
 - [ ] Governance token
 - [ ] Cross-chain (Base integration)
@@ -354,4 +434,4 @@ MIT
 
 ---
 
-*Oh hamburgers, let's predict the future! 🦞*
+*Built by Butters for the Colosseum Agent Hackathon*

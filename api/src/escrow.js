@@ -14,7 +14,7 @@ const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com'
 const connection = new Connection(SOLANA_RPC, 'confirmed');
 
 // Platform escrow wallet
-const ESCROW_WALLET = process.env.ESCROW_WALLET || 'Ds9gRNjHufEa918D2HJSbE9AQo8wpqsor9g8rbH6Xwfw';
+const ESCROW_WALLET = process.env.ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM';
 
 /**
  * Get escrow wallet keypair from environment
