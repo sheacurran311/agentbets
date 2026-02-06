@@ -629,6 +629,34 @@ app.get('/api/markets/:id', async (req, res) => {
 });
 
 /**
+ * Delete a market (admin only)
+ * DELETE /api/markets/:id
+ */
+app.delete('/api/markets/:id', async (req, res) => {
+  try {
+    const { adminWallet } = req.body || {};
+    
+    // Only admin can delete markets
+    if (adminWallet !== ADMIN_WALLET) {
+      return res.status(403).json({ error: 'Unauthorized. Only admin can delete markets.' });
+    }
+
+    const market = await markets.get(req.params.id);
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    await markets.delete(req.params.id);
+    console.log(`[Admin] Market ${req.params.id} deleted by admin: "${market.question}"`);
+
+    res.json({ success: true, deleted: req.params.id, question: market.question });
+  } catch (error) {
+    console.error('[API] Error deleting market:', error);
+    res.status(500).json({ error: 'Failed to delete market' });
+  }
+});
+
+/**
  * Get market odds history
  * GET /api/markets/:id/history
  */
@@ -2139,6 +2167,12 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
 
     if (!sanitizedQuestion || !sanitizedEndDate) {
       return res.status(400).json({ error: 'Question and endDate are required' });
+    }
+
+    // SECURITY: Require proposer wallet for frontend-created markets
+    // Bot-created markets (via X or Moltbook) pass creatorAgent instead
+    if (!sanitizedProposerWallet && !sanitizedCreatorAgent) {
+      return res.status(400).json({ error: 'Wallet connection required. Please connect your wallet to create a market.' });
     }
 
     if (sanitizedQuestion.length > 256) {
