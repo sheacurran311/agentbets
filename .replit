@@ -8,6 +8,7 @@ hidden = [".config", "package-lock.json"]
 channel = "stable-25_05"
 
 [deployment]
+build = ["sh", "-c", "cd frontend && npm install && npm run build"]
 run = ["sh", "-c", "cd api && node src/index.js"]
 deploymentTarget = "cloudrun"
 ignorePorts = false
