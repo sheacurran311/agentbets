@@ -4,12 +4,57 @@ import { useWallet, useConnection } from '@solana/wallet-adapter-react'
 import { WalletMultiButton, useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js'
 
-const API_BASE = '/api'
-const ESCROW_WALLET = '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM'
-const ADMIN_WALLET = 'ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG' // TODO: Update to your admin wallet
+// Configuration from environment variables (with defaults for development)
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+const ESCROW_WALLET = import.meta.env.VITE_ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM'
+const ADMIN_WALLET = import.meta.env.VITE_ADMIN_WALLET || 'ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG'
 
 // USDC Token Mint (devnet)
-const USDC_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
+const USDC_MINT = import.meta.env.VITE_USDC_MINT || '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
+
+// Input Sanitization - Prevent XSS and injection attacks
+const sanitizeInput = (input) => {
+  if (typeof input !== 'string') return input
+  return input
+    // Remove any HTML tags
+    .replace(/<[^>]*>/g, '')
+    // Escape HTML entities
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
+    // Remove potential javascript: protocol
+    .replace(/javascript:/gi, '')
+    // Remove potential data: protocol (can be used for XSS)
+    .replace(/data:/gi, '')
+    // Remove event handlers like onclick, onerror, etc.
+    .replace(/on\w+\s*=/gi, '')
+    // Remove script-related content
+    .replace(/\beval\s*\(/gi, '')
+    .replace(/\bFunction\s*\(/gi, '')
+    // Trim whitespace
+    .trim()
+}
+
+// Validate and sanitize date input
+const sanitizeDate = (dateString) => {
+  if (!dateString) return null
+  // Only allow ISO date format (YYYY-MM-DDTHH:MM)
+  const dateRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
+  if (!dateRegex.test(dateString)) return null
+  const date = new Date(dateString)
+  // Check if date is valid and in the future
+  if (isNaN(date.getTime()) || date <= new Date()) return null
+  return dateString
+}
+
+// Validate category against allowed values
+const VALID_CATEGORIES = ['competition', 'performance', 'token', 'milestone', 'head-to-head', 'app', 'general']
+const sanitizeCategory = (category) => {
+  if (VALID_CATEGORIES.includes(category)) return category
+  return 'general' // Default to general if invalid
+}
 
 // Design System - PolyClaw-Inspired Premium Dark Theme
 const COLORS = {
@@ -340,6 +385,48 @@ const GlobalStyles = () => (
     input:focus, select:focus, textarea:focus {
       border-color: ${COLORS.primary} !important;
       box-shadow: 0 0 0 2px ${COLORS.primary}20 !important;
+    }
+
+    /* Select dropdown styling for dark theme */
+    select {
+      background-color: ${COLORS.bgCard} !important;
+      color: ${COLORS.textPrimary} !important;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2314F195' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 36px !important;
+    }
+    select option {
+      background-color: ${COLORS.bgCard} !important;
+      color: ${COLORS.textPrimary} !important;
+      padding: 12px 16px;
+    }
+    select option:hover, select option:focus, select option:checked {
+      background-color: ${COLORS.bgCardHover} !important;
+      color: ${COLORS.primary} !important;
+    }
+
+    /* Date and time input styling for dark theme */
+    input[type="date"], input[type="time"], input[type="datetime-local"] {
+      background-color: ${COLORS.bgDark} !important;
+      color: ${COLORS.textPrimary} !important;
+      color-scheme: dark;
+    }
+    input[type="date"]::-webkit-calendar-picker-indicator,
+    input[type="time"]::-webkit-calendar-picker-indicator,
+    input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+      filter: invert(1);
+      cursor: pointer;
+      opacity: 0.7;
+    }
+    input[type="date"]::-webkit-calendar-picker-indicator:hover,
+    input[type="time"]::-webkit-calendar-picker-indicator:hover,
+    input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover {
+      opacity: 1;
     }
 
     /* Selection */
@@ -702,6 +789,7 @@ function App() {
   const [oddsHistoryCache, setOddsHistoryCache] = useState({}) // Cache for odds history per market
   const [pendingResolutions, setPendingResolutions] = useState([]) // Markets awaiting admin confirmation
   const [adminConfirming, setAdminConfirming] = useState(null) // Currently confirming market ID
+  const [showDatePicker, setShowDatePicker] = useState(false) // Date picker modal visibility
 
   // Check if connected wallet is admin
   const isAdmin = publicKey?.toString() === ADMIN_WALLET
@@ -1144,8 +1232,24 @@ function App() {
       return
     }
 
-    if (newMarket.question.length > 256) {
+    // Sanitize all inputs before submission
+    const sanitizedQuestion = sanitizeInput(newMarket.question)
+    const sanitizedCategory = sanitizeCategory(newMarket.category)
+    const sanitizedEndDate = sanitizeDate(newMarket.endDate)
+
+    // Validate sanitized inputs
+    if (!sanitizedQuestion || sanitizedQuestion.length === 0) {
+      alert('Invalid question. Please remove any special characters and try again.')
+      return
+    }
+
+    if (sanitizedQuestion.length > 256) {
       alert('Question must be 256 characters or less')
+      return
+    }
+
+    if (!sanitizedEndDate) {
+      alert('Invalid date. Please select a future date and time.')
       return
     }
 
@@ -1155,9 +1259,9 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          question: newMarket.question,
-          category: newMarket.category,
-          endDate: newMarket.endDate,
+          question: sanitizedQuestion,
+          category: sanitizedCategory,
+          endDate: sanitizedEndDate,
           proposerWallet: publicKey?.toString() || null // Proposer, not creator (bot is creator)
         })
       })
@@ -1675,12 +1779,34 @@ function App() {
                     </div>
                     <div style={styles.formCol}>
                       <label style={styles.label}>End Date (UTC) *</label>
-                      <input
-                        style={styles.input}
-                        type="datetime-local"
-                        value={newMarket.endDate}
-                        onChange={(e) => setMarketField('endDate', e.target.value)}
-                      />
+                      <button
+                        type="button"
+                        style={{
+                          ...styles.input,
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          color: newMarket.endDate ? COLORS.textPrimary : COLORS.textMuted
+                        }}
+                        onClick={() => setShowDatePicker(true)}
+                      >
+                        <span>
+                          {newMarket.endDate 
+                            ? new Date(newMarket.endDate).toLocaleString('en-US', {
+                                timeZone: 'UTC',
+                                month: 'short',
+                                day: 'numeric',
+                                year: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              }) + ' UTC'
+                            : 'Select date and time...'
+                          }
+                        </span>
+                        <span style={{color: COLORS.primary}}>&#128197;</span>
+                      </button>
                     </div>
                   </div>
 
@@ -2145,6 +2271,126 @@ function App() {
                   </span>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Date Picker Modal */}
+      {showDatePicker && (
+        <div style={styles.modalOverlay} onClick={() => setShowDatePicker(false)}>
+          <div style={styles.datePickerModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h2 style={{fontSize: '20px', fontWeight: '600', color: COLORS.textPrimary}}>Select End Date & Time</h2>
+              <button style={styles.closeBtn} onClick={() => setShowDatePicker(false)}>
+                {Icons.x}
+              </button>
+            </div>
+            
+            <div style={styles.datePickerContent}>
+              {/* Quick Presets */}
+              <div style={styles.datePickerSection}>
+                <label style={styles.datePickerLabel}>Quick Select</label>
+                <div style={styles.datePresetGrid}>
+                  {[
+                    { label: '1 Hour', hours: 1 },
+                    { label: '6 Hours', hours: 6 },
+                    { label: '12 Hours', hours: 12 },
+                    { label: '1 Day', hours: 24 },
+                    { label: '3 Days', hours: 72 },
+                    { label: '1 Week', hours: 168 },
+                    { label: '2 Weeks', hours: 336 },
+                    { label: '1 Month', hours: 720 }
+                  ].map((preset) => (
+                    <button
+                      key={preset.label}
+                      style={styles.datePresetBtn}
+                      onClick={() => {
+                        const date = new Date(Date.now() + preset.hours * 60 * 60 * 1000);
+                        const formatted = date.toISOString().slice(0, 16);
+                        setMarketField('endDate', formatted);
+                        setShowDatePicker(false);
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.borderColor = COLORS.primary;
+                        e.currentTarget.style.background = COLORS.bgHover;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.borderColor = COLORS.border;
+                        e.currentTarget.style.background = 'transparent';
+                      }}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Custom Date/Time */}
+              <div style={styles.datePickerSection}>
+                <label style={styles.datePickerLabel}>Custom Date & Time (UTC)</label>
+                <div style={styles.dateTimeInputs}>
+                  <div style={styles.dateInputGroup}>
+                    <label style={{...styles.datePickerLabel, fontSize: '11px'}}>Date</label>
+                    <input
+                      type="date"
+                      style={styles.dateTimeInput}
+                      value={newMarket.endDate ? newMarket.endDate.split('T')[0] : ''}
+                      min={new Date().toISOString().split('T')[0]}
+                      onChange={(e) => {
+                        const time = newMarket.endDate ? newMarket.endDate.split('T')[1] || '12:00' : '12:00';
+                        setMarketField('endDate', `${e.target.value}T${time}`);
+                      }}
+                    />
+                  </div>
+                  <div style={styles.dateInputGroup}>
+                    <label style={{...styles.datePickerLabel, fontSize: '11px'}}>Time (UTC)</label>
+                    <input
+                      type="time"
+                      style={styles.dateTimeInput}
+                      value={newMarket.endDate ? newMarket.endDate.split('T')[1] || '12:00' : '12:00'}
+                      onChange={(e) => {
+                        const date = newMarket.endDate ? newMarket.endDate.split('T')[0] : new Date().toISOString().split('T')[0];
+                        setMarketField('endDate', `${date}T${e.target.value}`);
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Preview */}
+              {newMarket.endDate && (
+                <div style={styles.datePreview}>
+                  <span style={{color: COLORS.textMuted}}>Market ends:</span>
+                  <span style={{color: COLORS.primary, fontWeight: '600', fontFamily: 'JetBrains Mono, monospace'}}>
+                    {new Date(newMarket.endDate).toLocaleString('en-US', {
+                      timeZone: 'UTC',
+                      weekday: 'short',
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    })} UTC
+                  </span>
+                </div>
+              )}
+
+              {/* Confirm Button */}
+              <button
+                style={styles.datePickerConfirmBtn}
+                onClick={() => setShowDatePicker(false)}
+                disabled={!newMarket.endDate}
+                onMouseEnter={(e) => {
+                  if (newMarket.endDate) e.currentTarget.style.transform = 'translateY(-2px)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                }}
+              >
+                <span style={{fontSize: '18px'}}>&#10003;</span>
+                Confirm Date
+              </button>
             </div>
           </div>
         </div>
@@ -3729,6 +3975,99 @@ const styles = {
     fontWeight: '600',
     color: COLORS.textSecondary,
     fontFamily: 'JetBrains Mono, monospace'
+  },
+  // Date Picker Modal Styles
+  datePickerModal: {
+    background: COLORS.bgCard,
+    borderRadius: '24px',
+    padding: '32px',
+    width: '480px',
+    maxWidth: '95vw',
+    maxHeight: '90vh',
+    overflowY: 'auto',
+    border: `1px solid ${COLORS.borderLight}`,
+    boxShadow: `0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(20, 241, 149, 0.1)`
+  },
+  datePickerContent: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '24px'
+  },
+  datePickerSection: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px'
+  },
+  datePickerLabel: {
+    fontSize: '13px',
+    fontWeight: '600',
+    color: COLORS.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px'
+  },
+  datePresetGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, 1fr)',
+    gap: '10px'
+  },
+  datePresetBtn: {
+    padding: '12px 8px',
+    background: 'transparent',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: '10px',
+    color: COLORS.textSecondary,
+    fontSize: '13px',
+    fontWeight: '500',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    fontFamily: 'Space Grotesk, sans-serif'
+  },
+  dateTimeInputs: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '16px'
+  },
+  dateInputGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px'
+  },
+  dateTimeInput: {
+    padding: '14px 16px',
+    background: COLORS.bgDark,
+    border: `1px solid ${COLORS.borderLight}`,
+    borderRadius: '12px',
+    color: COLORS.textPrimary,
+    fontSize: '15px',
+    outline: 'none',
+    fontFamily: 'JetBrains Mono, monospace',
+    cursor: 'pointer'
+  },
+  datePreview: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    padding: '16px',
+    background: `${COLORS.primary}08`,
+    border: `1px solid ${COLORS.primary}25`,
+    borderRadius: '12px',
+    textAlign: 'center'
+  },
+  datePickerConfirmBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    padding: '16px 24px',
+    background: COLORS.gradientPrimary,
+    border: 'none',
+    borderRadius: '14px',
+    color: COLORS.bgDark,
+    fontSize: '16px',
+    fontWeight: '700',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    fontFamily: 'Space Grotesk, sans-serif'
   }
 }
 

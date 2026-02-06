@@ -6,9 +6,14 @@
  * - Posting tweets
  * - Replying to tweets
  * - Getting user info
+ *
+ * Supports two backends:
+ * 1. twitter-api-v2 (default) - Direct API access with OAuth
+ * 2. inference.sh CLI (optional) - Via `infsh` command for enhanced features
  */
 
 const { TwitterApi } = require('twitter-api-v2');
+const { execSync, exec } = require('child_process');
 
 class TwitterService {
   constructor() {
@@ -36,6 +41,30 @@ class TwitterService {
 
     // Bot's own user ID (set on first getMentions call)
     this.botUserId = null;
+
+    // Check if inference.sh CLI is available (alternative posting method)
+    this.infshAvailable = this.checkInfshAvailable();
+    if (this.infshAvailable) {
+      console.log('[Twitter] inference.sh CLI available - enhanced features enabled');
+    }
+
+    // Use inference.sh as primary if configured
+    this.useInfsh = process.env.USE_INFSH === 'true' && this.infshAvailable;
+    if (this.useInfsh) {
+      console.log('[Twitter] Using inference.sh CLI as primary posting method');
+    }
+  }
+
+  /**
+   * Check if inference.sh CLI (infsh) is available
+   */
+  checkInfshAvailable() {
+    try {
+      execSync('which infsh', { stdio: 'pipe' });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -137,9 +166,26 @@ class TwitterService {
 
   /**
    * Post a new tweet
+   * Uses inference.sh CLI if USE_INFSH=true, otherwise twitter-api-v2
+   * Falls back to alternative method on failure
    */
   async tweet(text) {
+    // If configured to use inference.sh as primary
+    if (this.useInfsh) {
+      const infshResult = await this.tweetViaInfsh(text);
+      if (infshResult.success) {
+        return infshResult;
+      }
+      // Fall back to twitter-api-v2 on failure
+      console.log('[Twitter] infsh failed, falling back to twitter-api-v2');
+    }
+
     if (!this.writeClient) {
+      // Try inference.sh as fallback if available
+      if (this.infshAvailable) {
+        console.log('[Twitter] Write client not configured, trying inference.sh');
+        return this.tweetViaInfsh(text);
+      }
       console.log('[Twitter] Write client not configured, would tweet:', text);
       return { success: false, reason: 'Write client not configured' };
     }
@@ -154,6 +200,13 @@ class TwitterService {
 
     } catch (error) {
       console.error('[Twitter] Error posting tweet:', error.message);
+      
+      // Try inference.sh as fallback on API error
+      if (this.infshAvailable && !this.useInfsh) {
+        console.log('[Twitter] API error, trying inference.sh fallback');
+        return this.tweetViaInfsh(text);
+      }
+      
       return { success: false, error: error.message };
     }
   }
@@ -251,8 +304,213 @@ class TwitterService {
   isConfigured() {
     return {
       read: !!this.readClient,
-      write: !!this.writeClient
+      write: !!this.writeClient,
+      infsh: this.infshAvailable
     };
+  }
+
+  // ==========================================
+  // INFERENCE.SH CLI METHODS
+  // Alternative posting methods with enhanced features
+  // ==========================================
+
+  /**
+   * Post a tweet using inference.sh CLI
+   * Supports media attachments via media_url
+   * @param {string} text Tweet text
+   * @param {string} mediaUrl Optional media URL to attach
+   * @returns {Object} Result with success status
+   */
+  async tweetViaInfsh(text, mediaUrl = null) {
+    if (!this.infshAvailable) {
+      console.log('[Twitter/infsh] CLI not available');
+      return { success: false, reason: 'infsh CLI not available' };
+    }
+
+    try {
+      const truncated = text.length > 280 ? text.slice(0, 277) + '...' : text;
+      
+      let input;
+      let appId;
+
+      if (mediaUrl) {
+        // Use post-create for media tweets
+        appId = 'x/post-create';
+        input = JSON.stringify({ text: truncated, media_url: mediaUrl });
+      } else {
+        // Use post-tweet for text-only
+        appId = 'x/post-tweet';
+        input = JSON.stringify({ text: truncated });
+      }
+
+      const command = `infsh app run ${appId} --input '${input.replace(/'/g, "\\'")}'`;
+      
+      const result = execSync(command, { 
+        encoding: 'utf8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      console.log('[Twitter/infsh] Posted tweet:', result.trim().slice(0, 100));
+      
+      // Parse result to extract tweet ID if available
+      let tweetId = null;
+      try {
+        const parsed = JSON.parse(result);
+        tweetId = parsed.id || parsed.tweet_id || parsed.data?.id;
+      } catch {
+        // Result might not be JSON
+      }
+
+      return { success: true, id: tweetId, via: 'infsh' };
+
+    } catch (error) {
+      console.error('[Twitter/infsh] Error posting tweet:', error.message);
+      return { success: false, error: error.message, via: 'infsh' };
+    }
+  }
+
+  /**
+   * Post a tweet with media using inference.sh CLI
+   * @param {string} text Tweet text
+   * @param {string} mediaUrl URL of media to attach
+   * @returns {Object} Result with success status
+   */
+  async tweetWithMedia(text, mediaUrl) {
+    // Try inference.sh first if available (has native media support)
+    if (this.infshAvailable) {
+      return this.tweetViaInfsh(text, mediaUrl);
+    }
+
+    // Fallback: post text-only tweet
+    console.log('[Twitter] Media posting requires inference.sh CLI, posting text only');
+    return this.tweet(text);
+  }
+
+  /**
+   * Like a tweet using inference.sh CLI
+   * @param {string} tweetId Tweet ID to like
+   * @returns {Object} Result with success status
+   */
+  async likeViaInfsh(tweetId) {
+    if (!this.infshAvailable) {
+      return { success: false, reason: 'infsh CLI not available' };
+    }
+
+    try {
+      const input = JSON.stringify({ tweet_id: tweetId });
+      const command = `infsh app run x/post-like --input '${input}'`;
+      
+      execSync(command, { encoding: 'utf8', timeout: 30000 });
+      console.log('[Twitter/infsh] Liked tweet:', tweetId);
+      
+      return { success: true, tweetId, via: 'infsh' };
+
+    } catch (error) {
+      console.error('[Twitter/infsh] Error liking tweet:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Retweet a post using inference.sh CLI
+   * @param {string} tweetId Tweet ID to retweet
+   * @returns {Object} Result with success status
+   */
+  async retweetViaInfsh(tweetId) {
+    if (!this.infshAvailable) {
+      return { success: false, reason: 'infsh CLI not available' };
+    }
+
+    try {
+      const input = JSON.stringify({ tweet_id: tweetId });
+      const command = `infsh app run x/post-retweet --input '${input}'`;
+      
+      execSync(command, { encoding: 'utf8', timeout: 30000 });
+      console.log('[Twitter/infsh] Retweeted:', tweetId);
+      
+      return { success: true, tweetId, via: 'infsh' };
+
+    } catch (error) {
+      console.error('[Twitter/infsh] Error retweeting:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Send a DM using inference.sh CLI
+   * @param {string} recipientId User ID to send DM to
+   * @param {string} text DM text
+   * @returns {Object} Result with success status
+   */
+  async sendDMViaInfsh(recipientId, text) {
+    if (!this.infshAvailable) {
+      return { success: false, reason: 'infsh CLI not available' };
+    }
+
+    try {
+      const input = JSON.stringify({ recipient_id: recipientId, text });
+      const command = `infsh app run x/dm-send --input '${input.replace(/'/g, "\\'")}'`;
+      
+      execSync(command, { encoding: 'utf8', timeout: 30000 });
+      console.log('[Twitter/infsh] Sent DM to:', recipientId);
+      
+      return { success: true, recipientId, via: 'infsh' };
+
+    } catch (error) {
+      console.error('[Twitter/infsh] Error sending DM:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Follow a user using inference.sh CLI
+   * @param {string} username Username to follow (without @)
+   * @returns {Object} Result with success status
+   */
+  async followViaInfsh(username) {
+    if (!this.infshAvailable) {
+      return { success: false, reason: 'infsh CLI not available' };
+    }
+
+    try {
+      const input = JSON.stringify({ username: username.replace('@', '') });
+      const command = `infsh app run x/user-follow --input '${input}'`;
+      
+      execSync(command, { encoding: 'utf8', timeout: 30000 });
+      console.log('[Twitter/infsh] Followed:', username);
+      
+      return { success: true, username, via: 'infsh' };
+
+    } catch (error) {
+      console.error('[Twitter/infsh] Error following:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get user profile using inference.sh CLI
+   * @param {string} username Username to look up
+   * @returns {Object} User data or error
+   */
+  async getUserViaInfsh(username) {
+    if (!this.infshAvailable) {
+      return { success: false, reason: 'infsh CLI not available' };
+    }
+
+    try {
+      const input = JSON.stringify({ username: username.replace('@', '') });
+      const command = `infsh app run x/user-get --input '${input}'`;
+      
+      const result = execSync(command, { encoding: 'utf8', timeout: 30000 });
+      const userData = JSON.parse(result);
+      
+      return { success: true, data: userData, via: 'infsh' };
+
+    } catch (error) {
+      console.error('[Twitter/infsh] Error getting user:', error.message);
+      return { success: false, error: error.message };
+    }
   }
 }
 

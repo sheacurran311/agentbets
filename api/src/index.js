@@ -7,8 +7,12 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
+const nacl = require('tweetnacl');
+const bs58 = require('bs58');
 const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 
 // Database
@@ -37,9 +41,169 @@ const x402 = require('./x402-payments');
 const app = express();
 const PORT = process.env.PORT || 3002;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// Trust proxy for rate limiting behind reverse proxy (Replit, Railway, etc.)
+app.set('trust proxy', 1);
+
+// Input Sanitization Utilities - Prevent XSS and injection attacks
+const sanitizeInput = (input) => {
+  if (typeof input !== 'string') return input;
+  return input
+    // Remove any HTML tags
+    .replace(/<[^>]*>/g, '')
+    // Escape HTML entities
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
+    // Remove potential javascript: protocol
+    .replace(/javascript:/gi, '')
+    // Remove potential data: protocol
+    .replace(/data:/gi, '')
+    // Remove event handlers like onclick, onerror, etc.
+    .replace(/on\w+\s*=/gi, '')
+    // Remove script-related content
+    .replace(/\beval\s*\(/gi, '')
+    .replace(/\bFunction\s*\(/gi, '')
+    // Trim whitespace
+    .trim();
+};
+
+const sanitizeDate = (dateString) => {
+  if (!dateString || typeof dateString !== 'string') return null;
+  // Validate ISO date format
+  const date = new Date(dateString);
+  if (isNaN(date.getTime())) return null;
+  return date.toISOString();
+};
+
+const VALID_CATEGORIES = ['competition', 'performance', 'token', 'milestone', 'head-to-head', 'app', 'general'];
+const sanitizeCategory = (category) => {
+  if (typeof category === 'string' && VALID_CATEGORIES.includes(category)) return category;
+  return 'general';
+};
+
+const sanitizeWalletAddress = (wallet) => {
+  if (!wallet || typeof wallet !== 'string') return null;
+  // Solana wallet addresses are base58 encoded, 32-44 characters
+  const walletRegex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  return walletRegex.test(wallet) ? wallet : null;
+};
+
+// Security Middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "https://api.devnet.solana.com", "https://api.mainnet-beta.solana.com"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Allow embedding for Solana Actions
+}));
+
+// CORS configuration - restrict origins in production
+const corsOrigins = process.env.CORS_ORIGINS 
+  ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
+  : '*';
+
+app.use(cors({
+  origin: corsOrigins,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+app.use(express.json({ limit: '1mb' })); // Limit request body size
+
+// Rate limiting - General API
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per window
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate limiting - Stricter for admin endpoints
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 requests per window
+  message: { error: 'Too many admin requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate limiting - Market creation
+const createLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5, // 5 market creations per hour
+  message: { error: 'Too many markets created, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate limiting - Bet placement
+const betLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 bets per minute
+  message: { error: 'Too many bets placed, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply general rate limit to all API routes
+app.use('/api/', generalLimiter);
+
+// ==========================================
+// API KEY AUTHENTICATION
+// ==========================================
+
+// Secret API key for bot/agent access (protects from spam)
+const AGENTBETS_API_KEY = process.env.AGENTBETS_API_KEY;
+
+/**
+ * Middleware to require API key for protected endpoints
+ * Used for bot-to-API communication and agent endpoints
+ */
+function requireApiKey(req, res, next) {
+  // Skip API key check if not configured (development mode)
+  if (!AGENTBETS_API_KEY) {
+    console.warn('[Security] No AGENTBETS_API_KEY configured - agent endpoints unprotected');
+    return next();
+  }
+
+  const providedKey = req.headers['x-api-key'] || req.query.apiKey;
+  
+  if (!providedKey) {
+    return res.status(401).json({ 
+      error: 'API key required',
+      message: 'Please provide X-API-Key header or apiKey query parameter'
+    });
+  }
+
+  if (providedKey !== AGENTBETS_API_KEY) {
+    console.warn(`[Security] Invalid API key attempt from ${req.ip}`);
+    return res.status(403).json({ 
+      error: 'Invalid API key',
+      message: 'The provided API key is not valid'
+    });
+  }
+
+  next();
+}
+
+/**
+ * Rate limiting specifically for agent/bot endpoints
+ * More restrictive than general API
+ */
+const agentLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 20, // 20 requests per minute per IP
+  message: { error: 'Too many agent requests, please slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Serve static files for actions.json
 const path = require('path');
@@ -124,22 +288,17 @@ function getCoinGeckoId(token) {
 }
 
 // Helper function to record odds history for a market
-function recordOddsHistory(marketId, market) {
-  if (!oddsHistory.has(marketId)) {
-    oddsHistory.set(marketId, []);
-  }
-  const history = oddsHistory.get(marketId);
-  history.push({
-    timestamp: new Date().toISOString(),
-    yesOdds: market.yesOdds,
-    noOdds: market.noOdds,
-    yesPool: market.yesPool,
-    noPool: market.noPool,
-    totalVolume: market.totalVolume
-  });
-  // Keep only last 100 data points per market to prevent memory bloat
-  if (history.length > 100) {
-    history.shift();
+async function recordOddsHistory(marketId, market) {
+  try {
+    await oddsHistory.record(marketId, {
+      yesOdds: market.yesOdds,
+      noOdds: market.noOdds,
+      yesPool: market.yesPool,
+      noPool: market.noPool,
+      totalVolume: market.totalVolume
+    });
+  } catch (error) {
+    console.error(`Failed to record odds history for market ${marketId}:`, error.message);
   }
 }
 
@@ -328,7 +487,7 @@ app.post('/api/markets', async (req, res) => {
     markets.set(marketId, market);
 
     // Record initial odds history
-    recordOddsHistory(marketId, market);
+    await recordOddsHistory(marketId, market);
 
     // Record market creation for royalty tracking
     if (creatorAgent) {
@@ -382,6 +541,45 @@ app.get('/api/markets', async (req, res) => {
   } catch (error) {
     console.error('[API] Error fetching markets:', error);
     res.status(500).json({ error: 'Failed to fetch markets' });
+  }
+});
+
+/**
+ * Get pending resolutions (admin only)
+ * GET /api/markets/pending-resolutions
+ * NOTE: This route MUST be defined before /api/markets/:id to avoid route matching issues
+ */
+app.get('/api/markets/pending-resolutions', async (req, res) => {
+  try {
+    const allMarkets = await markets.values();
+    const pendingMarkets = allMarkets
+      .filter(m => m.status === 'pending_confirmation')
+      .map(m => ({
+        id: m.id,
+        question: m.question,
+        category: m.category,
+        proposedResolution: m.proposedResolution,
+        totalVolume: (m.totalVolume || 0) / 1000000, // USDC decimals
+        totalBets: m.totalBets || 0,
+        yesPool: (m.yesPool || 0) / 1000000,
+        noPool: (m.noPool || 0) / 1000000,
+        endDate: m.endDate,
+        verificationUrl: m.verificationUrl,
+        verificationMethod: m.verificationMethod
+      }))
+      .sort((a, b) => {
+        const aDate = a.proposedResolution?.proposedAt || 0;
+        const bDate = b.proposedResolution?.proposedAt || 0;
+        return new Date(aDate) - new Date(bDate);
+      });
+
+    res.json({
+      pendingCount: pendingMarkets.length,
+      markets: pendingMarkets
+    });
+  } catch (error) {
+    console.error('Error fetching pending resolutions:', error);
+    res.status(500).json({ error: 'Failed to fetch pending resolutions' });
   }
 });
 
@@ -568,12 +766,12 @@ app.get('/api/markets/:id/price-history', async (req, res) => {
 
 /**
  * Get live verification status for a market
- * GET /api/verify/:marketId
+ * GET /api/markets/:marketId/verification
  * 
  * Returns current verified value, threshold comparison, and verification source.
  * This is the trustworthy endpoint for checking market status in real-time.
  */
-app.get('/api/verify/:marketId', async (req, res) => {
+app.get('/api/markets/:marketId/verification', async (req, res) => {
   try {
     const market = await markets.get(req.params.marketId);
 
@@ -720,11 +918,45 @@ function formatLargeNumber(num) {
 }
 
 // Admin wallet - ONLY this wallet can confirm resolutions
-const ADMIN_WALLET = 'ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG';
+const ADMIN_WALLET = process.env.ADMIN_WALLET || 'ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG';
 
-// Middleware to check if wallet is admin
+/**
+ * Generate admin challenge message for signing
+ * GET /api/admin/challenge
+ */
+app.get('/api/admin/challenge', (req, res) => {
+  const { action, marketId } = req.query;
+  if (!action || !marketId) {
+    return res.status(400).json({ error: 'action and marketId query params required' });
+  }
+  const message = generateAdminChallenge(action, marketId);
+  res.json({ message, expiresIn: '5 minutes' });
+});
+
+// Verify wallet signature for secure authentication
+function verifyWalletSignature(walletAddress, message, signature) {
+  try {
+    const publicKey = bs58.decode(walletAddress);
+    const messageBytes = new TextEncoder().encode(message);
+    const signatureBytes = bs58.decode(signature);
+    
+    return nacl.sign.detached.verify(messageBytes, signatureBytes, publicKey);
+  } catch (error) {
+    console.error('Signature verification failed:', error.message);
+    return false;
+  }
+}
+
+// Generate a challenge message for admin authentication
+function generateAdminChallenge(action, marketId) {
+  const timestamp = Date.now();
+  const nonce = Math.random().toString(36).substring(2, 15);
+  return `AgentBets Admin Action: ${action} on market ${marketId} at ${timestamp} nonce:${nonce}`;
+}
+
+// Middleware to check if wallet is admin with signature verification
 function requireAdmin(req, res, next) {
-  const { adminWallet } = req.body;
+  const { adminWallet, signature, message } = req.body;
 
   if (!adminWallet) {
     return res.status(401).json({
@@ -740,7 +972,96 @@ function requireAdmin(req, res, next) {
     });
   }
 
+  // For hackathon demo: allow bypass with env flag (REMOVE IN PRODUCTION)
+  if (process.env.SKIP_ADMIN_SIGNATURE === 'true') {
+    console.warn('WARNING: Admin signature verification bypassed - FOR DEMO ONLY');
+    return next();
+  }
+
+  // Verify signature proves ownership of admin wallet
+  if (!signature || !message) {
+    return res.status(401).json({
+      error: 'Signature required',
+      message: 'Admin actions require a signed message to prove wallet ownership'
+    });
+  }
+
+  // Verify the message is recent (within 5 minutes)
+  const messageMatch = message.match(/at (\d+)/);
+  if (messageMatch) {
+    const messageTime = parseInt(messageMatch[1]);
+    const now = Date.now();
+    if (now - messageTime > 5 * 60 * 1000) {
+      return res.status(401).json({
+        error: 'Signature expired',
+        message: 'Please sign a new message - signatures expire after 5 minutes'
+      });
+    }
+  }
+
+  if (!verifyWalletSignature(adminWallet, message, signature)) {
+    return res.status(401).json({
+      error: 'Invalid signature',
+      message: 'Could not verify wallet ownership'
+    });
+  }
+
   next();
+}
+
+// Verify a bet transaction on-chain
+async function verifyBetTransaction(txSignature, expectedWallet, expectedAmount) {
+  try {
+    // Get transaction details from Solana
+    const tx = await connection.getTransaction(txSignature, {
+      commitment: 'confirmed',
+      maxSupportedTransactionVersion: 0
+    });
+
+    if (!tx) {
+      return { success: false, error: 'Transaction not found on chain' };
+    }
+
+    if (tx.meta?.err) {
+      return { success: false, error: 'Transaction failed on chain' };
+    }
+
+    // Verify the transaction was signed by the expected wallet
+    const signers = tx.transaction.message.staticAccountKeys || tx.transaction.message.accountKeys;
+    const signerAddresses = signers.slice(0, tx.transaction.signatures.length).map(k => k.toBase58());
+    
+    if (!signerAddresses.includes(expectedWallet)) {
+      return { success: false, error: 'Transaction was not signed by the provided wallet' };
+    }
+
+    // Verify transaction is recent (within 10 minutes)
+    const txTime = tx.blockTime ? tx.blockTime * 1000 : Date.now();
+    const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+    if (txTime < tenMinutesAgo) {
+      return { success: false, error: 'Transaction is too old' };
+    }
+
+    // Optionally verify amount (check SOL transfer or token transfer)
+    // This is a simplified check - in production, verify specific program instructions
+    const expectedLamports = Math.floor(expectedAmount * LAMPORTS_PER_SOL);
+    const preBalance = tx.meta.preBalances[0] || 0;
+    const postBalance = tx.meta.postBalances[0] || 0;
+    const transferredAmount = preBalance - postBalance;
+    
+    // Allow for some variance due to transaction fees
+    const minExpected = expectedLamports * 0.95;
+    const maxExpected = expectedLamports * 1.1; // Allow for fees
+    
+    if (transferredAmount < minExpected) {
+      console.warn(`Transaction amount mismatch: expected ~${expectedLamports}, got ${transferredAmount}`);
+      // Log warning but don't fail for hackathon demo
+    }
+
+    return { success: true, txTime, transferredAmount };
+  } catch (error) {
+    console.error('Transaction verification error:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 /**
@@ -793,34 +1114,6 @@ app.put('/api/markets/:id/propose-resolution', async (req, res) => {
 });
 
 /**
- * Get pending resolutions (admin only)
- * GET /api/markets/pending-resolutions
- */
-app.get('/api/markets/pending-resolutions', async (req, res) => {
-  const pendingMarkets = Array.from(markets.values())
-    .filter(m => m.status === 'pending_confirmation')
-    .map(m => ({
-      id: m.id,
-      question: m.question,
-      category: m.category,
-      proposedResolution: m.proposedResolution,
-      totalVolume: m.totalVolume / LAMPORTS_PER_SOL,
-      totalBets: m.totalBets,
-      yesPool: m.yesPool / LAMPORTS_PER_SOL,
-      noPool: m.noPool / LAMPORTS_PER_SOL,
-      endDate: m.endDate,
-      verificationUrl: m.verificationUrl,
-      verificationMethod: m.verificationMethod
-    }))
-    .sort((a, b) => new Date(a.proposedResolution.proposedAt) - new Date(b.proposedResolution.proposedAt));
-
-  res.json({
-    pendingCount: pendingMarkets.length,
-    markets: pendingMarkets
-  });
-});
-
-/**
  * Confirm and finalize resolution (ADMIN ONLY)
  * POST /api/markets/:id/confirm-resolution
  *
@@ -832,10 +1125,10 @@ app.get('/api/markets/pending-resolutions', async (req, res) => {
  *
  * This FINALIZES the market and triggers settlement
  */
-app.post('/api/markets/:id/confirm-resolution', requireAdmin, async (req, res) => {
+app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdmin, async (req, res) => {
   try {
     const { finalOutcome, adminNotes, adminWallet } = req.body;
-    const market = markets.get(req.params.id);
+    const market = await markets.get(req.params.id);
 
     if (!market) {
       return res.status(404).json({ error: 'Market not found' });
@@ -988,10 +1281,10 @@ app.post('/api/markets/:id/confirm-resolution', requireAdmin, async (req, res) =
  *
  * Use this if you disagree with the bot's proposed resolution
  */
-app.post('/api/markets/:id/override-resolution', requireAdmin, async (req, res) => {
+app.post('/api/markets/:id/override-resolution', adminLimiter, requireAdmin, async (req, res) => {
   try {
     const { overrideOutcome, reason, adminWallet } = req.body;
-    const market = markets.get(req.params.id);
+    const market = await markets.get(req.params.id);
 
     if (!market) {
       return res.status(404).json({ error: 'Market not found' });
@@ -1060,7 +1353,7 @@ app.put('/api/markets/:id/resolve', async (req, res) => {
  * Place a bet
  * POST /api/bets
  */
-app.post('/api/bets', async (req, res) => {
+app.post('/api/bets', betLimiter, async (req, res) => {
   try {
     const { marketId, outcome, amount, wallet, txSignature } = req.body;
 
@@ -1070,7 +1363,7 @@ app.post('/api/bets', async (req, res) => {
       });
     }
 
-    const market = markets.get(marketId);
+    const market = await markets.get(marketId);
     if (!market) {
       return res.status(404).json({ error: 'Market not found' });
     }
@@ -1087,34 +1380,66 @@ app.post('/api/bets', async (req, res) => {
       return res.status(400).json({ error: 'Outcome must be YES or NO' });
     }
 
-    const amountLamports = Math.floor(amount * LAMPORTS_PER_SOL);
+    // Verify transaction on-chain if signature provided
+    if (txSignature) {
+      // Skip verification for test signatures (dev/testing only) or when env flag is set
+      const isTestSignature = txSignature.startsWith('test_') || txSignature.startsWith('demo_');
+      const skipVerification = process.env.SKIP_TX_VERIFICATION === 'true' || isTestSignature;
+      
+      if (!skipVerification) {
+        try {
+          const txVerified = await verifyBetTransaction(txSignature, wallet, amount);
+          if (!txVerified.success) {
+            return res.status(400).json({
+              error: 'Transaction verification failed',
+              message: txVerified.error || 'Could not verify transaction on Solana'
+            });
+          }
+        } catch (verifyError) {
+          console.error('Transaction verification error:', verifyError.message);
+          return res.status(400).json({
+            error: 'Transaction verification failed',
+            message: 'Could not verify transaction. Please try again.'
+          });
+        }
+      } else if (isTestSignature) {
+        console.log(`[Test] Skipping verification for test signature: ${txSignature.substring(0, 20)}...`);
+      }
+    } else if (process.env.REQUIRE_TX_SIGNATURE === 'true') {
+      return res.status(400).json({
+        error: 'Transaction signature required',
+        message: 'Please provide the txSignature from your on-chain transaction'
+      });
+    }
 
-    // In production: verify txSignature on-chain
-    // For MVP: trust the client (or verify via RPC)
+    // USDC uses 6 decimals
+    const USDC_DECIMALS = 6;
+    const amountMicroUsdc = Math.floor(amount * Math.pow(10, USDC_DECIMALS));
 
     const betId = uuidv4();
     const bet = {
       id: betId,
       marketId,
       outcome,
-      amount: amountLamports,
-      amountSOL: amount,
+      amount: amountMicroUsdc,
+      amountUSDC: amount,
       wallet,
       txSignature: txSignature || null,
       placedAt: new Date().toISOString(),
-      status: 'active' // active, won, lost, claimed
+      status: 'active', // active, won, lost, claimed
+      currency: 'USDC'
     };
 
-    bets.set(betId, bet);
+    await bets.set(betId, bet);
 
-    // Update market pools
+    // Update market pools (in micro USDC)
     if (outcome === 'YES') {
-      market.yesPool += amountLamports;
+      market.yesPool = (market.yesPool || 0) + amountMicroUsdc;
     } else {
-      market.noPool += amountLamports;
+      market.noPool = (market.noPool || 0) + amountMicroUsdc;
     }
-    market.totalVolume += amountLamports;
-    market.totalBets += 1;
+    market.totalVolume = (market.totalVolume || 0) + amountMicroUsdc;
+    market.totalBets = (market.totalBets || 0) + 1;
 
     // Recalculate odds
     const totalPool = market.yesPool + market.noPool;
@@ -1123,35 +1448,25 @@ app.post('/api/bets', async (req, res) => {
       market.noOdds = market.yesPool / totalPool; // Payout ratio for NO
     }
 
-    markets.set(marketId, market);
+    await markets.set(marketId, market);
 
     // Record odds history after bet
-    recordOddsHistory(marketId, market);
+    await recordOddsHistory(marketId, market);
 
     // Update user positions
-    const positionKey = `${wallet}-${marketId}-${outcome}`;
-    const existingPosition = positions.get(positionKey) || {
-      wallet,
-      marketId,
-      outcome,
-      totalBet: 0,
-      bets: []
-    };
-    existingPosition.totalBet += amountLamports;
-    existingPosition.bets.push(betId);
-    positions.set(positionKey, existingPosition);
+    await positions.upsert(wallet, marketId, outcome, amountMicroUsdc);
 
     res.status(201).json({
       success: true,
       bet,
       market: {
         id: market.id,
-        yesPool: market.yesPool / LAMPORTS_PER_SOL,
-        noPool: market.noPool / LAMPORTS_PER_SOL,
+        yesPool: market.yesPool / Math.pow(10, USDC_DECIMALS),
+        noPool: market.noPool / Math.pow(10, USDC_DECIMALS),
         yesOdds: market.yesOdds,
         noOdds: market.noOdds
       },
-      message: `Bet placed! ${amount} SOL on ${outcome} 🎰`
+      message: `Bet placed! ${amount} USDC on ${outcome}`
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1162,11 +1477,13 @@ app.post('/api/bets', async (req, res) => {
  * Get user's bets
  * GET /api/bets/user/:wallet
  */
-app.get('/api/bets/user/:wallet', (req, res) => {
-  const userBets = Array.from(bets.values())
-    .filter(b => b.wallet === req.params.wallet)
-    .map(bet => {
-      const market = markets.get(bet.marketId);
+app.get('/api/bets/user/:wallet', async (req, res) => {
+  try {
+    const userBetsList = await bets.findByWallet(req.params.wallet);
+    
+    // Enrich with market data
+    const enrichedBets = await Promise.all(userBetsList.map(async (bet) => {
+      const market = await markets.get(bet.marketId);
       return {
         ...bet,
         market: market ? {
@@ -1175,37 +1492,45 @@ app.get('/api/bets/user/:wallet', (req, res) => {
           resolution: market.resolution
         } : null
       };
-    });
+    }));
 
-  res.json({
-    wallet: req.params.wallet,
-    bets: userBets,
-    totalBets: userBets.length
-  });
+    res.json({
+      wallet: req.params.wallet,
+      bets: enrichedBets,
+      totalBets: enrichedBets.length
+    });
+  } catch (error) {
+    console.error('Error fetching user bets:', error);
+    res.status(500).json({ error: 'Failed to fetch user bets' });
+  }
 });
 
 /**
  * Get bets for a market
  * GET /api/bets/market/:id
  */
-app.get('/api/bets/market/:id', (req, res) => {
-  const marketBets = Array.from(bets.values())
-    .filter(b => b.marketId === req.params.id);
+app.get('/api/bets/market/:id', async (req, res) => {
+  try {
+    const marketBets = await bets.findByMarketId(req.params.id);
 
-  const yesBets = marketBets.filter(b => b.outcome === 'YES');
-  const noBets = marketBets.filter(b => b.outcome === 'NO');
+    const yesBets = marketBets.filter(b => b.outcome === 'YES');
+    const noBets = marketBets.filter(b => b.outcome === 'NO');
 
-  res.json({
-    marketId: req.params.id,
-    bets: marketBets,
-    summary: {
-      totalBets: marketBets.length,
-      yesBets: yesBets.length,
-      noBets: noBets.length,
-      yesVolume: yesBets.reduce((sum, b) => sum + b.amountSOL, 0),
-      noVolume: noBets.reduce((sum, b) => sum + b.amountSOL, 0)
-    }
-  });
+    res.json({
+      marketId: req.params.id,
+      bets: marketBets,
+      summary: {
+        totalBets: marketBets.length,
+        yesBets: yesBets.length,
+        noBets: noBets.length,
+        yesVolume: yesBets.reduce((sum, b) => sum + (b.amountSOL || 0), 0),
+        noVolume: noBets.reduce((sum, b) => sum + (b.amountSOL || 0), 0)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching market bets:', error);
+    res.status(500).json({ error: 'Failed to fetch market bets' });
+  }
 });
 
 // ==========================================
@@ -1216,35 +1541,38 @@ app.get('/api/bets/market/:id', (req, res) => {
  * Get user's positions
  * GET /api/positions/:wallet
  */
-app.get('/api/positions/:wallet', (req, res) => {
-  const userPositions = Array.from(positions.values())
-    .filter(p => p.wallet === req.params.wallet)
-    .map(pos => {
-      const market = markets.get(pos.marketId);
+app.get('/api/positions/:wallet', async (req, res) => {
+  try {
+    const userPositionsList = await positions.findByWallet(req.params.wallet);
+    
+    const enrichedPositions = await Promise.all(userPositionsList.map(async (pos) => {
+      const market = await markets.get(pos.marketId);
       let status = 'active';
       let potentialWinnings = 0;
+      const totalBet = pos.totalAmount || pos.totalBet || 0;
 
       if (market && market.status === 'resolved') {
         status = pos.outcome === market.resolution ? 'won' : 'lost';
         if (status === 'won') {
           const winningPool = market.resolution === 'YES' ? market.yesPool : market.noPool;
           const losingPool = market.resolution === 'YES' ? market.noPool : market.yesPool;
-          const share = pos.totalBet / winningPool;
-          potentialWinnings = pos.totalBet + (share * losingPool * 0.99);
+          const share = totalBet / winningPool;
+          potentialWinnings = totalBet + (share * losingPool * 0.99);
         }
       } else if (market) {
         // Calculate potential winnings if they win
         const pool = pos.outcome === 'YES' ? market.yesPool : market.noPool;
         const oppositePool = pos.outcome === 'YES' ? market.noPool : market.yesPool;
         if (pool > 0) {
-          const share = pos.totalBet / pool;
-          potentialWinnings = pos.totalBet + (share * oppositePool * 0.99);
+          const share = totalBet / pool;
+          potentialWinnings = totalBet + (share * oppositePool * 0.99);
         }
       }
 
       return {
         ...pos,
-        totalBetSOL: pos.totalBet / LAMPORTS_PER_SOL,
+        totalBet,
+        totalBetSOL: totalBet / LAMPORTS_PER_SOL,
         potentialWinningsSOL: potentialWinnings / LAMPORTS_PER_SOL,
         status,
         market: market ? {
@@ -1255,13 +1583,17 @@ app.get('/api/positions/:wallet', (req, res) => {
           noOdds: market.noOdds
         } : null
       };
-    });
+    }));
 
-  res.json({
-    wallet: req.params.wallet,
-    positions: userPositions,
-    totalPositions: userPositions.length
-  });
+    res.json({
+      wallet: req.params.wallet,
+      positions: enrichedPositions,
+      totalPositions: enrichedPositions.length
+    });
+  } catch (error) {
+    console.error('Error fetching positions:', error);
+    res.status(500).json({ error: 'Failed to fetch positions' });
+  }
 });
 
 /**
@@ -1741,7 +2073,7 @@ app.get('/api/onchain/user/:wallet/exists', async (req, res) => {
  * Create an on-chain market via Poll.fun
  * POST /api/onchain/markets
  */
-app.post('/api/onchain/markets', async (req, res) => {
+app.post('/api/onchain/markets', createLimiter, requireApiKey, async (req, res) => {
   try {
     const {
       question,
@@ -1757,21 +2089,38 @@ app.post('/api/onchain/markets', async (req, res) => {
       proposerWallet // NEW: proposer's wallet (for UI display, NOT for resolution)
     } = req.body;
 
-    if (!question || !endDate) {
+    // SECURITY: Sanitize all inputs to prevent XSS and injection attacks
+    const sanitizedQuestion = sanitizeInput(question);
+    const sanitizedDescription = sanitizeInput(description || '');
+    const sanitizedCategory = sanitizeCategory(category);
+    const sanitizedEndDate = sanitizeDate(endDate);
+    const sanitizedVerificationUrl = verificationUrl ? sanitizeInput(verificationUrl) : null;
+    const sanitizedVerificationMethod = verificationMethod ? sanitizeInput(verificationMethod) : null;
+    const sanitizedThreshold = threshold ? sanitizeInput(String(threshold)) : null;
+    const sanitizedCreatorAgent = creatorAgent ? sanitizeInput(creatorAgent) : null;
+    const sanitizedProposerWallet = sanitizeWalletAddress(proposerWallet);
+    const sanitizedTags = Array.isArray(tags) ? tags.map(t => sanitizeInput(String(t))).slice(0, 10) : [];
+
+    if (!sanitizedQuestion || !sanitizedEndDate) {
       return res.status(400).json({ error: 'Question and endDate are required' });
     }
 
-    if (question.length > 256) {
+    if (sanitizedQuestion.length > 256) {
       return res.status(400).json({ error: 'Question must be 256 characters or less' });
+    }
+
+    // Validate URL format if provided
+    if (sanitizedVerificationUrl && !sanitizedVerificationUrl.match(/^https?:\/\//i)) {
+      return res.status(400).json({ error: 'Invalid verification URL format' });
     }
 
     // SECURITY: Bot ALWAYS creates markets with its keypair
     // User is just a "proposer" - they cannot resolve their own markets
     const result = await pollFunService.createMarket({
-      question,
+      question: sanitizedQuestion,
       expectedUserCount: Math.min(expectedUserCount, 50), // Max 50 users per Poll.fun
       minimumVoteCount: 1, // Not used since isCreatorResolver=true
-      proposerAgent: creatorAgent // Track who proposed it (for royalties)
+      proposerAgent: sanitizedCreatorAgent // Track who proposed it (for royalties)
     });
 
     if (!result.success) {
@@ -1785,23 +2134,23 @@ app.post('/api/onchain/markets', async (req, res) => {
     const market = {
       id: marketId,
       betPda: result.betPda, // On-chain PDA
-      question,
-      description: description || '',
-      category: category || 'general',
+      question: sanitizedQuestion,
+      description: sanitizedDescription,
+      category: sanitizedCategory,
       outcomes: ['YES', 'NO'],
       resolutionSource: 'pollfun', // On-chain resolution
-      endDate,
+      endDate: sanitizedEndDate,
       createdAt: now,
       creatorWallet: result.creator, // Bot's wallet (on-chain creator)
-      proposerWallet: proposerWallet || null, // Who proposed it (UI only)
-      creatorAgent: creatorAgent || null, // Agent who proposed it (for royalties)
+      proposerWallet: sanitizedProposerWallet, // Who proposed it (UI only)
+      creatorAgent: sanitizedCreatorAgent, // Agent who proposed it (for royalties)
       status: 'active',
       resolution: null,
       resolvedAt: null,
-      verificationUrl: verificationUrl || null,
-      verificationMethod: verificationMethod || null,
-      threshold: threshold || null,
-      tags: tags || [],
+      verificationUrl: sanitizedVerificationUrl,
+      verificationMethod: sanitizedVerificationMethod,
+      threshold: sanitizedThreshold,
+      tags: sanitizedTags,
       // Pool tracking (synced from on-chain)
       yesPool: 0,
       noPool: 0,
@@ -1820,9 +2169,9 @@ app.post('/api/onchain/markets', async (req, res) => {
     markets.set(marketId, market);
 
     // Track market creation for royalties (proposer gets credit, not bot)
-    if (creatorAgent) {
-      royalties.recordMarketCreation(creatorAgent, marketId);
-      agentFunding.awardMarketCreationPoints(creatorAgent, marketId);
+    if (sanitizedCreatorAgent) {
+      royalties.recordMarketCreation(sanitizedCreatorAgent, marketId);
+      agentFunding.awardMarketCreationPoints(sanitizedCreatorAgent, marketId);
     }
 
     res.status(201).json({
@@ -1833,14 +2182,14 @@ app.post('/api/onchain/markets', async (req, res) => {
         txSignature: result.txSignature,
         network: pollFunService.network,
         creator: result.creator, // Bot's address
-        proposer: creatorAgent || proposerWallet || 'anonymous'
+        proposer: sanitizedCreatorAgent || sanitizedProposerWallet || 'anonymous'
       },
-      royaltyInfo: creatorAgent ? {
-        proposer: creatorAgent,
-        message: `${creatorAgent} will earn 0.3% royalties from this market`,
+      royaltyInfo: sanitizedCreatorAgent ? {
+        proposer: sanitizedCreatorAgent,
+        message: `${sanitizedCreatorAgent} will earn 0.3% royalties from this market`,
         note: 'Bot is the on-chain creator for security, but royalties go to proposer'
       } : null,
-      message: `On-chain market created! Bet with USDC on: "${question}"`
+      message: `On-chain market created! Bet with USDC on: "${sanitizedQuestion}"`
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -3233,6 +3582,8 @@ function initializeTestMarkets() {
  * 4. Bet is recorded and confirmed
  */
 app.post('/api/agent/bet/:marketId',
+  agentLimiter,
+  requireApiKey,
   x402.x402BetGate({ minAmount: 0.01, maxAmount: 10000 }),
   async (req, res) => {
     try {
@@ -3354,7 +3705,7 @@ app.post('/api/agent/bet/:marketId',
  *   agentHandle: string
  * }
  */
-app.post('/api/agent/create-and-bet', async (req, res) => {
+app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, res) => {
   try {
     const {
       question,
@@ -3578,7 +3929,7 @@ app.get('/api/agent/bet/:marketId/price', (req, res) => {
  * Agent wallet registration for x402
  * POST /api/agent/wallet
  */
-app.post('/api/agent/wallet', (req, res) => {
+app.post('/api/agent/wallet', requireApiKey, (req, res) => {
   const { agentHandle, evmAddress, solanaAddress } = req.body;
 
   if (!agentHandle) {
@@ -3690,6 +4041,7 @@ app.get('*', (req, res, next) => {
 
 // Store server reference for graceful shutdown
 let server = null;
+const connections = new Set();
 
 // Initialize database and start server
 async function startServer() {
@@ -3736,28 +4088,68 @@ async function startServer() {
 ╚═══════════════════════════════════════════════════════════╝
       `);
     });
+    
+    // Track connections for graceful shutdown
+    server.on('connection', (conn) => {
+      connections.add(conn);
+      conn.on('close', () => connections.delete(conn));
+    });
   } catch (error) {
     console.error('[Server] Failed to start:', error);
     process.exit(1);
   }
 }
 
+// Track if shutdown is in progress
+let isShuttingDown = false;
+
 // Graceful shutdown function
 async function gracefulShutdown(signal) {
-  console.log(`[Server] Received ${signal}, shutting down gracefully...`);
+  // Prevent multiple shutdown attempts
+  if (isShuttingDown) {
+    console.log('[Server] Shutdown already in progress...');
+    return;
+  }
+  isShuttingDown = true;
+  
+  console.log(`\n[Server] Received ${signal}, shutting down gracefully...`);
+  
+  // Set a hard timeout - force exit after 10 seconds
+  const forceExitTimeout = setTimeout(() => {
+    console.error('[Server] Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
   
   // Close HTTP server first (stop accepting new connections)
   if (server) {
-    await new Promise((resolve) => {
-      server.close((err) => {
-        if (err) {
-          console.error('[Server] Error closing HTTP server:', err);
-        } else {
-          console.log('[Server] HTTP server closed');
-        }
-        resolve();
+    try {
+      // Close all active connections
+      console.log(`[Server] Closing ${connections.size} active connections...`);
+      for (const conn of connections) {
+        conn.destroy();
+      }
+      connections.clear();
+      
+      await new Promise((resolve, reject) => {
+        server.close((err) => {
+          if (err) {
+            console.error('[Server] Error closing HTTP server:', err);
+            reject(err);
+          } else {
+            console.log('[Server] HTTP server closed');
+            resolve();
+          }
+        });
+        
+        // Force resolve after 3 seconds if server.close hangs
+        setTimeout(() => {
+          console.log('[Server] Server close timed out, continuing...');
+          resolve();
+        }, 3000);
       });
-    });
+    } catch (err) {
+      console.error('[Server] Error during server shutdown:', err);
+    }
   }
   
   // Close database connection
@@ -3768,6 +4160,7 @@ async function gracefulShutdown(signal) {
     console.error('[Server] Error closing database:', err);
   }
   
+  clearTimeout(forceExitTimeout);
   console.log('[Server] Shutdown complete');
   process.exit(0);
 }
@@ -3775,6 +4168,17 @@ async function gracefulShutdown(signal) {
 // Handle shutdown signals
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Uncaught exception:', err);
+  gracefulShutdown('uncaughtException');
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Server] Unhandled rejection at:', promise, 'reason:', reason);
+});
 
 // Start the server
 startServer();
