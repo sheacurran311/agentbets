@@ -4,17 +4,17 @@ import { WalletModalProvider } from '@solana/wallet-adapter-react-ui'
 import { SolflareWalletAdapter } from '@solana/wallet-adapter-solflare'
 import { CoinbaseWalletAdapter } from '@solana/wallet-adapter-coinbase'
 import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom'
-import { clusterApiUrl } from '@solana/web3.js'
+// clusterApiUrl not used - we default directly to mainnet RPC
 
 // Import wallet adapter styles
 import '@solana/wallet-adapter-react-ui/styles.css'
 
-// Network: use VITE_SOLANA_NETWORK env var, default to mainnet
-const NETWORK = import.meta.env.VITE_SOLANA_NETWORK || 'mainnet-beta'
+// Network: use VITE_SOLANA_RPC_URL env var, or default to mainnet
+const DEFAULT_RPC_URL = 'https://api.mainnet.solana.com'
 
 export function WalletProvider({ children }) {
   const endpoint = useMemo(
-    () => import.meta.env.VITE_SOLANA_RPC_URL || clusterApiUrl(NETWORK),
+    () => import.meta.env.VITE_SOLANA_RPC_URL || DEFAULT_RPC_URL,
     []
   )
 

@@ -983,12 +983,16 @@ function App() {
     fetchGaslessConfig()
   }, [fetchGaslessConfig])
 
-  // Fetch USDC token balance
+  // Fetch USDC token balance with retry logic for rate-limited RPCs
   const fetchBalance = useCallback(async () => {
-    if (publicKey && connection) {
+    if (!publicKey || !connection) return
+
+    const MAX_RETRIES = 3
+    const usdcMint = new PublicKey(USDC_MINT)
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         // Get USDC token accounts for this wallet
-        const usdcMint = new PublicKey(USDC_MINT)
         const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
           publicKey,
           { mint: usdcMint }
@@ -999,18 +1003,38 @@ function App() {
           const usdcBalance = tokenAccounts.value[0].account.data.parsed.info.tokenAmount.uiAmount
           setWalletBalance(usdcBalance)
         } else {
-          // No USDC account - balance is 0
+          // No USDC token account exists - balance is 0
           setWalletBalance(0)
         }
+        return // Success - exit retry loop
       } catch (err) {
-        console.error('Failed to fetch USDC balance:', err)
-        // Fallback: try to get SOL balance for display purposes
-        try {
-          const solBalance = await connection.getBalance(publicKey)
-          // Show SOL balance with a note (user needs to swap for USDC)
-          setWalletBalance(null) // null indicates no USDC
-        } catch {
-          setWalletBalance(null)
+        console.warn(`[Balance] Attempt ${attempt}/${MAX_RETRIES} failed:`, err.message)
+        
+        if (attempt < MAX_RETRIES) {
+          // Exponential backoff: 1s, 2s before retrying
+          await new Promise(r => setTimeout(r, attempt * 1000))
+        } else {
+          console.error('[Balance] All retries failed, trying getTokenAccountBalance fallback')
+          // Final fallback: derive the Associated Token Account directly and query its balance
+          // This uses a lighter RPC call (getTokenAccountBalance) instead of getParsedTokenAccountsByOwner
+          try {
+            const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
+            const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL')
+            const [ata] = PublicKey.findProgramAddressSync(
+              [publicKey.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), usdcMint.toBuffer()],
+              ASSOCIATED_TOKEN_PROGRAM_ID
+            )
+            const accInfo = await connection.getTokenAccountBalance(ata)
+            if (accInfo?.value) {
+              setWalletBalance(accInfo.value.uiAmount || 0)
+            } else {
+              setWalletBalance(0)
+            }
+          } catch (fallbackErr) {
+            console.error('[Balance] Fallback also failed:', fallbackErr.message)
+            // Keep existing balance if we had one, only set null if we never fetched
+            setWalletBalance(prev => prev !== null ? prev : null)
+          }
         }
       }
     }
@@ -1148,10 +1172,14 @@ function App() {
     }
   }, [oddsHistoryCache])
 
-  // Fetch odds history when a market is selected (for modal)
+  // Fetch odds history and refresh balance when a market is selected (for modal)
   useEffect(() => {
-    if (selectedMarket && !oddsHistoryCache[selectedMarket.id]) {
-      fetchOddsHistory(selectedMarket.id)
+    if (selectedMarket) {
+      // Refresh balance when modal opens so it's always current
+      if (connected) fetchBalance()
+      if (!oddsHistoryCache[selectedMarket.id]) {
+        fetchOddsHistory(selectedMarket.id)
+      }
     }
   }, [selectedMarket, fetchOddsHistory, oddsHistoryCache])
 
@@ -1371,6 +1399,12 @@ function App() {
   }
 
   const createMarket = async () => {
+    // Require wallet connection for market creation
+    if (!connected || !publicKey) {
+      setWalletModalVisible(true)
+      return
+    }
+
     if (!newMarket.question || !newMarket.endDate) {
       alert('Please fill in question and end date')
       return
@@ -1426,7 +1460,7 @@ function App() {
           question: sanitizedQuestion,
           category: sanitizedCategory,
           endDate: sanitizedEndDate,
-          proposerWallet: publicKey?.toString() || null // Proposer, not creator (bot is creator)
+          proposerWallet: publicKey.toString() // Proposer wallet (bot is on-chain creator)
         })
       })
 
@@ -2017,7 +2051,7 @@ function App() {
                   onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
                 >
                   <span style={{fontSize: '20px'}}>&#9889;</span>
-                  Launch Market
+                  {connected ? 'Launch Market' : 'Connect Wallet to Launch'}
                 </button>
               </div>
             </div>
@@ -2247,37 +2281,78 @@ function App() {
                 <div style={styles.modalLargeChart}>
                   {(() => {
                     const history = oddsHistoryCache[selectedMarket.id] || [];
-                    const dataPoints = history.length >= 2 ? history : [
-                      { yesOdds: 0.5, noOdds: 0.5 },
-                      { yesOdds: selectedMarket.yesOdds, noOdds: selectedMarket.noOdds }
-                    ];
+                    
+                    // Build data points with proper timestamps
+                    const now = new Date();
+                    const marketCreated = selectedMarket.createdAt ? new Date(selectedMarket.createdAt) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
+                    
+                    const dataPoints = history.length >= 2
+                      ? history.map(d => ({
+                          time: d.timestamp ? new Date(d.timestamp).getTime() : 0,
+                          yesOdds: d.yesOdds,
+                          noOdds: d.noOdds
+                        })).sort((a, b) => a.time - b.time)
+                      : [
+                          { time: marketCreated.getTime(), yesOdds: 0.5, noOdds: 0.5 },
+                          { time: now.getTime(), yesOdds: selectedMarket.yesOdds, noOdds: selectedMarket.noOdds }
+                        ];
                     
                     const chartWidth = 500;
-                    const chartHeight = 200;
-                    const padding = { left: 35, right: 10, top: 10, bottom: 25 };
+                    const chartHeight = 220;
+                    const padding = { left: 35, right: 15, top: 10, bottom: 40 };
                     const innerWidth = chartWidth - padding.left - padding.right;
                     const innerHeight = chartHeight - padding.top - padding.bottom;
                     
-                    // Calculate path points for YES and NO
-                    const yesPoints = dataPoints.map((d, i) => {
-                      const x = padding.left + (i / (dataPoints.length - 1)) * innerWidth;
+                    // Time range for x-axis
+                    const timeMin = dataPoints[0].time;
+                    const timeMax = dataPoints[dataPoints.length - 1].time;
+                    const timeRange = timeMax - timeMin || 1;
+                    
+                    // Calculate x position from timestamp
+                    const xForTime = (t) => padding.left + ((t - timeMin) / timeRange) * innerWidth;
+                    
+                    // Calculate path points for YES and NO using actual timestamps
+                    const yesPoints = dataPoints.map(d => {
+                      const x = xForTime(d.time);
                       const y = padding.top + (1 - d.yesOdds) * innerHeight;
                       return `${x},${y}`;
                     });
                     
-                    const noPoints = dataPoints.map((d, i) => {
-                      const x = padding.left + (i / (dataPoints.length - 1)) * innerWidth;
+                    const noPoints = dataPoints.map(d => {
+                      const x = xForTime(d.time);
                       const y = padding.top + (1 - d.noOdds) * innerHeight;
                       return `${x},${y}`;
                     });
                     
                     const yesPath = `M${yesPoints.join(' L')}`;
                     const noPath = `M${noPoints.join(' L')}`;
-                    const yesAreaPath = `M${padding.left},${chartHeight - padding.bottom} L${yesPoints.join(' L')} L${chartWidth - padding.right},${chartHeight - padding.bottom} Z`;
+                    const yesAreaPath = `M${padding.left},${chartHeight - padding.bottom} L${yesPoints.join(' L')} L${xForTime(timeMax)},${chartHeight - padding.bottom} Z`;
+                    
+                    // Generate time axis labels (up to 5 evenly spaced)
+                    const spanMs = timeRange;
+                    const spanHours = spanMs / (1000 * 60 * 60);
+                    const labelCount = Math.min(5, dataPoints.length);
+                    const timeLabels = [];
+                    for (let i = 0; i < labelCount; i++) {
+                      const t = timeMin + (i / (labelCount - 1)) * timeRange;
+                      const date = new Date(t);
+                      let label;
+                      if (spanHours < 24) {
+                        // Show hours:minutes
+                        label = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                      } else if (spanHours < 24 * 30) {
+                        // Show month/day
+                        label = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                      } else {
+                        // Show month/day/year
+                        label = date.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
+                      }
+                      timeLabels.push({ x: xForTime(t), label });
+                    }
                     
                     return (
-                      <svg width="100%" height="200" viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="xMidYMid meet" style={{display: 'block'}}>
-                        {/* Grid lines */}
+                      <svg width="100%" height="220" viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="xMidYMid meet" style={{display: 'block'}}>
+                        {/* Y-axis grid lines and labels */}
                         {[0, 25, 50, 75, 100].map(pct => {
                           const y = padding.top + ((100 - pct) / 100) * innerHeight;
                           return (
@@ -2288,6 +2363,17 @@ function App() {
                           );
                         })}
                         
+                        {/* X-axis time labels */}
+                        {timeLabels.map((tl, i) => (
+                          <g key={i}>
+                            <line x1={tl.x} y1={chartHeight - padding.bottom} x2={tl.x} y2={chartHeight - padding.bottom + 4} stroke={COLORS.border} strokeWidth="1"/>
+                            <text x={tl.x} y={chartHeight - padding.bottom + 16} fill={COLORS.textMuted} fontSize="9" fontFamily="JetBrains Mono" textAnchor="middle">{tl.label}</text>
+                          </g>
+                        ))}
+                        
+                        {/* X-axis baseline */}
+                        <line x1={padding.left} y1={chartHeight - padding.bottom} x2={chartWidth - padding.right} y2={chartHeight - padding.bottom} stroke={COLORS.border} strokeWidth="1"/>
+                        
                         {/* YES area fill */}
                         <path d={yesAreaPath} fill={`${COLORS.success}15`} />
                         
@@ -2297,13 +2383,20 @@ function App() {
                         {/* NO line */}
                         <path d={noPath} fill="none" stroke={COLORS.error} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
                         
-                        {/* Current value dots */}
-                        <circle cx={chartWidth - padding.right} cy={padding.top + (1 - selectedMarket.yesOdds) * innerHeight} r="6" fill={COLORS.success} />
-                        <circle cx={chartWidth - padding.right} cy={padding.top + (1 - selectedMarket.noOdds) * innerHeight} r="6" fill={COLORS.error} />
+                        {/* Data point dots on lines */}
+                        {dataPoints.map((d, i) => (
+                          <g key={i}>
+                            <circle cx={xForTime(d.time)} cy={padding.top + (1 - d.yesOdds) * innerHeight} r={i === dataPoints.length - 1 ? 5 : 3} fill={COLORS.success} opacity={i === dataPoints.length - 1 ? 1 : 0.6} />
+                            <circle cx={xForTime(d.time)} cy={padding.top + (1 - d.noOdds) * innerHeight} r={i === dataPoints.length - 1 ? 5 : 3} fill={COLORS.error} opacity={i === dataPoints.length - 1 ? 1 : 0.6} />
+                          </g>
+                        ))}
                         
-                        {/* Data point indicator */}
-                        <text x={chartWidth - padding.right} y={chartHeight - 5} fill={COLORS.textMuted} fontSize="9" fontFamily="JetBrains Mono" textAnchor="end">
-                          {dataPoints.length} data points
+                        {/* Current value labels at the last point */}
+                        <text x={xForTime(timeMax) + 2} y={padding.top + (1 - selectedMarket.yesOdds) * innerHeight - 8} fill={COLORS.success} fontSize="10" fontFamily="JetBrains Mono" fontWeight="700" textAnchor="end">
+                          {Math.round(selectedMarket.yesOdds * 100)}%
+                        </text>
+                        <text x={xForTime(timeMax) + 2} y={padding.top + (1 - selectedMarket.noOdds) * innerHeight + 14} fill={COLORS.error} fontSize="10" fontFamily="JetBrains Mono" fontWeight="700" textAnchor="end">
+                          {Math.round(selectedMarket.noOdds * 100)}%
                         </text>
                       </svg>
                     );

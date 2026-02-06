@@ -100,7 +100,7 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'", "https://api.devnet.solana.com", "https://api.mainnet.solana.com"],
+      connectSrc: ["'self'", "https://api.devnet.solana.com", "https://api.mainnet.solana.com", "https://api.mainnet-beta.solana.com", "wss://api.mainnet.solana.com", "wss://api.mainnet-beta.solana.com"],
     },
   },
   crossOriginEmbedderPolicy: false, // Allow embedding for Solana Actions

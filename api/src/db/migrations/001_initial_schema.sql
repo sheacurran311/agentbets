@@ -32,8 +32,8 @@ CREATE TABLE IF NOT EXISTS markets (
   total_bets INTEGER DEFAULT 0,
   
   -- Calculated odds
-  yes_odds DECIMAL(10, 6) DEFAULT 2.0,
-  no_odds DECIMAL(10, 6) DEFAULT 2.0,
+  yes_odds DECIMAL(10, 6) DEFAULT 0.5,
+  no_odds DECIMAL(10, 6) DEFAULT 0.5,
   
   -- Resolution/verification fields
   threshold VARCHAR(100),
