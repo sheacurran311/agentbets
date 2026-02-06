@@ -109,7 +109,7 @@ async function getDexScreenerData(tokenAddress) {
 /**
  * Fetch Solana account data
  */
-async function getSolanaAccountData(address, rpcUrl = 'https://api.devnet.solana.com') {
+async function getSolanaAccountData(address, rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet.solana.com') {
   try {
     console.log(`[Oracle] Fetching Solana account data for ${address}`);
 
@@ -237,7 +237,7 @@ async function getMoltbookStats() {
 /**
  * Get Solana transaction count for an address
  */
-async function getSolanaTransactionCount(address, rpcUrl = 'https://api.devnet.solana.com') {
+async function getSolanaTransactionCount(address, rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet.solana.com') {
   try {
     console.log(`[Oracle] Fetching transaction count for ${address}`);
 

@@ -17,7 +17,7 @@ const USDC_MINT_MAINNET = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwy
 // Default RPC endpoints
 const RPC_ENDPOINTS = {
   devnet: 'https://api.devnet.solana.com',
-  mainnet: 'https://api.mainnet-beta.solana.com'
+  mainnet: 'https://api.mainnet.solana.com'
 };
 
 class PollFunService {
@@ -108,6 +108,33 @@ class PollFunService {
   }
 
   /**
+   * Ensure the bot's creator account exists on-chain
+   * This is required before ANY market creation or wagering operation
+   * Called automatically by createMarket, but can be called manually too
+   * @returns {Object} Result with success status
+   */
+  async ensureCreatorUserExists() {
+    if (!this.creatorKeypair) {
+      return { success: false, error: 'Bot creator keypair not configured' };
+    }
+
+    try {
+      const result = await this.ensureUserExists(this.creatorKeypair);
+      if (result.success) {
+        if (result.created) {
+          console.log('[PollFun] Bot creator user account initialized on-chain:', result.userAddress);
+        } else {
+          console.log('[PollFun] Bot creator user account already exists:', result.userAddress);
+        }
+      }
+      return result;
+    } catch (error) {
+      console.error('[PollFun] Failed to ensure creator user exists:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * Initialize a new prediction market on-chain
    * Uses isCreatorResolver=true so our oracle can resolve without voting
    *
@@ -147,13 +174,22 @@ class PollFunService {
     console.log('[PollFun] Creating market:', question);
 
     try {
+      // AUTO: Ensure bot's program user account exists before creating market
+      // This is required by Poll.fun SDK - without it, "Account does not exist" error occurs
+      const userResult = await this.ensureCreatorUserExists();
+      if (!userResult.success) {
+        console.error('[PollFun] Failed to ensure creator user account:', userResult.error);
+        return { success: false, error: `Failed to initialize creator account: ${userResult.error}` };
+      }
+
       // Create bet with creator resolution (bypasses voting vulnerability)
       const result = await this.sdk.initializeBetV2({
         question,
         expectedUserCount,
         minimumVoteCount,
         isCreatorResolver: true, // IMPORTANT: Our oracle resolves, not voters
-        signers: [creator]
+        signers: [creator],
+        payerOverride: creator.publicKey
       });
 
       console.log('[PollFun] Market created by bot!');
@@ -190,11 +226,12 @@ class PollFunService {
    * @param {string} params.betPda Market PDA address
    * @param {string} params.side 'YES' or 'NO' (maps to Outcome.For / Outcome.Against)
    * @param {number} params.amount Amount in USDC (human-readable, e.g., 25 for $25)
-   * @param {PublicKey} params.userPubkey User's wallet public key
+   * @param {string} params.userPubkey User's wallet public key
+   * @param {string} [params.feePayerPubkey] Optional: override who pays SOL rent (for gasless relay)
    * @returns {Object} Instruction for user to sign
    */
   async buildWagerInstruction(params) {
-    const { betPda, side, amount, userPubkey } = params;
+    const { betPda, side, amount, userPubkey, feePayerPubkey } = params;
 
     console.log(`[PollFun] Building wager instruction: ${amount} USDC on ${side}`);
 
@@ -202,12 +239,16 @@ class PollFunService {
       // Map YES/NO to Poll.fun Outcome enum
       const outcome = side === 'YES' ? Outcome.For : Outcome.Against;
 
+      // payerOverride determines who pays SOL rent for on-chain accounts.
+      // In gasless mode, the API wallet pays; otherwise the user pays.
+      const payer = feePayerPubkey ? new PublicKey(feePayerPubkey) : new PublicKey(userPubkey);
+
       // Get the instruction (not signed transaction)
       const ix = await this.sdk.instructions.placeWagerV2({
         bet: new PublicKey(betPda),
         amount, // SDK handles USDC decimals
         side: outcome,
-        payerOverride: new PublicKey(userPubkey)
+        payerOverride: payer
       });
 
       return {
@@ -245,13 +286,20 @@ class PollFunService {
     console.log(`[PollFun] Placing wager: ${amount} USDC on ${side}`);
 
     try {
+      // AUTO: Ensure user's program account exists before placing wager
+      const userResult = await this.ensureUserExists(userKeypair);
+      if (!userResult.success) {
+        return { success: false, error: `Failed to initialize user account: ${userResult.error}` };
+      }
+
       const outcome = side === 'YES' ? Outcome.For : Outcome.Against;
 
       const txHash = await this.sdk.placeWagerV2({
         bet: new PublicKey(betPda),
         amount,
         side: outcome,
-        signers: [userKeypair]
+        signers: [userKeypair],
+        payerOverride: userKeypair.publicKey
       });
 
       console.log('[PollFun] Wager placed:', txHash);
@@ -292,7 +340,8 @@ class PollFunService {
     try {
       const txHash = await this.sdk.initiateVoteV2({
         bet: new PublicKey(betPda),
-        signers: [initiator]
+        signers: [initiator],
+        payerOverride: initiator.publicKey
       });
 
       console.log('[PollFun] Vote phase initiated:', txHash);
@@ -329,12 +378,19 @@ class PollFunService {
     console.log(`[PollFun] Resolving market ${betPda}: ${winningOutcome} wins`);
 
     try {
+      // AUTO: Ensure creator's program account exists before resolving
+      const userResult = await this.ensureUserExists(creator);
+      if (!userResult.success) {
+        return { success: false, error: `Failed to initialize creator account: ${userResult.error}` };
+      }
+
       const outcome = winningOutcome === 'YES' ? Outcome.For : Outcome.Against;
 
       // First initiate vote phase
       const initTx = await this.sdk.initiateVoteV2({
         bet: new PublicKey(betPda),
-        signers: [creator]
+        signers: [creator],
+        payerOverride: creator.publicKey
       });
       console.log('[PollFun] Vote phase initiated:', initTx);
 
@@ -342,7 +398,8 @@ class PollFunService {
       const voteTx = await this.sdk.placeVoteV2({
         bet: new PublicKey(betPda),
         outcome,
-        signers: [creator]
+        signers: [creator],
+        payerOverride: creator.publicKey
       });
       console.log('[PollFun] Market resolved:', voteTx);
 
@@ -385,7 +442,8 @@ class PollFunService {
         bet: new PublicKey(betPda),
         batchNumber,
         usersPerBatch,
-        signers: [creator]
+        signers: [creator],
+        payerOverride: creator.publicKey
       });
 
       console.log('[PollFun] Batch settled:', txHash);
@@ -550,8 +608,13 @@ class PollFunService {
 }
 
 // Export singleton instance and class
+// NOTE: Poll.fun program (po11oacBudCHcbqXWhmuuQmRnzKmkjwmkvwzHZvAX9u) is deployed on MAINNET only
+// Always default to mainnet for Poll.fun, unless explicitly overridden with POLLFUN_NETWORK
+const pollFunNetwork = process.env.POLLFUN_NETWORK || 'mainnet';
+console.log(`[PollFun] Using network: ${pollFunNetwork} (set POLLFUN_NETWORK env to override)`);
 const pollFunService = new PollFunService({
-  network: process.env.SOLANA_NETWORK || 'devnet'
+  network: pollFunNetwork,
+  rpcEndpoint: process.env.POLLFUN_RPC_URL || (pollFunNetwork === 'mainnet' ? 'https://api.mainnet.solana.com' : undefined)
 });
 
 module.exports = {

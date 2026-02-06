@@ -9,8 +9,9 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 const ESCROW_WALLET = import.meta.env.VITE_ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM'
 const ADMIN_WALLET = import.meta.env.VITE_ADMIN_WALLET || 'ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG'
 
-// USDC Token Mint (devnet)
-const USDC_MINT = import.meta.env.VITE_USDC_MINT || '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
+// USDC Token Mint (mainnet) - 6 decimals
+const USDC_MINT = import.meta.env.VITE_USDC_MINT || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+const USDC_DECIMALS = 6
 
 // Input Sanitization - Prevent XSS and injection attacks
 const sanitizeInput = (input) => {
@@ -43,9 +44,25 @@ const sanitizeDate = (dateString) => {
   // Only allow ISO date format (YYYY-MM-DDTHH:MM)
   const dateRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
   if (!dateRegex.test(dateString)) return null
-  const date = new Date(dateString)
-  // Check if date is valid and in the future
-  if (isNaN(date.getTime()) || date <= new Date()) return null
+  
+  // Parse as UTC
+  const parts = dateString.split('T');
+  const [datePart, timePart] = parts;
+  const [year, month, day] = datePart.split('-');
+  const [hours, minutes] = timePart.split(':');
+  
+  const date = new Date(Date.UTC(
+    parseInt(year),
+    parseInt(month) - 1,
+    parseInt(day),
+    parseInt(hours),
+    parseInt(minutes)
+  ));
+  
+  // Check if date is valid and in the future (UTC)
+  const now = new Date();
+  if (isNaN(date.getTime()) || date <= now) return null
+  
   return dateString
 }
 
@@ -677,7 +694,7 @@ const MiniSparkline = memo(({ data, color = COLORS.primary, height = 32, showDot
   if (!data || data.length < 2) {
     // Show a flat line if no data
     return (
-      <svg width="100%" height={height} viewBox="0 0 100 32" preserveAspectRatio="none">
+      <svg width="100%" height={height} viewBox="0 0 100 32" preserveAspectRatio="xMidYMid meet">
         <line x1="0" y1="16" x2="100" y2="16" stroke={color} strokeWidth="1.5" opacity="0.3" strokeDasharray="4" />
       </svg>
     );
@@ -700,19 +717,24 @@ const MiniSparkline = memo(({ data, color = COLORS.primary, height = 32, showDot
   // Create area fill path
   const areaD = `M0,32 L${points.join(' L')} L100,32 Z`;
 
+  // Calculate last point coordinates for the marker
+  const lastX = 100;
+  const lastY = 32 - ((values[values.length - 1] - min) / range) * 28 - 2;
+
   return (
-    <svg width="100%" height={height} viewBox="0 0 100 32" preserveAspectRatio="none">
+    <svg width="100%" height={height} viewBox="0 0 100 32" preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
       {/* Area fill */}
       <path d={areaD} fill={`${color}15`} />
       {/* Line */}
       <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      {/* End dot */}
+      {/* End dot - using vector-effect to prevent stretching */}
       {showDots && values.length > 0 && (
         <circle 
-          cx="100" 
-          cy={32 - ((values[values.length - 1] - min) / range) * 28 - 2} 
+          cx={lastX} 
+          cy={lastY} 
           r="2.5" 
-          fill={color} 
+          fill={color}
+          vectorEffect="non-scaling-stroke"
         />
       )}
     </svg>
@@ -763,6 +785,79 @@ const VerificationBadge = memo(({ source, url }) => {
   );
 });
 
+/**
+ * Format countdown timer from a future date
+ */
+const formatCountdown = (endDateString, _tick = 0) => {
+  if (!endDateString) return '';
+  
+  // Parse the datetime-local format (YYYY-MM-DDTHH:MM) as UTC
+  const parts = endDateString.split('T');
+  if (parts.length !== 2) return '';
+  
+  const [datePart, timePart] = parts;
+  const [year, month, day] = datePart.split('-');
+  const [hours, minutes] = timePart.split(':');
+  
+  // Create UTC date
+  const endDate = new Date(Date.UTC(
+    parseInt(year),
+    parseInt(month) - 1,
+    parseInt(day),
+    parseInt(hours),
+    parseInt(minutes || 0)
+  ));
+  
+  const now = new Date();
+  const diffMs = endDate.getTime() - now.getTime();
+  
+  if (diffMs <= 0) return 'Expired';
+  
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const hours_left = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+  const minutes_left = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+  const seconds_left = Math.floor((diffMs % (1000 * 60)) / 1000);
+  
+  if (days > 0) return `${days}d ${hours_left}h ${minutes_left}m`;
+  if (hours_left > 0) return `${hours_left}h ${minutes_left}m ${seconds_left}s`;
+  if (minutes_left > 0) return `${minutes_left}m ${seconds_left}s`;
+  return `${seconds_left}s`;
+};
+
+/**
+ * Format datetime-local string as readable UTC date
+ */
+const formatDateTimeLocal = (dateTimeString) => {
+  if (!dateTimeString) return '';
+  
+  // Parse the datetime-local format (YYYY-MM-DDTHH:MM) as UTC
+  const parts = dateTimeString.split('T');
+  if (parts.length !== 2) return '';
+  
+  const [datePart, timePart] = parts;
+  const [year, month, day] = datePart.split('-');
+  const [hours, minutes] = timePart.split(':');
+  
+  // Create UTC date
+  const date = new Date(Date.UTC(
+    parseInt(year),
+    parseInt(month) - 1,
+    parseInt(day),
+    parseInt(hours),
+    parseInt(minutes || 0)
+  ));
+  
+  return date.toLocaleString('en-US', {
+    timeZone: 'UTC',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }) + ' UTC';
+};
+
 function App() {
   const navigate = useNavigate()
   const { publicKey, sendTransaction, connected } = useWallet()
@@ -778,6 +873,7 @@ function App() {
   const [betAmount, setBetAmount] = useState('')
   const [walletBalance, setWalletBalance] = useState(null)
   const [txStatus, setTxStatus] = useState(null)
+  const [gaslessConfig, setGaslessConfig] = useState(null)
   const [selectedCategory, setSelectedCategory] = useState('all')
   const [sortBy, setSortBy] = useState('volume')
   const [searchQuery, setSearchQuery] = useState('')
@@ -790,6 +886,7 @@ function App() {
   const [pendingResolutions, setPendingResolutions] = useState([]) // Markets awaiting admin confirmation
   const [adminConfirming, setAdminConfirming] = useState(null) // Currently confirming market ID
   const [showDatePicker, setShowDatePicker] = useState(false) // Date picker modal visibility
+  const [countdownTick, setCountdownTick] = useState(0) // Ticker for countdown updates
 
   // Check if connected wallet is admin
   const isAdmin = publicKey?.toString() === ADMIN_WALLET
@@ -868,14 +965,53 @@ function App() {
     }
   }
 
-  // Fetch wallet balance
+  // Fetch gasless relay configuration
+  const fetchGaslessConfig = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/gasless/config`)
+      const data = await res.json()
+      if (data.success && data.enabled) {
+        setGaslessConfig(data)
+        console.log(`[Gasless] Relay active: ${data.feeUsdc} USDC/tx, payer: ${data.feePayerPubkey?.slice(0, 8)}...`)
+      }
+    } catch (err) {
+      console.log('[Gasless] Config not available:', err.message)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchGaslessConfig()
+  }, [fetchGaslessConfig])
+
+  // Fetch USDC token balance
   const fetchBalance = useCallback(async () => {
     if (publicKey && connection) {
       try {
-        const balance = await connection.getBalance(publicKey)
-        setWalletBalance(balance / LAMPORTS_PER_SOL)
+        // Get USDC token accounts for this wallet
+        const usdcMint = new PublicKey(USDC_MINT)
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+          publicKey,
+          { mint: usdcMint }
+        )
+        
+        if (tokenAccounts.value.length > 0) {
+          // Get the USDC balance from the first token account
+          const usdcBalance = tokenAccounts.value[0].account.data.parsed.info.tokenAmount.uiAmount
+          setWalletBalance(usdcBalance)
+        } else {
+          // No USDC account - balance is 0
+          setWalletBalance(0)
+        }
       } catch (err) {
-        console.error('Failed to fetch balance:', err)
+        console.error('Failed to fetch USDC balance:', err)
+        // Fallback: try to get SOL balance for display purposes
+        try {
+          const solBalance = await connection.getBalance(publicKey)
+          // Show SOL balance with a note (user needs to swap for USDC)
+          setWalletBalance(null) // null indicates no USDC
+        } catch {
+          setWalletBalance(null)
+        }
       }
     }
   }, [publicKey, connection])
@@ -1019,6 +1155,17 @@ function App() {
     }
   }, [selectedMarket, fetchOddsHistory, oddsHistoryCache])
 
+  // Update countdown every second when date picker is open
+  useEffect(() => {
+    if (!showDatePicker) return;
+    
+    const interval = setInterval(() => {
+      setCountdownTick(prev => prev + 1);
+    }, 1000);
+    
+    return () => clearInterval(interval);
+  }, [showDatePicker]);
+
   const fetchStats = async () => {
     try {
       const res = await fetch(`${API_BASE}/stats`)
@@ -1098,45 +1245,98 @@ function App() {
     }
 
     const amount = parseFloat(betAmount)
-    const isOnChain = selectedMarket.onChain || selectedMarket.currency === 'USDC'
+    const gasFee = gaslessConfig?.feeUsdc || 0
+    const totalCost = amount + gasFee
 
-    // For SOL bets, check wallet balance
-    if (!isOnChain && walletBalance !== null && amount > walletBalance) {
-      alert(`Insufficient balance. You have ${walletBalance.toFixed(4)} SOL`)
+    // Check USDC wallet balance (bet + gas fee)
+    if (walletBalance === null) {
+      alert('No USDC balance found. Please add USDC to your wallet first.')
+      return
+    }
+    if (totalCost > walletBalance) {
+      alert(`Insufficient USDC balance. You need ${totalCost.toFixed(4)} USDC (${amount} bet + ${gasFee} gas fee). You have ${walletBalance.toFixed(2)} USDC`)
       return
     }
 
     setTxStatus({ type: 'pending', message: 'Creating transaction...' })
 
     try {
-      if (isOnChain) {
-        // On-chain USDC bet via Poll.fun
-        setTxStatus({ type: 'pending', message: 'Creating on-chain wager...' })
+      // Request gasless transaction from API (API pays SOL gas, user pays USDC fee)
+      const useGasless = !!gaslessConfig?.enabled
+      setTxStatus({ type: 'pending', message: useGasless ? 'Creating gasless wager...' : 'Creating on-chain wager...' })
 
-        // Get wager transaction from API
-        const wagerRes = await fetch(`${API_BASE}/onchain/wager`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            marketId: selectedMarket.id,
-            betPda: selectedMarket.betPda,
-            outcome,
-            amount,
-            wallet: publicKey.toString()
-          })
+      const wagerRes = await fetch(`${API_BASE}/onchain/wager`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          marketId: selectedMarket.id,
+          betPda: selectedMarket.betPda,
+          outcome,
+          amount,
+          wallet: publicKey.toString(),
+          gasless: useGasless
+        })
+      })
+
+      const wagerData = await wagerRes.json()
+
+      if (!wagerData.success) {
+        throw new Error(wagerData.error || 'Failed to create wager transaction')
+      }
+
+      setTxStatus({ type: 'pending', message: useGasless
+        ? `Approve ${amount} USDC bet + ${gasFee} USDC gas fee in wallet...`
+        : 'Please approve USDC transfer in wallet...'
+      })
+
+      if (wagerData.gasless && wagerData.transaction) {
+        // GASLESS: Transaction is pre-signed by API as feePayer
+        // User just signs their part and broadcasts
+        const txBuffer = Buffer.from(wagerData.transaction, 'base64')
+        const transaction = Transaction.from(txBuffer)
+
+        const signature = await sendTransaction(transaction, connection)
+
+        setTxStatus({ type: 'pending', message: 'Confirming on-chain wager...' })
+
+        await connection.confirmTransaction({
+          signature,
+          blockhash: wagerData.blockhash,
+          lastValidBlockHeight: wagerData.lastValidBlockHeight
         })
 
-        const wagerData = await wagerRes.json()
+        setTxStatus({ type: 'success', message: `Bet placed! No SOL needed. ${signature.slice(0, 8)}...` })
+      } else {
+        // TRADITIONAL: Build transaction from instructions
+        const transaction = new Transaction()
 
-        if (!wagerData.success) {
-          throw new Error(wagerData.error || 'Failed to create wager transaction')
+        // Add user init instruction if needed
+        if (wagerData.userInitInstruction) {
+          const initIx = wagerData.userInitInstruction
+          transaction.add({
+            programId: new PublicKey(initIx.programId),
+            keys: initIx.keys.map(k => ({
+              pubkey: new PublicKey(k.pubkey),
+              isSigner: k.isSigner,
+              isWritable: k.isWritable
+            })),
+            data: Buffer.from(initIx.data, 'base64')
+          })
         }
 
-        setTxStatus({ type: 'pending', message: 'Please approve USDC transfer in wallet...' })
-
-        // Deserialize and send transaction
-        const txBuffer = Buffer.from(wagerData.transaction.serialized, 'base64')
-        const transaction = Transaction.from(txBuffer)
+        // Add wager instruction
+        if (wagerData.instruction) {
+          const ix = wagerData.instruction
+          transaction.add({
+            programId: new PublicKey(ix.programId),
+            keys: ix.keys.map(k => ({
+              pubkey: new PublicKey(k.pubkey),
+              isSigner: k.isSigner,
+              isWritable: k.isWritable
+            })),
+            data: Buffer.from(ix.data, 'base64')
+          })
+        }
 
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash()
         transaction.recentBlockhash = blockhash
@@ -1153,73 +1353,17 @@ function App() {
         })
 
         setTxStatus({ type: 'success', message: `On-chain bet placed! ${signature.slice(0, 8)}...` })
-
-        setTimeout(() => {
-          setSelectedMarket(null)
-          setBetAmount('')
-          setTxStatus(null)
-          fetchMarkets()
-          fetchStats()
-          fetchBalance()
-        }, 2000)
-
-      } else {
-        // Traditional SOL bet to escrow
-        const escrowPubkey = new PublicKey(ESCROW_WALLET)
-        const lamports = Math.floor(amount * LAMPORTS_PER_SOL)
-
-        const transaction = new Transaction().add(
-          SystemProgram.transfer({
-            fromPubkey: publicKey,
-            toPubkey: escrowPubkey,
-            lamports
-          })
-        )
-
-        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash()
-        transaction.recentBlockhash = blockhash
-        transaction.feePayer = publicKey
-
-        setTxStatus({ type: 'pending', message: 'Please approve in your wallet...' })
-
-        const signature = await sendTransaction(transaction, connection)
-
-        setTxStatus({ type: 'pending', message: 'Confirming transaction...' })
-
-        await connection.confirmTransaction({
-          signature,
-          blockhash,
-          lastValidBlockHeight
-        })
-
-        setTxStatus({ type: 'success', message: `Confirmed! ${signature.slice(0, 8)}...` })
-
-        const res = await fetch(`${API_BASE}/bets`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            marketId: selectedMarket.id,
-            outcome,
-            amount,
-            wallet: publicKey.toString(),
-            txSignature: signature
-          })
-        })
-
-        const data = await res.json()
-        if (data.success) {
-          setTimeout(() => {
-            setSelectedMarket(null)
-            setBetAmount('')
-            setTxStatus(null)
-            fetchMarkets()
-            fetchStats()
-            fetchBalance()
-          }, 1500)
-        } else {
-          setTxStatus({ type: 'error', message: data.error || 'Failed to record bet' })
-        }
       }
+
+      setTimeout(() => {
+        setSelectedMarket(null)
+        setBetAmount('')
+        setTxStatus(null)
+        fetchMarkets()
+        fetchStats()
+        fetchBalance()
+      }, 2000)
+
     } catch (err) {
       console.error('Transaction failed:', err)
       setTxStatus({ type: 'error', message: err.message || 'Transaction failed' })
@@ -1249,7 +1393,27 @@ function App() {
     }
 
     if (!sanitizedEndDate) {
-      alert('Invalid date. Please select a future date and time.')
+      alert('Invalid date. Please select a future date and time (at least 10 minutes from now).')
+      return
+    }
+
+    // Additional validation: ensure end date is at least 10 minutes in the future
+    const parts = sanitizedEndDate.split('T');
+    const [datePart, timePart] = parts;
+    const [year, month, day] = datePart.split('-');
+    const [hours, minutes] = timePart.split(':');
+    const endDate = new Date(Date.UTC(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hours),
+      parseInt(minutes)
+    ));
+    const now = new Date();
+    const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
+    
+    if (endDate <= tenMinutesFromNow) {
+      alert('End date must be at least 10 minutes in the future.')
       return
     }
 
@@ -1457,13 +1621,25 @@ function App() {
           <div style={styles.topBarRight}>
             <div style={styles.networkBadge}>
               <span style={styles.networkDot}></span>
-              DEVNET
+              MAINNET
             </div>
             {connected && walletBalance !== null && (
               <div style={styles.balanceBadge}>
                 <span style={styles.balanceIcon}>{Icons.wallet}</span>
-                {walletBalance.toFixed(3)} SOL
+                {walletBalance.toFixed(2)} USDC
               </div>
+            )}
+            {connected && walletBalance === null && (
+              <a 
+                href="https://jup.ag/swap/SOL-USDC" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                style={{...styles.balanceBadge, background: 'rgba(255,100,100,0.1)', borderColor: 'rgba(255,100,100,0.3)', textDecoration: 'none', cursor: 'pointer'}}
+                title="Swap SOL for USDC on Jupiter"
+              >
+                <span style={styles.balanceIcon}>{Icons.wallet}</span>
+                Get USDC
+              </a>
             )}
             <WalletMultiButton />
           </div>
@@ -1478,7 +1654,7 @@ function App() {
               <div style={styles.marketsHeroBar} className="markets-hero-bar">
                 <div style={styles.heroStatCard}>
                   <span className="step-num">LIVE MARKETS</span>
-                  <span className="metric-value" style={{fontSize: '28px'}}>{filteredMarkets.filter(m => m.status === 'active' || !m.status).length}</span>
+                  <span className="metric-value" style={{fontSize: '28px'}}>{stats?.markets?.active || filteredMarkets.filter(m => m.status === 'active' || !m.status).length}</span>
                 </div>
                 <div style={styles.heroStatCard}>
                   <span className="step-num">VOLUME</span>
@@ -2185,11 +2361,29 @@ function App() {
                   </div>
                 )}
 
-                {/* Balance Display */}
+                {/* USDC Balance Display */}
                 {connected && walletBalance !== null && (
                   <div style={styles.balanceDisplayCompact}>
-                    <span style={{color: COLORS.textMuted, fontSize: '12px'}}>Balance</span>
-                    <span style={{color: COLORS.primary, fontWeight: '600', fontSize: '14px'}}>{walletBalance?.toFixed(4)} SOL</span>
+                    <span style={{color: COLORS.textMuted, fontSize: '12px'}}>USDC Balance</span>
+                    <span style={{color: COLORS.primary, fontWeight: '600', fontSize: '14px'}}>{walletBalance?.toFixed(2)} USDC</span>
+                  </div>
+                )}
+                {connected && walletBalance === null && (
+                  <div style={{...styles.balanceDisplayCompact, borderColor: 'rgba(255,100,100,0.3)', flexDirection: 'column', gap: '6px'}}>
+                    <span style={{color: '#ff6b6b', fontSize: '12px'}}>No USDC found in wallet</span>
+                    <a 
+                      href="https://jup.ag/swap/SOL-USDC" 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      style={{
+                        color: COLORS.primary, 
+                        fontSize: '11px', 
+                        textDecoration: 'underline',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Swap SOL for USDC on Jupiter →
+                    </a>
                   </div>
                 )}
 
@@ -2206,6 +2400,24 @@ function App() {
                     onChange={(e) => setBetAmount(e.target.value)}
                     disabled={txStatus?.type === 'pending'}
                   />
+                  {gaslessConfig?.enabled && betAmount && parseFloat(betAmount) > 0 && (
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      padding: '8px 12px',
+                      background: `${COLORS.success}10`,
+                      borderRadius: '8px',
+                      border: `1px solid ${COLORS.success}30`,
+                      marginTop: '6px',
+                      fontSize: '12px'
+                    }}>
+                      <span style={{color: COLORS.success, fontWeight: '600'}}>No SOL needed</span>
+                      <span style={{color: COLORS.textMuted}}>
+                        Gas: {gaslessConfig.feeUsdc} USDC | Total: {(parseFloat(betAmount) + gaslessConfig.feeUsdc).toFixed(4)} USDC
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Large YES/NO Buttons */}
@@ -2281,7 +2493,12 @@ function App() {
         <div style={styles.modalOverlay} onClick={() => setShowDatePicker(false)}>
           <div style={styles.datePickerModal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
-              <h2 style={{fontSize: '20px', fontWeight: '600', color: COLORS.textPrimary}}>Select End Date & Time</h2>
+              <div>
+                <h2 style={{fontSize: '20px', fontWeight: '600', color: COLORS.textPrimary}}>Select End Date & Time</h2>
+                <div style={{fontSize: '11px', color: COLORS.textMuted, fontFamily: 'JetBrains Mono, monospace', marginTop: '4px'}}>
+                  Current UTC: {new Date().toISOString().slice(0, 19).replace('T', ' ')}
+                </div>
+              </div>
               <button style={styles.closeBtn} onClick={() => setShowDatePicker(false)}>
                 {Icons.x}
               </button>
@@ -2290,7 +2507,7 @@ function App() {
             <div style={styles.datePickerContent}>
               {/* Quick Presets */}
               <div style={styles.datePickerSection}>
-                <label style={styles.datePickerLabel}>Quick Select</label>
+                <label style={styles.datePickerLabel}>Quick Select (UTC)</label>
                 <div style={styles.datePresetGrid}>
                   {[
                     { label: '1 Hour', hours: 1 },
@@ -2306,10 +2523,18 @@ function App() {
                       key={preset.label}
                       style={styles.datePresetBtn}
                       onClick={() => {
-                        const date = new Date(Date.now() + preset.hours * 60 * 60 * 1000);
-                        const formatted = date.toISOString().slice(0, 16);
+                        // Calculate future time from current UTC time
+                        const now = new Date();
+                        const futureTime = new Date(now.getTime() + preset.hours * 60 * 60 * 1000);
+                        // Format as YYYY-MM-DDTHH:MM for datetime-local input
+                        const year = futureTime.getUTCFullYear();
+                        const month = String(futureTime.getUTCMonth() + 1).padStart(2, '0');
+                        const day = String(futureTime.getUTCDate()).padStart(2, '0');
+                        const hours = String(futureTime.getUTCHours()).padStart(2, '0');
+                        const minutes = String(futureTime.getUTCMinutes()).padStart(2, '0');
+                        const formatted = `${year}-${month}-${day}T${hours}:${minutes}`;
                         setMarketField('endDate', formatted);
-                        setShowDatePicker(false);
+                        // Don't close modal - let user review and confirm
                       }}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.borderColor = COLORS.primary;
@@ -2348,7 +2573,7 @@ function App() {
                     <input
                       type="time"
                       style={styles.dateTimeInput}
-                      value={newMarket.endDate ? newMarket.endDate.split('T')[1] || '12:00' : '12:00'}
+                      value={newMarket.endDate ? newMarket.endDate.split('T')[1]?.slice(0, 5) || '12:00' : '12:00'}
                       onChange={(e) => {
                         const date = newMarket.endDate ? newMarket.endDate.split('T')[0] : new Date().toISOString().split('T')[0];
                         setMarketField('endDate', `${date}T${e.target.value}`);
@@ -2361,18 +2586,26 @@ function App() {
               {/* Preview */}
               {newMarket.endDate && (
                 <div style={styles.datePreview}>
-                  <span style={{color: COLORS.textMuted}}>Market ends:</span>
-                  <span style={{color: COLORS.primary, fontWeight: '600', fontFamily: 'JetBrains Mono, monospace'}}>
-                    {new Date(newMarket.endDate).toLocaleString('en-US', {
-                      timeZone: 'UTC',
-                      weekday: 'short',
-                      month: 'short',
-                      day: 'numeric',
-                      year: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit'
-                    })} UTC
-                  </span>
+                  <div style={{display: 'flex', flexDirection: 'column', gap: '8px', width: '100%'}}>
+                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                      <span style={{color: COLORS.textMuted, fontSize: '12px'}}>Market ends:</span>
+                      <span style={{color: COLORS.primary, fontWeight: '600', fontFamily: 'JetBrains Mono, monospace', fontSize: '13px'}}>
+                        {formatDateTimeLocal(newMarket.endDate)}
+                      </span>
+                    </div>
+                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                      <span style={{color: COLORS.textMuted, fontSize: '12px'}}>Countdown:</span>
+                      <span style={{
+                        color: COLORS.success, 
+                        fontWeight: '700', 
+                        fontFamily: 'JetBrains Mono, monospace', 
+                        fontSize: '16px',
+                        letterSpacing: '0.5px'
+                      }}>
+                        {formatCountdown(newMarket.endDate, countdownTick)}
+                      </span>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -2596,10 +2829,10 @@ const styles = {
     alignItems: 'center',
     gap: '8px',
     padding: '8px 14px',
-    background: `${COLORS.warning}20`,
+    background: `${COLORS.success}20`,
     borderRadius: '20px',
     fontSize: '12px',
-    color: COLORS.warning,
+    color: COLORS.success,
     fontWeight: '600',
     textTransform: 'uppercase',
     letterSpacing: '0.5px'
@@ -2608,7 +2841,7 @@ const styles = {
     width: '8px',
     height: '8px',
     borderRadius: '50%',
-    background: COLORS.warning,
+    background: COLORS.success,
     animation: 'pulse 2s infinite'
   },
   balanceBadge: {
@@ -2776,7 +3009,8 @@ const styles = {
     padding: '8px 0',
     borderRadius: '8px',
     background: `${COLORS.bgDark}50`,
-    height: '36px'
+    height: '36px',
+    overflow: 'hidden'
   },
   modalChartContainer: {
     marginBottom: '16px',
@@ -4051,7 +4285,7 @@ const styles = {
     background: `${COLORS.primary}08`,
     border: `1px solid ${COLORS.primary}25`,
     borderRadius: '12px',
-    textAlign: 'center'
+    textAlign: 'left'
   },
   datePickerConfirmBtn: {
     display: 'flex',

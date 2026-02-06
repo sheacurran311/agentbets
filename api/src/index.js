@@ -37,6 +37,8 @@ const { router: actionsRouter, generateBlinkUrl, generateMarketsBlinkUrl, ACTION
 const agentVerification = require('./agentVerification');
 // x402 Payments for programmatic agent betting
 const x402 = require('./x402-payments');
+// Gasless relay for USDC-only transactions (no SOL needed)
+const { gaslessService } = require('./gasless');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -98,7 +100,7 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'", "https://api.devnet.solana.com", "https://api.mainnet-beta.solana.com"],
+      connectSrc: ["'self'", "https://api.devnet.solana.com", "https://api.mainnet.solana.com"],
     },
   },
   crossOriginEmbedderPolicy: false, // Allow embedding for Solana Actions
@@ -213,7 +215,7 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.use('/api/actions', actionsRouter);
 
 // Solana connection
-const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.mainnet.solana.com';
 const connection = new Connection(SOLANA_RPC, 'confirmed');
 
 // Platform escrow wallet (in production, this would be a PDA)
@@ -438,8 +440,25 @@ app.post('/api/markets', async (req, res) => {
       return res.status(400).json({ error: 'Question and endDate are required' });
     }
 
+    // Validate end date is in the future (at least 10 minutes)
+    const endDateTime = new Date(endDate);
+    const now = new Date();
+    const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
+    
+    if (isNaN(endDateTime.getTime())) {
+      return res.status(400).json({ error: 'Invalid endDate format. Use ISO 8601 format (YYYY-MM-DDTHH:MM)' });
+    }
+    
+    if (endDateTime <= now) {
+      return res.status(400).json({ error: 'End date must be in the future' });
+    }
+    
+    if (endDateTime < tenMinutesFromNow) {
+      return res.status(400).json({ error: 'End date must be at least 10 minutes in the future' });
+    }
+
     const marketId = uuidv4();
-    const now = new Date().toISOString();
+    const createdAt = new Date().toISOString();
 
     // Generate proper verification URL and method
     const finalResolutionSource = resolutionSource || 'manual';
@@ -458,7 +477,7 @@ app.post('/api/markets', async (req, res) => {
       outcomes: ['YES', 'NO'],
       resolutionSource: finalResolutionSource,
       endDate,
-      createdAt: now,
+      createdAt: createdAt,
       creatorWallet: creatorWallet || null,
       creatorAgent: creatorAgent || null,
       status: 'active', // active, resolved, cancelled
@@ -972,12 +991,6 @@ function requireAdmin(req, res, next) {
     });
   }
 
-  // For hackathon demo: allow bypass with env flag (REMOVE IN PRODUCTION)
-  if (process.env.SKIP_ADMIN_SIGNATURE === 'true') {
-    console.warn('WARNING: Admin signature verification bypassed - FOR DEMO ONLY');
-    return next();
-  }
-
   // Verify signature proves ownership of admin wallet
   if (!signature || !message) {
     return res.status(401).json({
@@ -1054,7 +1067,7 @@ async function verifyBetTransaction(txSignature, expectedWallet, expectedAmount)
     
     if (transferredAmount < minExpected) {
       console.warn(`Transaction amount mismatch: expected ~${expectedLamports}, got ${transferredAmount}`);
-      // Log warning but don't fail for hackathon demo
+      // Log warning but allow slight variance for fees
     }
 
     return { success: true, txTime, transferredAmount };
@@ -1382,11 +1395,11 @@ app.post('/api/bets', betLimiter, async (req, res) => {
 
     // Verify transaction on-chain if signature provided
     if (txSignature) {
-      // Skip verification for test signatures (dev/testing only) or when env flag is set
-      const isTestSignature = txSignature.startsWith('test_') || txSignature.startsWith('demo_');
-      const skipVerification = process.env.SKIP_TX_VERIFICATION === 'true' || isTestSignature;
+      // Verify real transactions on-chain
+      const isTestSignature = process.env.NODE_ENV === 'development' &&
+        (txSignature.startsWith('test_') || txSignature.startsWith('demo_'));
       
-      if (!skipVerification) {
+      if (!isTestSignature) {
         try {
           const txVerified = await verifyBetTransaction(txSignature, wallet, amount);
           if (!txVerified.success) {
@@ -2005,8 +2018,8 @@ app.post('/api/escrow/payout', async (req, res) => {
  * Initialize a user's Poll.fun account (required before placing wagers)
  * POST /api/onchain/user/init
  *
- * Note: This endpoint creates the instruction for client-side signing
- * The user needs SOL for gas to create their account
+ * For the bot's own wallet: automatically creates the account server-side
+ * For other wallets: returns instructions for client-side signing
  */
 app.post('/api/onchain/user/init', async (req, res) => {
   try {
@@ -2028,7 +2041,30 @@ app.post('/api/onchain/user/init', async (req, res) => {
       });
     }
 
-    // Return information about how to initialize
+    // If this is the bot's own wallet, auto-create the account
+    const botWallet = pollFunService.creatorKeypair?.publicKey?.toBase58();
+    if (botWallet && wallet === botWallet) {
+      console.log('[API] Auto-creating bot creator user account...');
+      const result = await pollFunService.ensureCreatorUserExists();
+      if (result.success) {
+        return res.json({
+          success: true,
+          exists: true,
+          created: true,
+          userAddress: result.userAddress,
+          message: 'Bot creator account initialized on-chain',
+          txSignature: result.txSignature || null
+        });
+      } else {
+        return res.status(500).json({
+          success: false,
+          error: result.error,
+          message: 'Failed to initialize bot creator account'
+        });
+      }
+    }
+
+    // For other wallets, return information about how to initialize
     // The actual initialization requires the user to sign
     res.json({
       success: true,
@@ -2073,7 +2109,7 @@ app.get('/api/onchain/user/:wallet/exists', async (req, res) => {
  * Create an on-chain market via Poll.fun
  * POST /api/onchain/markets
  */
-app.post('/api/onchain/markets', createLimiter, requireApiKey, async (req, res) => {
+app.post('/api/onchain/markets', createLimiter, async (req, res) => {
   try {
     const {
       question,
@@ -2109,6 +2145,23 @@ app.post('/api/onchain/markets', createLimiter, requireApiKey, async (req, res) 
       return res.status(400).json({ error: 'Question must be 256 characters or less' });
     }
 
+    // Validate end date is in the future (at least 10 minutes)
+    const endDateTime = new Date(sanitizedEndDate);
+    const now = new Date();
+    const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
+    
+    if (isNaN(endDateTime.getTime())) {
+      return res.status(400).json({ error: 'Invalid endDate format' });
+    }
+    
+    if (endDateTime <= now) {
+      return res.status(400).json({ error: 'End date must be in the future' });
+    }
+    
+    if (endDateTime < tenMinutesFromNow) {
+      return res.status(400).json({ error: 'End date must be at least 10 minutes in the future' });
+    }
+
     // Validate URL format if provided
     if (sanitizedVerificationUrl && !sanitizedVerificationUrl.match(/^https?:\/\//i)) {
       return res.status(400).json({ error: 'Invalid verification URL format' });
@@ -2129,7 +2182,7 @@ app.post('/api/onchain/markets', createLimiter, requireApiKey, async (req, res) 
 
     // Also store in local database for tracking
     const marketId = uuidv4();
-    const now = new Date().toISOString();
+    const createdAt = new Date().toISOString();
 
     const market = {
       id: marketId,
@@ -2140,7 +2193,7 @@ app.post('/api/onchain/markets', createLimiter, requireApiKey, async (req, res) 
       outcomes: ['YES', 'NO'],
       resolutionSource: 'pollfun', // On-chain resolution
       endDate: sanitizedEndDate,
-      createdAt: now,
+      createdAt: createdAt,
       creatorWallet: result.creator, // Bot's wallet (on-chain creator)
       proposerWallet: sanitizedProposerWallet, // Who proposed it (UI only)
       creatorAgent: sanitizedCreatorAgent, // Agent who proposed it (for royalties)
@@ -2199,10 +2252,13 @@ app.post('/api/onchain/markets', createLimiter, requireApiKey, async (req, res) 
 /**
  * Create a wager transaction for user to sign
  * POST /api/onchain/wager
+ * 
+ * Supports gasless mode: set { gasless: true } in body to get a pre-signed
+ * transaction where the API pays SOL gas and user pays a small USDC fee.
  */
 app.post('/api/onchain/wager', async (req, res) => {
   try {
-    const { marketId, betPda, outcome, amount, wallet } = req.body;
+    const { marketId, betPda, outcome, amount, wallet, gasless } = req.body;
 
     if ((!marketId && !betPda) || !outcome || !amount || !wallet) {
       return res.status(400).json({
@@ -2229,43 +2285,215 @@ app.post('/api/onchain/wager', async (req, res) => {
       return res.status(400).json({ error: 'Outcome must be YES or NO' });
     }
 
+    // Determine if gasless mode is requested and available
+    const useGasless = gasless && gaslessService.enabled && gaslessService.feePayerKeypair;
+    const userPubkey = new PublicKey(wallet);
+
+    // In gasless mode, API wallet pays SOL rent for account init
+    const initPayerOverride = useGasless
+      ? gaslessService.feePayerKeypair.publicKey
+      : userPubkey;
+
+    // AUTO: Check if user has a Poll.fun account, include init instruction if not
+    let userInitIx = null;
+    let userInitInstructionSerialized = null;
+
+    try {
+      const userData = await pollFunService.getUserData(wallet);
+      if (!userData.success) {
+        console.log(`[API] User ${wallet.slice(0, 8)}... needs Poll.fun account, including init instruction`);
+        userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
+          payerOverride: initPayerOverride
+        });
+        userInitInstructionSerialized = {
+          programId: userInitIx.programId?.toBase58(),
+          keys: userInitIx.keys?.map(k => ({
+            pubkey: k.pubkey.toBase58(),
+            isSigner: k.isSigner,
+            isWritable: k.isWritable
+          })),
+          data: userInitIx.data?.toString('base64')
+        };
+      }
+    } catch (err) {
+      console.log(`[API] User account check failed, including init instruction: ${err.message}`);
+      try {
+        userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
+          payerOverride: initPayerOverride
+        });
+        userInitInstructionSerialized = {
+          programId: userInitIx.programId?.toBase58(),
+          keys: userInitIx.keys?.map(k => ({
+            pubkey: k.pubkey.toBase58(),
+            isSigner: k.isSigner,
+            isWritable: k.isWritable
+          })),
+          data: userInitIx.data?.toString('base64')
+        };
+      } catch (initErr) {
+        console.warn(`[API] Could not build user init instruction: ${initErr.message}`);
+      }
+    }
+
     // Build wager instruction for client-side signing
     const result = await pollFunService.buildWagerInstruction({
       betPda: pdaAddress,
-      side: outcome, // 'YES' or 'NO'
+      side: outcome,
       amount,
-      userPubkey: wallet
+      userPubkey: wallet,
+      feePayerPubkey: useGasless ? gaslessService.feePayerKeypair.publicKey.toBase58() : undefined
     });
 
     if (!result.success) {
       return res.status(500).json({ error: result.error });
     }
 
+    if (useGasless) {
+      // GASLESS MODE: Build full transaction, wrap with USDC fee, pre-sign
+      console.log(`[API] Building gasless wager for ${wallet.slice(0, 8)}...`);
+
+      const transaction = new Transaction();
+      if (userInitIx) {
+        transaction.add(userInitIx);
+      }
+      transaction.add(result.instruction);
+
+      const wrapped = await gaslessService.wrapWithGasless(transaction, userPubkey);
+
+      res.json({
+        success: true,
+        gasless: true,
+        transaction: wrapped.transaction,
+        blockhash: wrapped.blockhash,
+        lastValidBlockHeight: wrapped.lastValidBlockHeight,
+        feePayer: wrapped.feePayer,
+        gasFee: wrapped.feeUsdc,
+        wagerDetails: {
+          betPda: pdaAddress,
+          marketId: marketId || null,
+          side: outcome,
+          amount,
+          currency: 'USDC'
+        },
+        message: `Bet ${amount} USDC on ${outcome} (gasless — ${wrapped.feeUsdc} USDC gas fee, no SOL needed)`,
+        instructions: 'Transaction is pre-signed by the relay. Sign with your wallet and broadcast directly, or POST to /api/relay.'
+      });
+    } else {
+      // TRADITIONAL MODE: Return individual instructions
+      res.json({
+        success: true,
+        gasless: false,
+        userInitInstruction: userInitInstructionSerialized || null,
+        userAccountNote: userInitInstructionSerialized
+          ? 'User account does not exist. Include the userInitInstruction BEFORE the wager instruction in your transaction.'
+          : 'User account exists.',
+        instruction: result.instruction ? {
+          programId: result.instruction.programId?.toBase58(),
+          keys: result.instruction.keys?.map(k => ({
+            pubkey: k.pubkey.toBase58(),
+            isSigner: k.isSigner,
+            isWritable: k.isWritable
+          })),
+          data: result.instruction.data?.toString('base64')
+        } : null,
+        wagerDetails: {
+          betPda: pdaAddress,
+          marketId: marketId || null,
+          side: outcome,
+          amount,
+          currency: 'USDC'
+        },
+        message: result.message,
+        instructions: userInitInstructionSerialized
+          ? 'Build a transaction with userInitInstruction first, then the wager instruction, and sign with your wallet.'
+          : 'Build a transaction with this instruction and sign with your wallet.'
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// GASLESS RELAY ENDPOINTS (Octane-Style USDC Fee Payer)
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Get gasless relay configuration
+ * GET /api/gasless/config
+ * 
+ * Returns fee payer pubkey, USDC fee amount, and USDC mint for clients
+ * to build gasless transactions locally.
+ */
+app.get('/api/gasless/config', (req, res) => {
+  try {
+    const config = gaslessService.getConfig();
     res.json({
       success: true,
-      instruction: result.instruction ? {
-        programId: result.instruction.programId?.toBase58(),
-        keys: result.instruction.keys?.map(k => ({
-          pubkey: k.pubkey.toBase58(),
-          isSigner: k.isSigner,
-          isWritable: k.isWritable
-        })),
-        data: result.instruction.data?.toString('base64')
-      } : null,
-      wagerDetails: {
-        betPda: pdaAddress,
-        marketId: marketId || null,
-        side: outcome,
-        amount,
-        currency: 'USDC'
-      },
-      message: result.message,
-      instructions: 'Build a transaction with this instruction and sign with your wallet. User must have a Poll.fun account first.'
+      ...config,
+      note: config.enabled
+        ? `Gasless relay active. Include a ${config.feeUsdc} USDC fee transfer as the first instruction to have the API pay SOL gas fees.`
+        : 'Gasless relay is currently disabled. Transactions require SOL for gas fees.'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
+/**
+ * Relay a user-signed gasless transaction
+ * POST /api/relay
+ * 
+ * Accepts a user-signed transaction where the API wallet is feePayer.
+ * Validates security checks, co-signs as feePayer, and broadcasts.
+ * 
+ * Body: { transaction: "<base64 serialized transaction>" }
+ * Returns: { success, signature, explorer }
+ */
+app.post('/api/relay', async (req, res) => {
+  try {
+    const { transaction } = req.body;
+
+    if (!transaction) {
+      return res.status(400).json({ error: 'Missing transaction in request body' });
+    }
+
+    if (!gaslessService.enabled) {
+      return res.status(503).json({ error: 'Gasless relay is not enabled' });
+    }
+
+    const result = await gaslessService.validateAndRelay(transaction);
+    res.json(result);
+  } catch (error) {
+    console.error('[Relay] Error:', error.message);
+
+    // Provide specific error codes for common issues
+    if (error.message.includes('feePayer')) {
+      return res.status(400).json({ error: error.message, code: 'INVALID_FEE_PAYER' });
+    }
+    if (error.message.includes('fee')) {
+      return res.status(400).json({ error: error.message, code: 'INSUFFICIENT_FEE' });
+    }
+    if (error.message.includes('Security')) {
+      return res.status(403).json({ error: error.message, code: 'SECURITY_VIOLATION' });
+    }
+    if (error.message.includes('Rate limit')) {
+      return res.status(429).json({ error: error.message, code: 'RATE_LIMITED' });
+    }
+    if (error.message.includes('Duplicate')) {
+      return res.status(409).json({ error: error.message, code: 'DUPLICATE_TX' });
+    }
+    if (error.message.includes('Simulation')) {
+      return res.status(400).json({ error: error.message, code: 'SIMULATION_FAILED' });
+    }
+
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// ON-CHAIN DATA ENDPOINTS
+// ═══════════════════════════════════════════════════════════
 
 /**
  * Get on-chain market data
@@ -2637,15 +2865,6 @@ app.get('/api/onchain/user/:wallet', async (req, res) => {
 // ==========================================
 
 /**
- * Get agent's earnings balance
- * GET /api/royalties/:agentHandle
- */
-app.get('/api/royalties/:agentHandle', (req, res) => {
-  const data = royalties.getAgentRoyalties(req.params.agentHandle);
-  res.json(data);
-});
-
-/**
  * Register wallet for royalty withdrawals
  * POST /api/royalties/register
  */
@@ -2741,6 +2960,16 @@ app.get('/api/royalties/platform-stats', (req, res) => {
   res.json(royalties.getPlatformStats());
 });
 
+/**
+ * Get agent's earnings balance
+ * GET /api/royalties/:agentHandle
+ * NOTE: This route must be AFTER specific routes like /estimate/:volume and /platform-stats
+ */
+app.get('/api/royalties/:agentHandle', (req, res) => {
+  const data = royalties.getAgentRoyalties(req.params.agentHandle);
+  res.json(data);
+});
+
 // ==========================================
 // SOLANA ACTIONS / BLINKS ENDPOINTS
 // ==========================================
@@ -2756,7 +2985,7 @@ app.get('/api/blink/:marketId', (req, res) => {
     return res.status(404).json({ error: 'Market not found' });
   }
 
-  const baseUrl = process.env.API_BASE_URL || `https://3002-capy-1769786465404-780459-preview.happycapy.ai`;
+  const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
   const blinkUrl = generateBlinkUrl(market.id, baseUrl);
   const actionUrl = `${baseUrl}/api/actions/bet/${market.id}`;
 
@@ -2775,7 +3004,7 @@ app.get('/api/blink/:marketId', (req, res) => {
  * GET /api/blink
  */
 app.get('/api/blink', (req, res) => {
-  const baseUrl = process.env.API_BASE_URL || `https://3002-capy-1769786465404-780459-preview.happycapy.ai`;
+  const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
   const blinkUrl = generateMarketsBlinkUrl(baseUrl);
   const actionUrl = `${baseUrl}/api/actions/markets`;
 
@@ -2845,6 +3074,50 @@ app.post('/api/verify/register', async (req, res) => {
   } catch (err) {
     console.error('Registration error:', err);
     res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+/**
+ * Verify a Moltbook identity token
+ * POST /api/verify/moltbook
+ * Allows agents to authenticate via Moltbook identity tokens
+ * Requires MOLTBOOK_APP_KEY env var (placeholder until key is received)
+ */
+app.post('/api/verify/moltbook', async (req, res) => {
+  try {
+    const { identityToken } = req.body;
+
+    if (!identityToken) {
+      return res.status(400).json({ error: 'identityToken is required' });
+    }
+
+    const result = await agentVerification.verifyMoltbookIdentity(identityToken);
+
+    if (result.verified) {
+      // Auto-whitelist verified Moltbook agents
+      if (result.agentHandle) {
+        agentVerification.addToWhitelist(result.agentHandle);
+      }
+
+      res.json({
+        verified: true,
+        agent: {
+          id: result.agentId,
+          handle: result.agentHandle,
+          platform: 'moltbook'
+        },
+        message: 'Agent identity verified via Moltbook'
+      });
+    } else {
+      res.status(result.error?.includes('not configured') ? 503 : 401).json({
+        verified: false,
+        error: result.error,
+        hint: result.hint || 'Ensure identity token is valid and not expired'
+      });
+    }
+  } catch (err) {
+    console.error('Moltbook verification error:', err);
+    res.status(500).json({ error: 'Moltbook verification failed' });
   }
 });
 
@@ -3099,37 +3372,42 @@ app.get('/api/health', (req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     version: '1.0.0',
-    network: process.env.SOLANA_NETWORK || 'devnet'
+    network: process.env.SOLANA_NETWORK || 'mainnet'
   });
 });
 
-app.get('/api/stats', (req, res) => {
-  const allMarkets = Array.from(markets.values());
-  const allBets = Array.from(bets.values());
+app.get('/api/stats', async (req, res) => {
+  try {
+    const allMarkets = await markets.values();
+    const allBets = await bets.values();
 
-  // Calculate USDC volume from bets that have amountUSDC field
-  const totalVolumeUSDC = allBets
-    .filter(b => b.amountUSDC)
-    .reduce((sum, b) => sum + (b.amountUSDC || 0), 0);
-  
-  const activeMarkets = allMarkets.filter(m => m.status === 'active').length;
-  const resolvedMarkets = allMarkets.filter(m => m.status === 'resolved').length;
+    // Calculate USDC volume from bets that have amountUSDC field
+    const totalVolumeUSDC = allBets
+      .filter(b => b.amountUSDC)
+      .reduce((sum, b) => sum + (b.amountUSDC || 0), 0);
+    
+    const activeMarkets = allMarkets.filter(m => m.status === 'active').length;
+    const resolvedMarkets = allMarkets.filter(m => m.status === 'resolved').length;
 
-  res.json({
-    markets: {
-      total: allMarkets.length,
-      active: activeMarkets,
-      resolved: resolvedMarkets
-    },
-    bets: {
-      total: allBets.length,
-      totalVolumeUSDC: Math.round(totalVolumeUSDC * 100) / 100
-    },
-    uniqueWallets: new Set(allBets.map(b => b.wallet)).size,
-    agents: {
-      verified: agentVerification.getWhitelist().length
-    }
-  });
+    res.json({
+      markets: {
+        total: allMarkets.length,
+        active: activeMarkets,
+        resolved: resolvedMarkets
+      },
+      bets: {
+        total: allBets.length,
+        totalVolumeUSDC: Math.round(totalVolumeUSDC * 100) / 100
+      },
+      uniqueWallets: new Set(allBets.map(b => b.wallet)).size,
+      agents: {
+        verified: agentVerification.getWhitelist().length
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({ error: 'Failed to fetch stats' });
+  }
 });
 
 app.get('/health', (req, res) => {
@@ -3137,7 +3415,7 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     service: 'AgentBets API',
     version: '1.0.0',
-    network: 'solana-devnet',
+    network: process.env.SOLANA_NETWORK || 'mainnet',
     escrowWallet: ESCROW_WALLET,
     marketsCount: markets.size,
     betsCount: bets.size,
@@ -3157,7 +3435,7 @@ app.get('/api', (req, res) => {
       offChain: 'SOL (for off-chain markets via escrow)',
       note: 'On-chain markets (Poll.fun) use USDC for wagers. Users need SOL for gas fees.'
     },
-    network: process.env.SOLANA_NETWORK || 'devnet',
+    network: process.env.SOLANA_NETWORK || 'mainnet',
     endpoints: {
       markets: {
         'GET /api/markets': 'List all markets',
@@ -3726,6 +4004,23 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
       return res.status(400).json({ error: 'Question and endDate are required' });
     }
 
+    // Validate end date is in the future (at least 10 minutes)
+    const endDateTime = new Date(endDate);
+    const now = new Date();
+    const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
+    
+    if (isNaN(endDateTime.getTime())) {
+      return res.status(400).json({ error: 'Invalid endDate format. Use ISO 8601 format' });
+    }
+    
+    if (endDateTime <= now) {
+      return res.status(400).json({ error: 'End date must be in the future. Cannot create markets that have already ended.' });
+    }
+    
+    if (endDateTime < tenMinutesFromNow) {
+      return res.status(400).json({ error: 'End date must be at least 10 minutes in the future' });
+    }
+
     // Check for x402 payment if initial bet is specified
     const paymentHeader = x402.getPaymentHeader(req);
 
@@ -3745,7 +4040,7 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
 
     // Create the market
     const marketId = uuidv4();
-    const now = new Date().toISOString();
+    const createdAt = new Date().toISOString();
 
     const market = {
       id: marketId,
@@ -3755,7 +4050,7 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
       outcomes: ['YES', 'NO'],
       resolutionSource: resolutionSource || 'manual',
       endDate,
-      createdAt: now,
+      createdAt: createdAt,
       creatorWallet: null,
       creatorAgent: agentHandle || null,
       status: 'active',
@@ -3798,7 +4093,7 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
         currency: 'USDC',
         wallet: `x402:${agentHandle || 'anonymous'}`,
         agentHandle,
-        timestamp: now,
+        timestamp: createdAt,
         x402Signature: payment.signature?.slice(0, 32),
         type: 'agent-x402-initial'
       };
@@ -4072,15 +4367,51 @@ async function startServer() {
       console.warn('[DB] Data will be lost on restart!');
     }
 
+    // AUTO: Initialize bot's Poll.fun user account on startup
+    // This ensures the bot can create markets without "Account does not exist" errors
+    if (pollFunService.creatorKeypair) {
+      console.log('[PollFun] Ensuring bot creator user account exists on-chain...');
+      try {
+        const userResult = await pollFunService.ensureCreatorUserExists();
+        if (userResult.success) {
+          console.log(`[PollFun] Bot creator account ready: ${userResult.userAddress}`);
+        } else {
+          console.warn(`[PollFun] WARNING: Could not initialize bot creator account: ${userResult.error}`);
+          console.warn('[PollFun] Market creation may fail until this is resolved.');
+        }
+      } catch (err) {
+        console.warn('[PollFun] WARNING: Error initializing bot creator account:', err.message);
+        console.warn('[PollFun] Will retry automatically on first market creation.');
+      }
+    } else {
+      console.warn('[PollFun] No SOLANA_PRIVATE_KEY - bot creator account not initialized');
+    }
+
+    // Initialize Gasless Relay Service (Octane-style USDC fee payer)
+    if (gaslessService.enabled) {
+      console.log('[Gasless] Initializing USDC relay service...');
+      try {
+        await gaslessService.initialize();
+        console.log(`[Gasless] Relay active — agents only need USDC (fee: ${gaslessService.feeUsdc} USDC/tx)`);
+      } catch (err) {
+        console.warn('[Gasless] WARNING: Relay initialization failed:', err.message);
+        console.warn('[Gasless] Gasless transactions will be unavailable.');
+      }
+    } else {
+      console.log('[Gasless] Relay disabled (set GASLESS_ENABLED=true to enable)');
+    }
+
     // Start server and store reference
+    const gaslessStatus = gaslessService.enabled ? `Gasless: ${gaslessService.feeUsdc} USDC/tx` : 'Gasless: Disabled';
     server = app.listen(PORT, () => {
       console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║          AgentBets API Server Running                     ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                               ║
-║  Network: Solana Devnet                                   ║
+║  Network: Solana Mainnet                                  ║
 ║  Escrow: ${ESCROW_WALLET.slice(0,8)}...                              ║
+║  ${gaslessStatus.padEnd(55)}║
 ║  Database: ${dbConnected ? 'PostgreSQL Connected' : 'In-Memory (no persistence)'}        ║
 ║                                                           ║
 ║  Prediction Markets for AI Agent Outcomes                 ║

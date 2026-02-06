@@ -21,11 +21,13 @@ const { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Connection } = 
 
 // Poll.fun SDK for on-chain USDC wagers
 const { pollFunService } = require('./pollfun');
+// Gasless relay for USDC-only transactions (no SOL needed)
+const { gaslessService } = require('./gasless');
 
 const router = express.Router();
 
 // Solana connection for transaction building
-const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.mainnet.solana.com';
 const connection = new Connection(SOLANA_RPC, 'confirmed');
 
 // CORS headers required for Solana Actions
@@ -245,20 +247,49 @@ router.post('/bet/:marketId/place', async (req, res) => {
 
     const userPubkey = new PublicKey(account);
 
+    // Determine if gasless mode is available (for choosing the payer)
+    const gaslessAvailable = gaslessService.enabled && gaslessService.feePayerKeypair;
+    const initPayerOverride = gaslessAvailable
+      ? gaslessService.feePayerKeypair.publicKey  // API pays SOL rent in gasless mode
+      : userPubkey;                                // User pays SOL rent otherwise
+
+    // AUTO: Check if user has a Poll.fun account, include init instruction if not
+    let userInitIx = null;
+    try {
+      const userData = await pollFunService.getUserData(account);
+      if (!userData.success) {
+        console.log(`[Actions] User ${account.slice(0, 8)}... needs Poll.fun account, including init instruction`);
+        userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
+          payerOverride: initPayerOverride
+        });
+      }
+    } catch (err) {
+      console.log(`[Actions] User account check failed, including init instruction: ${err.message}`);
+      try {
+        userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
+          payerOverride: initPayerOverride
+        });
+      } catch (initErr) {
+        console.warn(`[Actions] Could not build user init instruction: ${initErr.message}`);
+      }
+    }
+
     // Build Poll.fun USDC wager instruction
     console.log(`[Actions] Building USDC wager: ${betAmount} USDC on ${outcome} for market ${marketId}`);
     
     const wagerResult = await pollFunService.buildWagerInstruction({
       betPda: market.betPda,
-      side: outcome,  // 'YES' or 'NO'
-      amount: betAmount,  // USDC amount (SDK handles decimals)
-      userPubkey: account
+      side: outcome,
+      amount: betAmount,
+      userPubkey: account,
+      feePayerPubkey: gaslessAvailable ? gaslessService.feePayerKeypair.publicKey.toBase58() : undefined
     });
 
     if (!wagerResult.success) {
       // Check for common errors
       if (wagerResult.error?.includes('User account not found') || 
-          wagerResult.error?.includes('AccountNotInitialized')) {
+          wagerResult.error?.includes('AccountNotInitialized') ||
+          wagerResult.error?.includes('Account does not exist')) {
         return res.status(400).json({
           error: { 
             message: 'You need a Poll.fun account first. Visit https://poll.fun to create one, or we can create it for you.',
@@ -274,18 +305,33 @@ router.post('/bet/:marketId/place', async (req, res) => {
 
     // Build transaction with the Poll.fun instruction
     const transaction = new Transaction();
+    // If user needs account initialization, add it as a pre-instruction
+    if (userInitIx) {
+      console.log(`[Actions] Including user account initialization instruction`);
+      transaction.add(userInitIx);
+    }
     transaction.add(wagerResult.instruction);
-    transaction.feePayer = userPubkey;
 
-    // Get recent blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-    transaction.recentBlockhash = blockhash;
+    // Determine if gasless mode is enabled
+    const useGasless = req.query.gasless !== 'false' && gaslessService.enabled && gaslessService.feePayerKeypair;
 
-    // Serialize transaction (unsigned - client will sign)
-    const serializedTransaction = transaction.serialize({
-      requireAllSignatures: false,
-      verifySignatures: false
-    }).toString('base64');
+    let serializedTransaction;
+
+    if (useGasless) {
+      // Gasless: API pays SOL gas, user pays small USDC fee
+      console.log(`[Actions] Using gasless relay — user pays ${gaslessService.feeUsdc} USDC fee instead of SOL`);
+      const wrapped = await gaslessService.wrapWithGasless(transaction, userPubkey);
+      serializedTransaction = wrapped.transaction;
+    } else {
+      // Traditional: user pays SOL gas
+      transaction.feePayer = userPubkey;
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      transaction.recentBlockhash = blockhash;
+      serializedTransaction = transaction.serialize({
+        requireAllSignatures: false,
+        verifySignatures: false
+      }).toString('base64');
+    }
 
     // Calculate potential payout using Poll.fun data
     const marketData = await pollFunService.getMarketData(market.betPda);
@@ -295,11 +341,15 @@ router.post('/bet/:marketId/place', async (req, res) => {
       potentialPayout = payoutCalc.potentialWinnings;
     }
 
-    console.log(`[Actions] USDC wager transaction built for ${account.slice(0, 8)}...`);
+    console.log(`[Actions] USDC wager transaction built for ${account.slice(0, 8)}... (gasless: ${useGasless})`);
 
     res.json({
       transaction: serializedTransaction,
-      message: `Bet ${betAmount} USDC on ${outcome} - "${market.question.substring(0, 50)}..."`,
+      message: useGasless
+        ? `Bet ${betAmount} USDC on ${outcome} (no SOL needed, ${gaslessService.feeUsdc} USDC gas fee) - "${market.question.substring(0, 50)}..."`
+        : `Bet ${betAmount} USDC on ${outcome} - "${market.question.substring(0, 50)}..."`,
+      gasless: useGasless,
+      gasFee: useGasless ? gaslessService.feeUsdc : null,
       links: {
         next: {
           type: 'post',
@@ -764,7 +814,7 @@ router.post('/create/submit', async (req, res) => {
  * Helper: Generate Blink URL for a market
  */
 function generateBlinkUrl(marketId, baseUrl = null) {
-  const base = baseUrl || process.env.AGENTBETS_URL || 'https://e17d6b53-0239-40a3-a3da-40bbbfa2ad31-00-1g5zq91aym4oh.kirk.replit.dev';
+  const base = baseUrl || process.env.AGENTBETS_URL || 'https://agentbets.gg';
   const actionUrl = `solana-action:${base}/api/actions/bet/${marketId}`;
   const encodedAction = encodeURIComponent(actionUrl);
   return `https://dial.to/?action=${encodedAction}`;
@@ -774,7 +824,7 @@ function generateBlinkUrl(marketId, baseUrl = null) {
  * Helper: Generate Blink URL for markets browser
  */
 function generateMarketsBlinkUrl(baseUrl = null) {
-  const base = baseUrl || process.env.AGENTBETS_URL || 'https://e17d6b53-0239-40a3-a3da-40bbbfa2ad31-00-1g5zq91aym4oh.kirk.replit.dev';
+  const base = baseUrl || process.env.AGENTBETS_URL || 'https://agentbets.gg';
   const actionUrl = `solana-action:${base}/api/actions/markets`;
   const encodedAction = encodeURIComponent(actionUrl);
   return `https://dial.to/?action=${encodedAction}`;
@@ -784,7 +834,7 @@ function generateMarketsBlinkUrl(baseUrl = null) {
  * Helper: Generate Blink URL for market creation
  */
 function generateCreateBlinkUrl(baseUrl = null) {
-  const base = baseUrl || process.env.AGENTBETS_URL || 'https://e17d6b53-0239-40a3-a3da-40bbbfa2ad31-00-1g5zq91aym4oh.kirk.replit.dev';
+  const base = baseUrl || process.env.AGENTBETS_URL || 'https://agentbets.gg';
   const actionUrl = `solana-action:${base}/api/actions/create`;
   const encodedAction = encodeURIComponent(actionUrl);
   return `https://dial.to/?action=${encodedAction}`;

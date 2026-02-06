@@ -18,7 +18,7 @@ const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER
 const bs58 = require('bs58');
 
 // Solana connection
-const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.mainnet.solana.com';
 const connection = new Connection(SOLANA_RPC, 'confirmed');
 
 // Platform escrow wallet
@@ -197,7 +197,7 @@ async function processWinnerPayout(winnerWallet, amountLamports) {
       success: true,
       signature,
       amountSOL: amountLamports / LAMPORTS_PER_SOL,
-      explorer: `https://solscan.io/tx/${signature}?cluster=devnet`
+      explorer: `https://solscan.io/tx/${signature}`
     };
   } catch (error) {
     return { success: false, error: error.message };

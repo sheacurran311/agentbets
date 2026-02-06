@@ -15,6 +15,7 @@ const path = require('path');
 const { CronJob } = require('cron');
 const schedule = require('node-schedule');
 const TwitterService = require('./twitter');
+const MoltbookService = require('./moltbook');
 const BetParser = require('./parser');
 const AgentVerifier = require('./verifier');
 const ResolutionEngine = require('./resolver');
@@ -275,6 +276,7 @@ function saveProcessedTweets() {
 
 // Initialize services
 const twitter = new TwitterService();
+const moltbook = new MoltbookService();
 const parser = new BetParser();
 const verifier = new AgentVerifier();
 const resolver = new ResolutionEngine();
@@ -570,6 +572,15 @@ async function announceProposal(marketId, data, result) {
     );
 
     console.log(`[Announce] Proposal announced for market ${marketId}`);
+
+    // Cross-post proposal to Moltbook
+    if (moltbook.enabled) {
+      try {
+        await moltbook.announceProposal(marketId, data, result);
+      } catch (err) {
+        console.warn(`[Announce] Failed to cross-post proposal to Moltbook: ${err.message}`);
+      }
+    }
   } catch (error) {
     console.error(`[Announce] Failed to announce proposal:`, error.message);
   }
@@ -601,6 +612,15 @@ async function announceResolution(marketId, data, result) {
     );
 
     console.log(`[Announce] Resolution announced for market ${marketId}`);
+
+    // Cross-post resolution to Moltbook
+    if (moltbook.enabled) {
+      try {
+        await moltbook.announceResolution(marketId, data, result);
+      } catch (err) {
+        console.warn(`[Announce] Failed to cross-post resolution to Moltbook: ${err.message}`);
+      }
+    }
   } catch (error) {
     console.error(`[Announce] Failed to announce resolution:`, error.message);
   }
@@ -753,7 +773,10 @@ async function processMention(tweet) {
     const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
 
     const endDateFormatted = new Date(betParams.endDate).toLocaleDateString('en-US', {
-      month: 'short', day: 'numeric', year: 'numeric'
+      timeZone: 'UTC',
+      month: 'short', 
+      day: 'numeric', 
+      year: 'numeric'
     });
 
     // Build reply message
@@ -775,6 +798,25 @@ async function processMention(tweet) {
 
     // Notify any agents mentioned in the market question
     await notifyMentionedAgents(market.market.id, betParams.question, authorHandle, marketUrl);
+
+    // Cross-post to Moltbook if enabled
+    if (moltbook.enabled) {
+      try {
+        await moltbook.announceMarket({
+          id: market.market.id,
+          question: betParams.question,
+          description: `Created by @${authorHandle} via X`,
+          category: betParams.category || 'general',
+          endDate: betParams.endDate,
+          resolutionSource: betParams.resolution,
+          threshold: betParams.threshold,
+          creatorAgent: `@${authorHandle}`
+        });
+        console.log(`[Bot] Market cross-posted to Moltbook`);
+      } catch (err) {
+        console.warn(`[Bot] Failed to cross-post to Moltbook: ${err.message}`);
+      }
+    }
 
     console.log(`[Bot] Successfully created and announced market`);
 
@@ -918,6 +960,113 @@ async function processCommand(tweetId, authorHandle, text) {
   }
 }
 
+// Track processed Moltbook post/comment IDs to avoid duplicates
+const processedMoltbookItems = new Set();
+
+/**
+ * Check Moltbook for new bet requests
+ * Polls the m/agentbets submolt for posts/comments containing bet syntax
+ */
+async function checkMoltbookRequests() {
+  if (!moltbook.enabled) return;
+
+  console.log(`[Moltbook] Checking for new bet requests...`);
+
+  try {
+    const requests = await moltbook.checkForBetRequests();
+
+    if (!requests || requests.length === 0) {
+      console.log(`[Moltbook] No new bet requests`);
+      return;
+    }
+
+    console.log(`[Moltbook] Found ${requests.length} potential bet requests`);
+
+    for (const request of requests) {
+      // Skip if already processed
+      const itemKey = `${request.type}_${request.id}`;
+      if (processedMoltbookItems.has(itemKey)) continue;
+      processedMoltbookItems.add(itemKey);
+
+      console.log(`[Moltbook] Processing ${request.type} from ${request.author}: ${request.text.slice(0, 80)}...`);
+
+      try {
+        // Parse the bet request using the same parser as Twitter
+        if (!parser.isBetRequest(request.text)) {
+          console.log(`[Moltbook] Not a valid bet request, skipping`);
+          continue;
+        }
+
+        const betParams = parser.parseBet(request.text);
+        if (!betParams.valid) {
+          console.log(`[Moltbook] Invalid bet format: ${betParams.error}`);
+          await moltbook.replyToRequest(request, {
+            success: false,
+            error: `Invalid bet format: ${betParams.error}. Use: bet: "Your question?" ends: YYYY-MM-DD resolution: dexscreener|x-api|moltbook|manual`
+          });
+          continue;
+        }
+
+        // Create market via AgentBets API
+        const market = await agentbets.createMarket({
+          question: betParams.question,
+          description: `Created by ${request.author} via Moltbook`,
+          category: betParams.category || 'general',
+          endDate: betParams.endDate,
+          resolutionSource: betParams.resolution,
+          threshold: betParams.threshold,
+          verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
+          creatorAgent: request.author,
+          tags: ['moltbook-created', request.author, betParams.resolution]
+        });
+
+        if (market.success) {
+          console.log(`[Moltbook] Market created: ${market.market.id} by ${request.author}`);
+
+          // Track for auto-resolution
+          const marketData = {
+            moltbookItemId: request.id,
+            authorHandle: request.author,
+            question: betParams.question,
+            endDate: betParams.endDate,
+            resolution: betParams.resolution,
+            threshold: betParams.threshold,
+            targetHandle: betParams.targetHandle,
+            targetToken: betParams.targetToken,
+            createdAt: new Date().toISOString(),
+            platform: 'moltbook'
+          };
+          pendingResolutions.set(market.market.id, marketData);
+          savePendingResolutions();
+
+          // Schedule resolution
+          scheduleMarketResolution(market.market.id, marketData);
+
+          // Cross-post to Twitter if available
+          if (twitter.writeClient || twitter.infshAvailable) {
+            const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+            const actionUrl = `${baseUrl}/api/actions/bet/${market.market.id}`;
+            const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
+            await twitter.tweet(
+              `New bet from Moltbook agent ${request.author}!\n\n` +
+              `"${betParams.question.slice(0, 80)}"\n\n` +
+              `Bet now: ${blinkUrl}`
+            );
+          }
+        }
+
+        // Reply on Moltbook
+        await moltbook.replyToRequest(request, market);
+
+      } catch (err) {
+        console.error(`[Moltbook] Error processing request from ${request.author}:`, err.message);
+      }
+    }
+  } catch (error) {
+    console.error(`[Moltbook] Error checking requests:`, error);
+  }
+}
+
 /**
  * Check for new mentions
  */
@@ -1021,6 +1170,11 @@ app.post('/check', async (req, res) => {
   res.json({ success: true, message: 'Checked mentions' });
 });
 
+app.post('/check-moltbook', async (req, res) => {
+  await checkMoltbookRequests();
+  res.json({ success: true, message: 'Checked Moltbook requests', enabled: moltbook.enabled });
+});
+
 app.post('/resolve', async (req, res) => {
   await checkResolutions();
   res.json({ success: true, message: 'Checked resolutions' });
@@ -1076,13 +1230,15 @@ async function startBot() {
     app.listen(PORT, () => {
       console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║           AgentBets X Bot Running                         ║
+║           AgentBets Bot Running                           ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                                ║
 ║  Mode: ${process.env.NODE_ENV || 'development'}                                      ║
 ║  Storage: ${dbConnected ? 'PostgreSQL' : 'File-based'}                                ║
+║  X/Twitter: ${process.env.TWITTER_BEARER_TOKEN ? 'Enabled' : 'Disabled'}                                    ║
+║  Moltbook: ${moltbook.enabled ? 'Enabled ' : 'Disabled'}                                    ║
 ║                                                           ║
-║  Agent-created prediction markets via X/Twitter           ║
+║  Prediction markets via X/Twitter & Moltbook              ║
 ║  Built by Butters (@AIButters)                            ║
 ╚═══════════════════════════════════════════════════════════╝
       `);
@@ -1093,6 +1249,35 @@ async function startBot() {
       // Reschedule all pending market resolutions from persistence
       rescheduleAllMarkets();
       console.log(`[Bot] Scheduled ${scheduledJobs.size} market resolutions at exact end times`);
+
+      // Initialize Moltbook if configured (async, fire-and-forget from listen callback)
+      if (moltbook.enabled) {
+        (async () => {
+          try {
+            const meResult = await moltbook.getMe();
+            if (meResult.success) {
+              console.log(`[Moltbook] Authenticated as: ${moltbook.botName}`);
+            } else {
+              console.warn(`[Moltbook] Could not verify identity: ${meResult.error}`);
+            }
+
+            // Ensure m/agentbets submolt exists
+            await moltbook.ensureSubmolt();
+
+            // Poll Moltbook for bet requests every 3 minutes
+            const moltbookJob = new CronJob('*/3 * * * *', checkMoltbookRequests);
+            moltbookJob.start();
+
+            // Initial Moltbook check on startup (after 10s to avoid rate limits)
+            setTimeout(checkMoltbookRequests, 10000);
+
+            console.log('[Moltbook] Polling started (every 3 minutes)');
+          } catch (err) {
+            console.warn(`[Moltbook] Initialization error: ${err.message}`);
+            console.warn('[Moltbook] Moltbook features will be limited');
+          }
+        })();
+      }
 
       // Initial check
       if (process.env.TWITTER_BEARER_TOKEN) {

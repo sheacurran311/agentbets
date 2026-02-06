@@ -32,6 +32,31 @@ coverage/
 tmp/
 *.tmp
 
-# Replit cache and state
+# Replit
+.replit
+replit.md
+.upm/
 .cache/
 .local/
+
+# Cursor IDE
+.cursor/
+
+# Internal documentation
+DATE_PICKER_FIX_DIAGRAM.md
+DATE_PREVIEW_COUNTDOWN_FIX.md
+FIXES_SUMMARY.md
+PAST_DATE_VALIDATION_FIX.md
+QUICK_FIX_UPDATE.md
+TESTING_GUIDE.md
+SECURITY_REPORT.md
+
+# Internal scripts and tests
+scripts/
+tests/
+create-zip.js
+bot/src/test.js
+
+# Internal docs
+docs/WALLETS.md
+docs/DEPLOYMENT_CHECKLIST.md

@@ -226,11 +226,23 @@ class BetParser {
         if (isNaN(parsedDate.getTime())) {
           return { valid: false, error: 'Invalid date format. Use YYYY-MM-DD' };
         }
+        
+        // Validate date is in the future (at least 10 minutes)
+        const now = new Date();
+        const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
+        
+        if (parsedDate <= now) {
+          return { valid: false, error: 'End date must be in the future. Cannot create markets that have already ended.' };
+        }
+        
+        if (parsedDate < tenMinutesFromNow) {
+          return { valid: false, error: 'End date must be at least 10 minutes in the future.' };
+        }
+        
         result.endDate = parsedDate.toISOString();
       } else {
-        // Default to 7 days from now
-        const defaultEnd = new Date();
-        defaultEnd.setDate(defaultEnd.getDate() + 7);
+        // Default to 7 days from now in UTC (minimum 10 minutes is guaranteed)
+        const defaultEnd = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
         result.endDate = defaultEnd.toISOString();
       }
 
@@ -388,6 +400,21 @@ class BetParser {
       if (match) {
         const date = new Date(match[1]);
         if (!isNaN(date.getTime())) {
+          // Validate date is in the future (at least 10 minutes)
+          const now = new Date();
+          const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
+          
+          if (date <= now) {
+            console.log(`[Parser] Rejected past date: ${date.toISOString()}`);
+            return null;
+          }
+          
+          if (date < tenMinutesFromNow) {
+            console.log(`[Parser] Date too soon (< 10 min): ${date.toISOString()}`);
+            return null;
+          }
+          
+          // Ensure we return ISO format (UTC)
           return date.toISOString();
         }
       }
@@ -396,8 +423,8 @@ class BetParser {
   }
 
   defaultEndDate() {
-    const date = new Date();
-    date.setDate(date.getDate() + 7);
+    // Default to 7 days from now in UTC
+    const date = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     return date.toISOString();
   }
 

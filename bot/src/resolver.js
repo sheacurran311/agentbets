@@ -110,12 +110,28 @@ class ResolutionEngine {
   async resolve(data) {
     const { resolution, question, threshold, targetHandle, targetToken, verificationUrl } = data;
 
+    // Check if targetToken looks like a contract address
+    const isContractAddress = this.isSolanaAddress(targetToken);
+    
     try {
       switch (resolution) {
         case 'coingecko':
+          // If targetToken is a contract address, use DexScreener for lookup
+          if (isContractAddress) {
+            console.log(`[Resolver] Detected contract address, using DexScreener for lookup`);
+            return await this.resolveByContractAddress(targetToken, threshold, question);
+          }
           // Use CoinGecko for official TOKEN prices (single source of truth)
           console.log(`[Resolver] Using CoinGecko for token price verification`);
           return await this.resolveCoingecko(targetToken, threshold, question);
+
+        case 'coingecko-onchain':
+        case 'geckoterminal':
+        case 'onchain':
+        case 'contract':
+          // Use DexScreener for contract address lookups (more reliable, no API key required)
+          console.log(`[Resolver] Using DexScreener for contract address lookup`);
+          return await this.resolveByContractAddress(targetToken, threshold, question);
 
         case 'dexscreener':
           // DexScreener should only be used for specific POOL prices
@@ -372,6 +388,200 @@ class ResolutionEngine {
       console.error(`[Resolver] CoinGecko error for ${token}:`, error.message);
       return { resolved: false, error: `CoinGecko API error: ${error.message}` };
     }
+  }
+
+  /**
+   * Resolve using DexScreener API for contract address lookups
+   * This is the primary method for new/low-cap tokens by contract address
+   * DexScreener has comprehensive coverage of Solana DEX pools
+   * 
+   * @param {string} contractAddress - Token contract address (e.g., Solana mint address)
+   * @param {number|string} threshold - Price or mcap threshold
+   * @param {string} question - Market question for context
+   */
+  async resolveByContractAddress(contractAddress, threshold, question) {
+    if (!contractAddress) {
+      return { resolved: false, error: 'No contract address specified' };
+    }
+
+    // Clean up the address (remove any whitespace)
+    const cleanAddress = contractAddress.trim();
+    
+    console.log(`[Resolver] DexScreener lookup by contract: ${cleanAddress}`);
+
+    try {
+      // DexScreener has a direct token lookup endpoint
+      const response = await axios.get(
+        `${this.dexscreenerApi}/dex/tokens/${cleanAddress}`,
+        { timeout: 15000 }
+      );
+
+      const pairs = response.data?.pairs;
+      
+      if (!pairs || pairs.length === 0) {
+        return { resolved: false, error: `Token ${cleanAddress} not found on DexScreener. Ensure it has active liquidity pools.` };
+      }
+
+      // Filter for Solana pairs and sort by liquidity
+      const solanaPairs = pairs
+        .filter(p => p.chainId === 'solana')
+        .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+      
+      // Use most liquid Solana pair, or fall back to most liquid any-chain pair
+      const pair = solanaPairs[0] || pairs[0];
+      
+      const price = parseFloat(pair.priceUsd) || 0;
+      const mcap = pair.marketCap || pair.fdv || 0;
+      const volume24h = pair.volume?.h24 || 0;
+      const change24h = pair.priceChange?.h24 || 0;
+
+      const thresholdNum = this.parseThreshold(threshold);
+      if (!thresholdNum) {
+        return { resolved: false, error: 'Could not parse threshold' };
+      }
+
+      const isMcapQuestion = /mcap|market cap|fdv/i.test(question);
+      const actualValue = isMcapQuestion ? mcap : price;
+      const outcome = actualValue >= thresholdNum ? 'YES' : 'NO';
+
+      console.log(`[Resolver] DexScreener contract result: ${pair.baseToken?.symbol || cleanAddress} ${isMcapQuestion ? 'mcap' : 'price'} = $${isMcapQuestion ? this.formatNumber(mcap) : price.toFixed(price < 1 ? 8 : 4)}, threshold = $${this.formatNumber(thresholdNum)}, outcome = ${outcome}`);
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: isMcapQuestion
+          ? `$${this.formatNumber(mcap)} mcap`
+          : `$${price.toFixed(price < 1 ? 8 : 4)}`,
+        threshold: `$${this.formatNumber(thresholdNum)}`,
+        source: 'DexScreener',
+        verificationUrl: pair.url || `https://dexscreener.com/solana/${cleanAddress}`,
+        data: {
+          contractAddress: cleanAddress,
+          symbol: pair.baseToken?.symbol,
+          name: pair.baseToken?.name,
+          chain: pair.chainId,
+          dex: pair.dexId,
+          pairAddress: pair.pairAddress,
+          price,
+          mcap,
+          fdv: pair.fdv,
+          volume24h,
+          change24h,
+          liquidity: pair.liquidity?.usd,
+          timestamp: new Date().toISOString()
+        }
+      };
+    } catch (error) {
+      console.error(`[Resolver] DexScreener contract lookup error for ${contractAddress}:`, error.message);
+      return { resolved: false, error: `DexScreener API error: ${error.message}` };
+    }
+  }
+
+  /**
+   * Resolve using CoinGecko Onchain/DEX API (for tokens by contract address)
+   * Note: This may require a paid CoinGecko API plan
+   * Falls back to DexScreener if unavailable
+   * 
+   * @param {string} contractAddress - Token contract address (e.g., Solana mint address)
+   * @param {string} network - Network ID (default: 'solana')
+   * @param {number|string} threshold - Price or mcap threshold
+   * @param {string} question - Market question for context
+   */
+  async resolveCoingeckoOnchain(contractAddress, network = 'solana', threshold, question) {
+    if (!contractAddress) {
+      return { resolved: false, error: 'No contract address specified' };
+    }
+
+    // Clean up the address (remove any whitespace)
+    const cleanAddress = contractAddress.trim();
+    
+    console.log(`[Resolver] CoinGecko Onchain lookup: ${cleanAddress} on ${network}`);
+
+    try {
+      const response = await axios.get(
+        `${this.coingeckoApi}/onchain/simple/networks/${network}/token_price/${cleanAddress}`,
+        {
+          params: {
+            include_market_cap: true,
+            mcap_fdv_fallback: true,  // Use FDV if mcap unavailable (common for new tokens)
+            include_24hr_vol: true,
+            include_24hr_price_change: true,
+            include_inactive_source: true,  // Include recently active pools
+            ...(COINGECKO_API_KEY ? { x_cg_demo_api_key: COINGECKO_API_KEY } : {})
+          },
+          timeout: 15000
+        }
+      );
+
+      const data = response.data?.data?.attributes;
+      if (!data || !data.token_prices) {
+        // Fall back to DexScreener
+        console.log(`[Resolver] CoinGecko Onchain returned no data, falling back to DexScreener`);
+        return await this.resolveByContractAddress(cleanAddress, threshold, question);
+      }
+
+      // Get price data (addresses are lowercase in response)
+      const addressKey = cleanAddress.toLowerCase();
+      const priceStr = data.token_prices?.[addressKey];
+      
+      if (!priceStr) {
+        // Fall back to DexScreener
+        console.log(`[Resolver] No price in CoinGecko response, falling back to DexScreener`);
+        return await this.resolveByContractAddress(cleanAddress, threshold, question);
+      }
+
+      const price = parseFloat(priceStr);
+      const mcapStr = data.market_cap_usd?.[addressKey];
+      const mcap = mcapStr ? parseFloat(mcapStr) : null;
+      const vol24h = data.h24_volume_usd?.[addressKey] ? parseFloat(data.h24_volume_usd[addressKey]) : null;
+      const change24h = data.h24_price_change_percentage?.[addressKey] ? parseFloat(data.h24_price_change_percentage[addressKey]) : null;
+
+      const thresholdNum = this.parseThreshold(threshold);
+      if (!thresholdNum) {
+        return { resolved: false, error: 'Could not parse threshold' };
+      }
+
+      const isMcapQuestion = /mcap|market cap|fdv/i.test(question);
+      const actualValue = isMcapQuestion ? (mcap || 0) : price;
+      const outcome = actualValue >= thresholdNum ? 'YES' : 'NO';
+
+      console.log(`[Resolver] CoinGecko Onchain result: ${cleanAddress} ${isMcapQuestion ? 'mcap' : 'price'} = $${isMcapQuestion ? this.formatNumber(mcap) : price.toFixed(price < 1 ? 8 : 4)}, threshold = $${this.formatNumber(thresholdNum)}, outcome = ${outcome}`);
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: isMcapQuestion
+          ? `$${this.formatNumber(mcap || 0)} mcap`
+          : `$${price.toFixed(price < 1 ? 8 : 4)}`,
+        threshold: `$${this.formatNumber(thresholdNum)}`,
+        source: 'CoinGecko Onchain (GeckoTerminal)',
+        verificationUrl: `https://www.geckoterminal.com/${network}/tokens/${cleanAddress}`,
+        data: {
+          contractAddress: cleanAddress,
+          network,
+          price,
+          mcap,
+          volume24h: vol24h,
+          change24h,
+          timestamp: new Date().toISOString()
+        }
+      };
+    } catch (error) {
+      console.error(`[Resolver] CoinGecko Onchain error for ${contractAddress}:`, error.message);
+      
+      // Fall back to DexScreener for any error (including 401/403 for API access)
+      console.log(`[Resolver] Falling back to DexScreener due to CoinGecko error`);
+      return await this.resolveByContractAddress(contractAddress, threshold, question);
+    }
+  }
+
+  /**
+   * Check if a string looks like a Solana address (base58, 32-44 chars)
+   */
+  isSolanaAddress(str) {
+    if (!str || typeof str !== 'string') return false;
+    // Solana addresses are base58 encoded, typically 32-44 characters
+    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(str.trim());
   }
 
   /**

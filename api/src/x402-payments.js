@@ -28,7 +28,7 @@ const USDC_TOKENS = {
 // Solana RPC endpoints
 const SOLANA_RPC = {
   'solana:devnet': 'https://api.devnet.solana.com',
-  'solana:mainnet': 'https://api.mainnet-beta.solana.com',
+  'solana:mainnet': 'https://api.mainnet.solana.com',
 };
 
 /**
@@ -55,7 +55,7 @@ function getPayToAddress() {
  * @param {number} options.amountUSDC - Bet amount in USDC
  * @param {string} options.marketId - Market being bet on
  * @param {string} options.outcome - YES or NO
- * @param {string} [options.network='solana:devnet'] - Network ID (devnet default)
+ * @param {string} [options.network] - Network ID (defaults to SOLANA_NETWORK env or solana:mainnet)
  * @returns {object} x402 v2 payment requirements
  */
 function buildBetPaymentRequirements(options) {
@@ -63,7 +63,7 @@ function buildBetPaymentRequirements(options) {
     amountUSDC,
     marketId,
     outcome,
-    network = 'solana:devnet', // Solana devnet by default
+    network = process.env.SOLANA_NETWORK === 'devnet' ? 'solana:devnet' : 'solana:mainnet',
     agentHandle
   } = options;
 
@@ -129,9 +129,9 @@ function sendBetPaymentRequired(res, options) {
     x402: {
       version: 2,
       amountUSDC: options.amountUSDC,
-      network: options.network || 'solana:devnet',
+      network: options.network || (process.env.SOLANA_NETWORK === 'devnet' ? 'solana:devnet' : 'solana:mainnet'),
       payTo: getPayToAddress(),
-      asset: USDC_TOKENS[options.network || 'solana:devnet']
+      asset: USDC_TOKENS[options.network || (process.env.SOLANA_NETWORK === 'devnet' ? 'solana:devnet' : 'solana:mainnet')]
     },
     bet: {
       marketId: options.marketId,
@@ -141,8 +141,8 @@ function sendBetPaymentRequired(res, options) {
     },
     funding: {
       faucet: 'https://faucet.circle.com',
-      network: 'Solana Devnet',
-      instructions: 'Select Solana Devnet and paste your wallet address'
+      network: process.env.SOLANA_NETWORK === 'devnet' ? 'Solana Devnet' : 'Solana Mainnet',
+      instructions: 'Select Solana and paste your wallet address'
     }
   });
 }
@@ -170,7 +170,7 @@ function parsePaymentHeader(paymentHeader) {
       parsed: true,
       signature: decoded.signature || decoded.txSignature || paymentHeader,
       payload: decoded.payload || decoded,
-      network: decoded.network || 'solana:devnet',
+      network: decoded.network || (process.env.SOLANA_NETWORK === 'devnet' ? 'solana:devnet' : 'solana:mainnet'),
       amount: decoded.amount || decoded.payload?.amount,
       payer: decoded.payer || decoded.from || null
     };
@@ -181,7 +181,7 @@ function parsePaymentHeader(paymentHeader) {
         parsed: true,
         signature: paymentHeader,
         payload: null,
-        network: 'solana:devnet'
+        network: process.env.SOLANA_NETWORK === 'devnet' ? 'solana:devnet' : 'solana:mainnet'
       };
     }
     return {
@@ -198,17 +198,17 @@ function parsePaymentHeader(paymentHeader) {
  * @param {object} options - Verification options
  * @param {number} options.expectedAmount - Expected USDC amount (human readable)
  * @param {string} options.expectedRecipient - Expected recipient address
- * @param {string} options.network - Network ('solana:devnet' or 'solana:mainnet')
+ * @param {string} options.network - Network ('solana:mainnet' or 'solana:devnet')
  * @returns {Promise<object>} Verification result
  */
 async function verifyPaymentOnChain(signature, options = {}) {
   const {
     expectedAmount,
     expectedRecipient,
-    network = 'solana:devnet'
+    network = process.env.SOLANA_NETWORK === 'devnet' ? 'solana:devnet' : 'solana:mainnet'
   } = options;
 
-  const rpcUrl = SOLANA_RPC[network] || SOLANA_RPC['solana:devnet'];
+  const rpcUrl = SOLANA_RPC[network] || SOLANA_RPC['solana:mainnet'];
   const connection = new Connection(rpcUrl, 'confirmed');
 
   try {
@@ -344,7 +344,7 @@ function x402BetGate(options = {}) {
   return async (req, res, next) => {
     const { marketId } = req.params;
     const { outcome, amount, agentHandle } = req.body;
-    const network = req.body.network || 'solana:devnet';
+    const network = req.body.network || (process.env.SOLANA_NETWORK === 'devnet' ? 'solana:devnet' : 'solana:mainnet');
 
     // Validate bet parameters
     if (!outcome || !['YES', 'NO'].includes(outcome.toUpperCase())) {

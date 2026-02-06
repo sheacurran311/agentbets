@@ -211,12 +211,23 @@ function checkAutomatedLabel(xApiData) {
  * Check if agent is registered on Moltbook
  */
 async function checkMoltbook(handle) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+
   try {
-    const response = await fetch(`https://api.moltbook.com/agents/${handle}`, {
+    const headers = { 'Accept': 'application/json' };
+    // Use Moltbook app key for authenticated lookups if available
+    if (process.env.MOLTBOOK_APP_KEY) {
+      headers['Authorization'] = `Bearer ${process.env.MOLTBOOK_APP_KEY}`;
+    }
+
+    const response = await fetch(`https://www.moltbook.com/api/v1/agents/${handle}`, {
       method: 'GET',
-      headers: { 'Accept': 'application/json' },
-      timeout: 5000
+      headers,
+      signal: controller.signal
     });
+
+    clearTimeout(timeoutId);
 
     if (response.ok) {
       const data = await response.json();
@@ -224,9 +235,68 @@ async function checkMoltbook(handle) {
     }
     return false;
   } catch (err) {
+    clearTimeout(timeoutId);
     // If Moltbook API fails, don't penalize
     console.log(`Moltbook check failed for ${handle}:`, err.message);
     return false;
+  }
+}
+
+/**
+ * Verify a Moltbook identity token
+ * Used when agents authenticate via Moltbook OAuth/token flow
+ * Requires MOLTBOOK_APP_KEY environment variable
+ * @param {string} identityToken - The Moltbook identity token to verify
+ * @returns {object} Verification result with agent info
+ */
+async function verifyMoltbookIdentity(identityToken) {
+  if (!process.env.MOLTBOOK_APP_KEY) {
+    return {
+      verified: false,
+      error: 'Moltbook app key not configured (MOLTBOOK_APP_KEY env var)',
+      hint: 'Moltbook identity verification is disabled until app key is provided'
+    };
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch('https://www.moltbook.com/api/v1/agents/verify-identity', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Moltbook-App-Key': process.env.MOLTBOOK_APP_KEY
+      },
+      body: JSON.stringify({ token: identityToken }),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (response.ok) {
+      const data = await response.json();
+      return {
+        verified: true,
+        agentId: data.agentId || data.agent_id,
+        agentHandle: data.handle || data.username,
+        platform: 'moltbook',
+        data
+      };
+    }
+
+    const errorData = await response.json().catch(() => ({}));
+    return {
+      verified: false,
+      error: errorData.message || `Moltbook verification failed (${response.status})`,
+      status: response.status
+    };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    return {
+      verified: false,
+      error: err.name === 'AbortError' ? 'Moltbook verification timed out' : err.message
+    };
   }
 }
 
@@ -400,6 +470,8 @@ module.exports = {
   checkWhitelist,
   addToWhitelist,
   getWhitelist,
+  verifyMoltbookIdentity,
+  checkMoltbook,
   VerificationResult,
   AGENT_KEYWORDS,
   VERIFIED_AGENTS

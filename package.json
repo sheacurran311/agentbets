@@ -10,8 +10,6 @@
     "postinstall": "cd api && npm install && cd ../frontend && npm install --include=dev"
   },
   "devDependencies": {
-    "archiver": "^7.0.1",
-    "concurrently": "^8.2.2",
-    "jszip": "^3.10.1"
+    "concurrently": "^8.2.2"
   }
 }
