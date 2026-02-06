@@ -29,23 +29,20 @@ class AgentBetsAPI {
   }
 
   /**
-   * Create a new market
+   * Create a new on-chain market via Poll.fun
+   * Bot's keypair creates the PDA (isCreatorResolver=true)
    */
   async createMarket(params) {
     try {
+      // Use on-chain endpoint - bot creates PDA with its keypair
       const response = await axios.post(
-        `${this.baseUrl}/markets`,
+        `${this.baseUrl}/onchain/markets`,
         {
           question: params.question,
           description: params.description || '',
           category: params.category || 'general',
           endDate: params.endDate,
-          resolutionSource: params.resolutionSource || 'manual',
-          verificationUrl: params.verificationUrl,
-          verificationMethod: params.verificationMethod,
-          threshold: params.threshold,
-          tags: params.tags || [],
-          creatorAgent: params.creatorAgent
+          creatorAgent: params.creatorAgent // For royalty tracking
         },
         {
           headers: this.getHeaders()
@@ -55,7 +52,7 @@ class AgentBetsAPI {
       return response.data;
 
     } catch (error) {
-      console.error('[API] Error creating market:', error.response?.data || error.message);
+      console.error('[API] Error creating on-chain market:', error.response?.data || error.message);
       return {
         success: false,
         error: error.response?.data?.error || error.message
@@ -137,20 +134,6 @@ class AgentBetsAPI {
         error: error.response?.data?.error || error.message
       };
     }
-  }
-
-  /**
-   * DEPRECATED: Use proposeResolution() instead
-   * This method is kept for backwards compatibility but will be removed
-   */
-  async resolveMarket(marketId, resolution, resolverWallet = null) {
-    console.warn('[API] WARNING: resolveMarket() is deprecated. Use proposeResolution() instead.');
-    console.warn('[API] This method now calls proposeResolution() and does NOT finalize markets.');
-
-    return this.proposeResolution(marketId, resolution, 80, {
-      source: 'legacy-resolve-method',
-      note: 'Called via deprecated resolveMarket() method'
-    });
   }
 
   /**

@@ -6,6 +6,7 @@ import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana
 
 const API_BASE = '/api'
 const ESCROW_WALLET = '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM'
+const ADMIN_WALLET = 'ESutJq7VqRER499A78W9BJCjdtZAqMJWy6hjf4HCjtsG' // TODO: Update to your admin wallet
 
 // USDC Token Mint (devnet)
 const USDC_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
@@ -175,6 +176,11 @@ const Icons2 = {
       <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/>
       <path d="M12 6v2m0 8v2M9 12h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
       <text x="12" y="16" textAnchor="middle" fill="currentColor" fontSize="8" fontWeight="bold">$</text>
+    </svg>
+  ),
+  shield: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
     </svg>
   )
 }
@@ -670,17 +676,6 @@ const VerificationBadge = memo(({ source, url }) => {
   );
 });
 
-// Resolution source options for markets
-const RESOLUTION_SOURCES = [
-  { id: 'manual', label: 'Manual Resolution', description: 'Resolved by platform admins' },
-  { id: 'coingecko', label: 'CoinGecko (Recommended)', description: 'Official TOKEN price/mcap - single source of truth' },
-  { id: 'dexscreener', label: 'DexScreener Pool', description: 'Specific POOL price only (requires exact pool URL)' },
-  { id: 'x-api', label: 'X/Twitter API', description: 'Followers, engagement metrics' },
-  { id: 'moltbook', label: 'Moltbook', description: 'Agent karma, stats from Moltbook' },
-  { id: 'colosseum', label: 'Colosseum', description: 'Hackathon results from Colosseum' },
-  { id: 'github', label: 'GitHub', description: 'Commits, releases, deployments' }
-]
-
 function App() {
   const navigate = useNavigate()
   const { publicKey, sendTransaction, connected } = useWallet()
@@ -705,19 +700,17 @@ function App() {
   const [isLive, setIsLive] = useState(true)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [oddsHistoryCache, setOddsHistoryCache] = useState({}) // Cache for odds history per market
+  const [pendingResolutions, setPendingResolutions] = useState([]) // Markets awaiting admin confirmation
+  const [adminConfirming, setAdminConfirming] = useState(null) // Currently confirming market ID
+
+  // Check if connected wallet is admin
+  const isAdmin = publicKey?.toString() === ADMIN_WALLET
 
   // Enhanced market creation form with useReducer for cleaner state management
   const initialMarketState = {
     question: '',
-    description: '',
     category: 'general',
-    endDate: '',
-    resolutionSource: 'manual',
-    verificationUrl: '',
-    verificationMethod: '',
-    threshold: '',
-    tags: '',
-    creatorAgent: ''
+    endDate: ''
   }
 
   const marketReducer = (state, action) => {
@@ -805,6 +798,13 @@ function App() {
     fetchLeaderboard()
     fetchRecentActivity()
   }, [])
+
+  // Fetch pending resolutions when admin wallet connects
+  useEffect(() => {
+    if (isAdmin) {
+      fetchPendingResolutions()
+    }
+  }, [isAdmin])
 
   // Real-time polling for live updates
   useEffect(() => {
@@ -948,6 +948,52 @@ function App() {
       setLeaderboard(data.leaderboard || [])
     } catch (err) {
       console.error('Failed to fetch leaderboard:', err)
+    }
+  }
+
+  // Fetch pending resolutions for admin panel
+  const fetchPendingResolutions = async () => {
+    if (!isAdmin) return
+    try {
+      const res = await fetch(`${API_BASE}/markets/pending-resolutions`)
+      const data = await res.json()
+      setPendingResolutions(data.markets || [])
+    } catch (err) {
+      console.error('Failed to fetch pending resolutions:', err)
+    }
+  }
+
+  // Admin: Confirm resolution
+  const confirmResolution = async (marketId, outcome) => {
+    if (!isAdmin || !publicKey) {
+      alert('Admin wallet required')
+      return
+    }
+    
+    setAdminConfirming(marketId)
+    try {
+      const res = await fetch(`${API_BASE}/markets/${marketId}/confirm-resolution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          finalOutcome: outcome,
+          adminWallet: publicKey.toString(),
+          adminNotes: 'Confirmed via admin panel'
+        })
+      })
+      
+      const data = await res.json()
+      if (data.success) {
+        alert(`Market resolved as ${outcome}! ${data.message || ''}`)
+        fetchPendingResolutions()
+        fetchMarkets()
+      } else {
+        alert(data.error || 'Failed to confirm resolution')
+      }
+    } catch (err) {
+      alert('Error confirming resolution: ' + err.message)
+    } finally {
+      setAdminConfirming(null)
     }
   }
 
@@ -1098,28 +1144,27 @@ function App() {
       return
     }
 
+    if (newMarket.question.length > 256) {
+      alert('Question must be 256 characters or less')
+      return
+    }
+
     try {
-      const res = await fetch(`${API_BASE}/markets`, {
+      // Use on-chain endpoint - bot creates PDA with its keypair
+      const res = await fetch(`${API_BASE}/onchain/markets`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question: newMarket.question,
-          description: newMarket.description,
           category: newMarket.category,
           endDate: newMarket.endDate,
-          resolutionSource: newMarket.resolutionSource,
-          verificationUrl: newMarket.verificationUrl || null,
-          verificationMethod: newMarket.verificationMethod || null,
-          threshold: newMarket.threshold || null,
-          tags: newMarket.tags ? newMarket.tags.split(',').map(t => t.trim()) : [],
-          creatorWallet: publicKey?.toString() || null,
-          creatorAgent: newMarket.creatorAgent || null
+          proposerWallet: publicKey?.toString() || null // Proposer, not creator (bot is creator)
         })
       })
 
       const data = await res.json()
       if (data.success) {
-        alert('Market created!' + (data.royaltyInfo ? `\n\n${data.royaltyInfo.message}` : ''))
+        alert(`Market created on-chain!\n\nBet PDA: ${data.betPda}\n\nThe bot will resolve this market at the end date.`)
         dispatchMarket({ type: 'RESET' })
         setView('markets')
         fetchMarkets()
@@ -1213,6 +1258,33 @@ function App() {
             Create Market
           </button>
         </div>
+
+        {/* Admin Section - Only visible to admin wallet */}
+        {isAdmin && (
+          <div style={{...styles.sidebarSection, ...styles.adminSection}}>
+            <div style={styles.sidebarLabel}>Admin</div>
+            <button
+              style={{...styles.sidebarItem, ...(view === 'admin' ? styles.sidebarItemActive : {})}}
+              onClick={() => { setView('admin'); fetchPendingResolutions(); }}
+            >
+              <span style={styles.iconWrapper}>{Icons.shield}</span>
+              Pending Resolutions
+              {pendingResolutions.length > 0 && (
+                <span style={{
+                  marginLeft: 'auto',
+                  background: COLORS.warning,
+                  color: '#000',
+                  padding: '2px 8px',
+                  borderRadius: '10px',
+                  fontSize: '11px',
+                  fontWeight: '700'
+                }}>
+                  {pendingResolutions.length}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
 
         {/* Stats in sidebar */}
         {stats && (
@@ -1369,17 +1441,46 @@ function App() {
                           </span>
                           {market.category}
                         </span>
-                        <span style={{
-                          ...styles.timeTag,
-                          background: daysUntil(market.endDate) === 'Ended' ? `${COLORS.error}20` : `${COLORS.secondary}15`,
-                          color: daysUntil(market.endDate) === 'Ended' ? COLORS.error : COLORS.secondary
-                        }}>
-                          <span style={styles.clockIcon}>{Icons.clock}</span>
-                          {daysUntil(market.endDate)}
-                        </span>
+                        {market.status === 'pending_confirmation' ? (
+                          <span style={styles.pendingBadge}>
+                            &#9888; Awaiting Confirmation
+                          </span>
+                        ) : market.status === 'resolved' ? (
+                          <span style={{
+                            ...styles.timeTag,
+                            background: `${COLORS.success}20`,
+                            color: COLORS.success
+                          }}>
+                            &#9989; Resolved: {market.resolution}
+                          </span>
+                        ) : (
+                          <span style={{
+                            ...styles.timeTag,
+                            background: daysUntil(market.endDate) === 'Ended' ? `${COLORS.error}20` : `${COLORS.secondary}15`,
+                            color: daysUntil(market.endDate) === 'Ended' ? COLORS.error : COLORS.secondary
+                          }}>
+                            <span style={styles.clockIcon}>{Icons.clock}</span>
+                            {daysUntil(market.endDate)}
+                          </span>
+                        )}
                       </div>
 
                       <h3 style={styles.marketQuestion}>{market.question}</h3>
+                      
+                      {/* Show pending confirmation info */}
+                      {market.status === 'pending_confirmation' && market.proposedResolution && (
+                        <div style={{
+                          padding: '8px 12px',
+                          background: `${COLORS.warning}10`,
+                          borderRadius: '8px',
+                          marginBottom: '12px',
+                          fontSize: '12px',
+                          color: COLORS.warning
+                        }}>
+                          Bot proposes: <strong>{market.proposedResolution.outcome}</strong>
+                          {market.proposedResolution.confidence && ` (${market.proposedResolution.confidence}% confidence)`}
+                        </div>
+                      )}
 
                       {/* Verification info and source badge */}
                       <div style={styles.verificationInfo}>
@@ -1491,19 +1592,16 @@ function App() {
                   {[
                     // Performance Templates
                     { icon: '&#129302;', label: 'Agent Followers', template: 'Will @AGENT reach X followers by DATE?', category: 'performance' },
-                    { icon: '&#128172;', label: 'Tweet Count', template: 'Will @AGENT post X+ tweets by DATE?', category: 'performance' },
                     { icon: '&#128200;', label: 'Engagement', template: 'Will @AGENT average X+ likes per tweet by DATE?', category: 'performance' },
                     // Token Templates
                     { icon: '&#128176;', label: 'Token Price', template: 'Will $TOKEN reach $X mcap by DATE?', category: 'token' },
                     { icon: '&#128640;', label: 'Token Launch', template: 'Will $TOKEN launch by DATE?', category: 'token' },
-                    { icon: '&#127775;', label: 'NFT Floor', template: 'Will COLLECTION NFT floor exceed $X by DATE?', category: 'token' },
                     // Competition Templates
                     { icon: '&#127942;', label: 'Hackathon', template: 'Will PROJECT win the Colosseum hackathon?', category: 'competition' },
                     { icon: '&#127941;', label: 'Top 3', template: 'Will PROJECT finish top 3 in COMPETITION?', category: 'competition' },
                     // Head-to-Head Templates
                     { icon: '&#9876;', label: 'H2H Followers', template: 'Will @AGENT1 gain more followers than @AGENT2 by DATE?', category: 'head-to-head' },
                     { icon: '&#9878;', label: 'H2H Engage', template: 'Will @AGENT1 get more engagement than @AGENT2 this week?', category: 'head-to-head' },
-                    { icon: '&#129504;', label: 'H2H Accuracy', template: 'Will @AGENT1 have higher prediction accuracy than @AGENT2?', category: 'head-to-head' },
                     // Milestone Templates
                     { icon: '&#127919;', label: 'User Count', template: 'Will PLATFORM reach X users by DATE?', category: 'milestone' },
                     { icon: '&#11088;', label: 'GitHub Stars', template: 'Will PROJECT reach X GitHub stars by DATE?', category: 'milestone' },
@@ -1547,30 +1645,22 @@ function App() {
               </div>
 
               <div style={styles.formCard} className="glass-card">
-                {/* Basic Info */}
-                <div style={styles.formSection}>
-                  <div style={styles.formSectionHeader}>
-                    <span className="step-num">01</span>
-                    <h3 style={styles.formSectionTitle}>Market Question</h3>
-                  </div>
-
+                {/* Simplified Form - Only Question, Category, End Date */}
+                <div style={{...styles.formSection, borderBottom: 'none', paddingBottom: 0}}>
+                  
                   <label style={styles.label}>What are you predicting? *</label>
                   <textarea
-                    style={{...styles.input, minHeight: '80px', resize: 'vertical', fontSize: '16px', fontWeight: '500'}}
-                    placeholder="Will @AIButters reach 10K followers by Feb 15?"
+                    style={{...styles.input, minHeight: '100px', resize: 'vertical', fontSize: '18px', fontWeight: '500', lineHeight: '1.5'}}
+                    placeholder="Will $BUTTERS hit $1M mcap by Feb 28?"
                     value={newMarket.question}
                     onChange={(e) => setMarketField('question', e.target.value)}
+                    maxLength={256}
                   />
+                  <span style={{fontSize: '11px', color: COLORS.textMuted, marginTop: '4px', display: 'block'}}>
+                    {newMarket.question.length}/256 characters - Be specific with measurable outcomes
+                  </span>
 
-                  <label style={styles.label}>Description (optional)</label>
-                  <textarea
-                    style={{...styles.input, minHeight: '60px', resize: 'vertical'}}
-                    placeholder="Additional context, rules, or notes about this market..."
-                    value={newMarket.description}
-                    onChange={(e) => setMarketField('description', e.target.value)}
-                  />
-
-                  <div style={styles.formRow}>
+                  <div style={{...styles.formRow, marginTop: '24px'}}>
                     <div style={styles.formCol}>
                       <label style={styles.label}>Category</label>
                       <select
@@ -1584,110 +1674,30 @@ function App() {
                       </select>
                     </div>
                     <div style={styles.formCol}>
-                      <label style={styles.label}>Resolution Date (UTC) *</label>
+                      <label style={styles.label}>End Date (UTC) *</label>
                       <input
                         style={styles.input}
                         type="datetime-local"
                         value={newMarket.endDate}
                         onChange={(e) => setMarketField('endDate', e.target.value)}
                       />
-                      <span style={{fontSize: '11px', color: COLORS.textMuted, marginTop: '4px', display: 'block', fontFamily: 'JetBrains Mono, monospace'}}>
-                        All times are in UTC (no timezone offset)
-                      </span>
                     </div>
                   </div>
-                </div>
 
-                {/* Resolution Config */}
-                <div style={styles.formSection}>
-                  <div style={styles.formSectionHeader}>
-                    <span className="step-num">02</span>
-                    <h3 style={styles.formSectionTitle}>Resolution Rules</h3>
-                  </div>
-
-                  <label style={styles.label}>How will this be resolved?</label>
-                  <div style={styles.resolutionGrid}>
-                    {RESOLUTION_SOURCES.map(src => (
-                      <button
-                        key={src.id}
-                        style={{
-                          ...styles.resolutionOption,
-                          borderColor: newMarket.resolutionSource === src.id ? COLORS.primary : COLORS.border,
-                          background: newMarket.resolutionSource === src.id ? `${COLORS.primary}10` : 'transparent'
-                        }}
-                        onClick={() => setMarketField('resolutionSource', src.id)}
-                      >
-                        <span style={{fontWeight: '600', fontFamily: 'Space Grotesk, sans-serif'}}>{src.label}</span>
-                        <span style={{fontSize: '11px', color: COLORS.textMuted}}>{src.description}</span>
-                      </button>
-                    ))}
-                  </div>
-
-                  <label style={styles.label}>Verification URL</label>
-                  <input
-                    style={styles.input}
-                    placeholder="https://moltbook.com/u/agent or https://dexscreener.com/solana/..."
-                    value={newMarket.verificationUrl}
-                    onChange={(e) => setMarketField('verificationUrl', e.target.value)}
-                  />
-
-                  <div style={styles.formRow}>
-                    <div style={styles.formCol}>
-                      <label style={styles.label}>Verification Method</label>
-                      <input
-                        style={styles.input}
-                        placeholder="Check follower count at end date"
-                        value={newMarket.verificationMethod}
-                        onChange={(e) => setMarketField('verificationMethod', e.target.value)}
-                      />
-                    </div>
-                    <div style={styles.formCol}>
-                      <label style={styles.label}>Target Threshold</label>
-                      <input
-                        style={styles.input}
-                        placeholder="10,000 followers / $1M mcap"
-                        value={newMarket.threshold}
-                        onChange={(e) => setMarketField('threshold', e.target.value)}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Agent Creator Info */}
-                <div style={{...styles.formSection, borderBottom: 'none', paddingBottom: 0}}>
-                  <div style={styles.formSectionHeader}>
-                    <span className="step-num">03</span>
-                    <h3 style={styles.formSectionTitle}>Creator Rewards</h3>
-                  </div>
-
-                  <div style={styles.royaltyInfoBox}>
-                    <div style={{display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px'}}>
-                      <span style={{fontSize: '24px'}}>&#128176;</span>
+                  {/* How it works info */}
+                  <div style={{...styles.resolutionInfoBox, marginTop: '24px'}}>
+                    <div style={{display: 'flex', alignItems: 'flex-start', gap: '12px'}}>
+                      <span style={{fontSize: '20px'}}>&#129302;</span>
                       <div>
-                        <span style={{fontWeight: '700', color: COLORS.primary, fontSize: '18px', fontFamily: 'JetBrains Mono, monospace'}}>0.3%</span>
-                        <span style={{color: COLORS.textSecondary, marginLeft: '8px'}}>of winning payouts from this market</span>
+                        <strong style={{color: COLORS.textPrimary}}>How Resolution Works</strong>
+                        <p style={{margin: '8px 0 0 0', color: COLORS.textSecondary, fontSize: '13px', lineHeight: '1.6'}}>
+                          @AgentBetsBot automatically detects the resolution source from your question 
+                          (token prices via CoinGecko, followers via X API, etc.) and proposes an outcome at the end date.
+                          An admin then confirms before funds are distributed.
+                        </p>
                       </div>
                     </div>
-                    <p style={{fontSize: '12px', color: COLORS.textMuted}}>
-                      As the creator, you earn a fee from THIS market only. Create more markets = more earning opportunities. +100 points per market too!
-                    </p>
                   </div>
-
-                  <label style={styles.label}>Your Agent Handle (for creator earnings)</label>
-                  <input
-                    style={styles.input}
-                    placeholder="@YourAgentHandle"
-                    value={newMarket.creatorAgent}
-                    onChange={(e) => setMarketField('creatorAgent', e.target.value)}
-                  />
-
-                  <label style={styles.label}>Tags (helps discovery)</label>
-                  <input
-                    style={styles.input}
-                    placeholder="ai, agent, prediction, hackathon"
-                    value={newMarket.tags}
-                    onChange={(e) => setMarketField('tags', e.target.value)}
-                  />
                 </div>
 
                 {connected && (
@@ -1748,6 +1758,122 @@ function App() {
                       }}>
                         {parseFloat(entry.profit) >= 0 ? '+' : ''}{entry.profit}
                       </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Admin Panel View */}
+          {view === 'admin' && isAdmin && (
+            <div style={styles.adminPanel}>
+              <h1 style={styles.pageTitle}>Admin Panel</h1>
+              <p style={styles.formSubtitle}>Review and confirm pending market resolutions</p>
+
+              {pendingResolutions.length === 0 ? (
+                <div style={styles.emptyState}>
+                  <div style={styles.emptyStateIcon}>
+                    <span style={{fontSize: '64px', opacity: 0.4}}>&#9989;</span>
+                  </div>
+                  <h3 style={{fontFamily: 'Space Grotesk, sans-serif', fontSize: '24px', marginBottom: '12px'}}>All caught up!</h3>
+                  <p style={{color: COLORS.textMuted}}>No markets pending confirmation</p>
+                </div>
+              ) : (
+                <div style={styles.marketGrid}>
+                  {pendingResolutions.map((market) => (
+                    <div key={market.id} style={styles.adminCard}>
+                      <div style={{marginBottom: '12px'}}>
+                        <span style={styles.pendingBadge}>
+                          &#9888; Pending Confirmation
+                        </span>
+                      </div>
+                      
+                      <h3 style={{...styles.marketQuestion, marginBottom: '16px'}}>{market.question}</h3>
+                      
+                      <div style={{fontSize: '13px', color: COLORS.textSecondary, marginBottom: '16px'}}>
+                        <div style={{marginBottom: '6px'}}>
+                          <strong>Category:</strong> {market.category}
+                        </div>
+                        <div style={{marginBottom: '6px'}}>
+                          <strong>Ended:</strong> {new Date(market.endDate).toLocaleString()}
+                        </div>
+                        <div style={{marginBottom: '6px'}}>
+                          <strong>Volume:</strong> ${((market.totalVolume || 0) / 1e6).toFixed(2)} USDC
+                        </div>
+                        <div>
+                          <strong>Total Bets:</strong> {market.totalBets || 0}
+                        </div>
+                      </div>
+
+                      {/* Bot's Proposed Resolution */}
+                      {market.proposedResolution && (
+                        <div style={styles.proposalBox}>
+                          <div style={{fontWeight: '700', marginBottom: '10px', color: COLORS.textPrimary}}>
+                            &#129302; Bot Proposal
+                          </div>
+                          <div style={{fontSize: '13px', color: COLORS.textSecondary}}>
+                            <div style={{marginBottom: '6px'}}>
+                              <strong>Outcome:</strong>{' '}
+                              <span style={{
+                                color: market.proposedResolution.outcome === 'YES' ? COLORS.success : COLORS.error,
+                                fontWeight: '700'
+                              }}>
+                                {market.proposedResolution.outcome}
+                              </span>
+                            </div>
+                            <div style={{marginBottom: '6px'}}>
+                              <strong>Confidence:</strong> {market.proposedResolution.confidence || 0}%
+                            </div>
+                            {market.proposedResolution.evidence && (
+                              <>
+                                <div style={{marginBottom: '6px'}}>
+                                  <strong>Source:</strong> {market.proposedResolution.evidence.source || market.resolutionSource}
+                                </div>
+                                {market.proposedResolution.evidence.actualValue && (
+                                  <div style={{marginBottom: '6px'}}>
+                                    <strong>Actual Value:</strong> {market.proposedResolution.evidence.actualValue}
+                                  </div>
+                                )}
+                                {market.proposedResolution.evidence.threshold && (
+                                  <div style={{marginBottom: '6px'}}>
+                                    <strong>Threshold:</strong> {market.proposedResolution.evidence.threshold}
+                                  </div>
+                                )}
+                              </>
+                            )}
+                            <div style={{fontSize: '11px', color: COLORS.textMuted, marginTop: '8px'}}>
+                              Proposed: {new Date(market.proposedResolution.proposedAt).toLocaleString()}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action Buttons */}
+                      <div style={styles.adminBtnGroup}>
+                        <button
+                          style={{
+                            ...styles.confirmYesBtn,
+                            opacity: adminConfirming === market.id ? 0.6 : 1,
+                            cursor: adminConfirming === market.id ? 'wait' : 'pointer'
+                          }}
+                          onClick={() => confirmResolution(market.id, 'YES')}
+                          disabled={adminConfirming === market.id}
+                        >
+                          {adminConfirming === market.id ? 'Confirming...' : 'Confirm YES'}
+                        </button>
+                        <button
+                          style={{
+                            ...styles.confirmNoBtn,
+                            opacity: adminConfirming === market.id ? 0.6 : 1,
+                            cursor: adminConfirming === market.id ? 'wait' : 'pointer'
+                          }}
+                          onClick={() => confirmResolution(market.id, 'NO')}
+                          disabled={adminConfirming === market.id}
+                        >
+                          {adminConfirming === market.id ? 'Confirming...' : 'Confirm NO'}
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -2085,7 +2211,7 @@ const styles = {
   sidebarItemActive: {
     background: COLORS.bgActive,
     color: COLORS.primary,
-    borderLeftColor: COLORS.primary
+    borderLeft: `3px solid ${COLORS.primary}`
   },
   iconWrapper: {
     display: 'flex',
@@ -2323,8 +2449,8 @@ const styles = {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(min(380px, 100%), 1fr))',
     gap: '24px',
-    maxWidth: '1600px',
-    margin: '0 auto',
+    maxWidth: '100%',
+    margin: '0',
     width: '100%'
   },
   marketCard: {
@@ -2337,7 +2463,6 @@ const styles = {
     position: 'relative',
     animation: 'fadeIn 0.4s ease forwards',
     minHeight: '280px',
-    maxWidth: '480px',
     display: 'flex',
     flexDirection: 'column'
   },
@@ -2549,7 +2674,7 @@ const styles = {
     transition: 'all 0.2s ease'
   },
   formContainer: {
-    maxWidth: '700px',
+    maxWidth: '900px',
     width: '100%',
     boxSizing: 'border-box'
   },
@@ -2660,6 +2785,78 @@ const styles = {
     border: `1px solid ${COLORS.primary}25`,
     borderRadius: '14px',
     marginBottom: '20px'
+  },
+  resolutionInfoBox: {
+    padding: '16px',
+    background: `${COLORS.secondary}10`,
+    border: `1px solid ${COLORS.secondary}30`,
+    borderRadius: '12px',
+    marginBottom: '16px',
+    fontSize: '13px'
+  },
+  pendingBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '4px 10px',
+    background: `${COLORS.warning}20`,
+    color: COLORS.warning,
+    borderRadius: '6px',
+    fontSize: '11px',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px'
+  },
+  proposalBox: {
+    padding: '16px',
+    background: `${COLORS.warning}10`,
+    border: `1px solid ${COLORS.warning}30`,
+    borderRadius: '12px',
+    marginTop: '12px'
+  },
+  adminSection: {
+    borderTop: `1px solid ${COLORS.border}`,
+    marginTop: 'auto',
+    paddingTop: '16px'
+  },
+  adminPanel: {
+    padding: '24px'
+  },
+  adminCard: {
+    background: COLORS.bgCard,
+    borderRadius: '16px',
+    padding: '20px',
+    border: `1px solid ${COLORS.border}`,
+    marginBottom: '16px'
+  },
+  adminBtnGroup: {
+    display: 'flex',
+    gap: '12px',
+    marginTop: '16px'
+  },
+  confirmYesBtn: {
+    flex: 1,
+    padding: '12px 20px',
+    background: COLORS.success,
+    color: '#000',
+    border: 'none',
+    borderRadius: '10px',
+    cursor: 'pointer',
+    fontWeight: '600',
+    fontSize: '14px',
+    transition: 'all 0.2s'
+  },
+  confirmNoBtn: {
+    flex: 1,
+    padding: '12px 20px',
+    background: COLORS.error,
+    color: '#fff',
+    border: 'none',
+    borderRadius: '10px',
+    cursor: 'pointer',
+    fontWeight: '600',
+    fontSize: '14px',
+    transition: 'all 0.2s'
   },
   walletConnectedBox: {
     display: 'flex',

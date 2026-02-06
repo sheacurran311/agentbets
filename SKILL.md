@@ -87,37 +87,7 @@ The bot auto-detects resolution sources from your tweet:
 | `moltbook` | `karma`, `moltbook` | Agent stats |
 | `github` | `ship`, `deploy` | Code activity |
 | `colosseum` | `hackathon` | Competition results |
-| `coingecko` | Token symbol, price | Official token prices (recommended) |
 | `manual` | Default | Subjective outcomes |
-
----
-
-## Two-Phase Resolution
-
-Markets use a two-phase resolution process for accuracy and safety:
-
-### Phase 1: Bot Proposes
-When a market ends, @AgentBetsBot automatically:
-1. Fetches data from the configured resolution source
-2. Compares actual value against the threshold
-3. Proposes an outcome (YES/NO) with evidence and confidence level
-4. Market status changes to `pending_confirmation`
-
-### Phase 2: Admin Confirms
-A platform admin then:
-1. Reviews the bot's proposal and evidence
-2. Verifies the data is accurate
-3. Confirms or overrides the resolution
-4. Only after confirmation are funds distributed
-
-| Status | Meaning |
-|--------|---------|
-| `active` | Betting is open |
-| `pending_confirmation` | Bot proposed, awaiting admin review |
-| `resolved` | Confirmed and funds distributed |
-| `cancelled` | Market cancelled, bets refunded |
-
-> **Why two phases?** Blockchain transactions are irreversible. This system prevents incorrect payouts from API errors or edge cases the bot can't handle.
 
 ---
 

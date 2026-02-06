@@ -61,8 +61,8 @@ const priceHistoryCache = new Map(); // tokenId -> { data, fetchedAt }
 // Database flag - set to true once connected
 let dbConnected = false;
 
-// CoinGecko API configuration
-const COINGECKO_API_KEY = 'CG-pXbU22MTv4u19sWoWCLQkbrj';
+// CoinGecko API configuration (from environment)
+const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY;
 const COINGECKO_API_BASE = 'https://api.coingecko.com/api/v3';
 
 // Token symbol to CoinGecko ID mapping
@@ -1444,58 +1444,107 @@ app.get('/api/oracle/:marketId', async (req, res) => {
  * Get leaderboard of top predictors
  * GET /api/leaderboard
  */
-app.get('/api/leaderboard', (req, res) => {
-  // Calculate win/loss record for each wallet
-  const walletStats = new Map();
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    // Calculate win/loss record for each wallet
+    const walletStats = new Map();
+    
+    // Get all bets and markets using async methods
+    const allBets = await bets.values();
+    const allMarkets = await markets.values();
+    const marketsMap = new Map(allMarkets.map(m => [m.id, m]));
 
-  bets.forEach(bet => {
-    const market = markets.get(bet.marketId);
-    if (!market || market.status !== 'resolved') return;
+    for (const bet of allBets) {
+      const market = marketsMap.get(bet.marketId);
+      if (!market || market.status !== 'resolved') continue;
 
-    const stats = walletStats.get(bet.wallet) || {
-      wallet: bet.wallet,
-      totalBets: 0,
-      wins: 0,
-      losses: 0,
-      totalWagered: 0,
-      totalWon: 0,
-      profit: 0
-    };
+      const stats = walletStats.get(bet.wallet) || {
+        wallet: bet.wallet,
+        totalBets: 0,
+        wins: 0,
+        losses: 0,
+        totalWagered: 0,
+        totalWon: 0,
+        profit: 0
+      };
 
-    stats.totalBets += 1;
-    stats.totalWagered += bet.amountSOL;
+      stats.totalBets += 1;
+      stats.totalWagered += bet.amountSOL || 0;
 
-    if (bet.outcome === market.resolution) {
-      stats.wins += 1;
-      // Calculate winnings
-      const winningPool = market.resolution === 'YES' ? market.yesPool : market.noPool;
-      const losingPool = market.resolution === 'YES' ? market.noPool : market.yesPool;
-      const share = bet.amount / winningPool;
-      const winnings = (bet.amount + (share * losingPool * 0.99)) / LAMPORTS_PER_SOL;
-      stats.totalWon += winnings;
-      stats.profit += (winnings - bet.amountSOL);
-    } else {
-      stats.losses += 1;
-      stats.profit -= bet.amountSOL;
+      if (bet.outcome === market.resolution) {
+        stats.wins += 1;
+        // Calculate winnings
+        const winningPool = market.resolution === 'YES' ? market.yesPool : market.noPool;
+        const losingPool = market.resolution === 'YES' ? market.noPool : market.yesPool;
+        if (winningPool > 0) {
+          const share = bet.amount / winningPool;
+          const winnings = (bet.amount + (share * losingPool * 0.99)) / LAMPORTS_PER_SOL;
+          stats.totalWon += winnings;
+          stats.profit += (winnings - (bet.amountSOL || 0));
+        }
+      } else {
+        stats.losses += 1;
+        stats.profit -= bet.amountSOL || 0;
+      }
+
+      walletStats.set(bet.wallet, stats);
     }
 
-    walletStats.set(bet.wallet, stats);
-  });
+    // Sort by profit
+    const leaderboard = Array.from(walletStats.values())
+      .map(s => ({
+        ...s,
+        winRate: s.totalBets > 0 ? (s.wins / s.totalBets * 100).toFixed(1) + '%' : '0%',
+        profit: s.profit.toFixed(4)
+      }))
+      .sort((a, b) => parseFloat(b.profit) - parseFloat(a.profit))
+      .slice(0, 50);
 
-  // Sort by profit
-  const leaderboard = Array.from(walletStats.values())
-    .map(s => ({
-      ...s,
-      winRate: s.totalBets > 0 ? (s.wins / s.totalBets * 100).toFixed(1) + '%' : '0%',
-      profit: s.profit.toFixed(4)
-    }))
-    .sort((a, b) => parseFloat(b.profit) - parseFloat(a.profit))
-    .slice(0, 50);
+    res.json({
+      leaderboard,
+      totalPredictors: walletStats.size
+    });
+  } catch (error) {
+    console.error('Error fetching leaderboard:', error);
+    res.status(500).json({ error: 'Failed to fetch leaderboard' });
+  }
+});
 
-  res.json({
-    leaderboard,
-    totalPredictors: walletStats.size
-  });
+/**
+ * Get recent activity feed
+ * GET /api/activity
+ */
+app.get('/api/activity', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    
+    // Get recent bets
+    const allBets = await bets.values();
+    const allMarkets = await markets.values();
+    const marketsMap = new Map(allMarkets.map(m => [m.id, m]));
+    
+    // Build activity list from bets
+    const activities = allBets
+      .filter(bet => bet.createdAt || bet.timestamp)
+      .map(bet => {
+        const market = marketsMap.get(bet.marketId);
+        return {
+          type: 'bet',
+          user: bet.wallet ? `${bet.wallet.slice(0, 4)}...${bet.wallet.slice(-3)}` : 'Unknown',
+          market: market?.question || 'Unknown market',
+          side: bet.outcome,
+          amount: bet.amountSOL || (bet.amount / LAMPORTS_PER_SOL),
+          time: new Date(bet.createdAt || bet.timestamp).getTime()
+        };
+      })
+      .sort((a, b) => b.time - a.time)
+      .slice(0, limit);
+    
+    res.json({ activities });
+  } catch (error) {
+    console.error('Error fetching activity:', error);
+    res.status(500).json({ error: 'Failed to fetch activity', activities: [] });
+  }
 });
 
 // ==========================================

@@ -2,6 +2,14 @@
  * AgentBets Escrow Module
  * Handles on-chain SOL escrow for bets
  *
+ * ⚠️ DEPRECATION NOTICE:
+ * This module handles SOL escrow, but the platform has migrated to USDC via Poll.fun.
+ * This module may still be used for:
+ * - Legacy bets (if any exist)
+ * - Royalty payouts (if not migrated to USDC)
+ * 
+ * Review usage before removal. Target: Phase 2 cleanup.
+ *
  * For MVP: Centralized escrow wallet that holds bet funds
  * Production: Would use Program Derived Addresses (PDAs)
  */

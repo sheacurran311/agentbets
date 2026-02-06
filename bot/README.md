@@ -173,8 +173,10 @@ bot/
 
 ## Cron Schedule
 
-- **Check Mentions**: Every 2 minutes
-- **Check Resolutions**: Every 15 minutes
+- **Check Mentions**: Every 2 minutes (via `cron` library)
+- **Check Resolutions**: Every minute fallback + scheduled resolution times (via `node-schedule`)
+
+Note: The bot uses both `cron` for periodic checks and `node-schedule` for exact-time market resolution scheduling.
 
 ## Example Bot Flow
 

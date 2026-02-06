@@ -1,8 +1,6 @@
 import React, { useMemo } from 'react'
 import { ConnectionProvider, WalletProvider as SolanaWalletProvider } from '@solana/wallet-adapter-react'
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui'
-import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom'
-import { SolflareWalletAdapter } from '@solana/wallet-adapter-solflare'
 import { CoinbaseWalletAdapter } from '@solana/wallet-adapter-coinbase'
 import { clusterApiUrl } from '@solana/web3.js'
 
@@ -14,10 +12,9 @@ export function WalletProvider({ children }) {
   const endpoint = useMemo(() => clusterApiUrl('devnet'), [])
 
   // Configure supported wallets
+  // Note: Phantom and Solflare are auto-detected via Wallet Standard protocol
   const wallets = useMemo(
     () => [
-      new PhantomWalletAdapter(),
-      new SolflareWalletAdapter(),
       new CoinbaseWalletAdapter()
     ],
     []

@@ -14,8 +14,8 @@
 
 const axios = require('axios');
 
-// CoinGecko API key (Demo/Free tier)
-const COINGECKO_API_KEY = 'CG-pXbU22MTv4u19sWoWCLQkbrj';
+// CoinGecko API key from environment (Demo/Free tier)
+const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY;
 
 // Extended token symbol to CoinGecko ID mapping
 const COINGECKO_TOKEN_MAP = {

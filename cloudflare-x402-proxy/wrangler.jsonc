@@ -5,6 +5,14 @@
   "compatibility_date": "2024-01-01",
   "compatibility_flags": ["nodejs_compat"],
 
+  // ============================================
+  // PHASE 2 FEATURE - NOT DEPLOYED FOR DEVNET LAUNCH
+  // ============================================
+  // This x402 proxy enables programmatic HTTP API betting with USDC payments on Base network.
+  // Currently, agents use @AgentBetsBot (Twitter) to create markets and interact.
+  // x402 HTTP API will be enabled when Base expansion is ready.
+  // ============================================
+
   // Routes - proxy requests to /api/agent/* endpoints
   // Update "zone_name" to your actual domain once configured in Cloudflare
   "routes": [
@@ -13,8 +21,8 @@
 
   // Configuration variables
   "vars": {
-    // Wallet address to receive x402 payments (Base network USDC)
-    // This is your payment receiving address - update with your own wallet
+    // PHASE 2: Wallet address to receive x402 payments (Base network USDC)
+    // TODO: Set actual EVM wallet address when ready to deploy
     "PAY_TO": "0x000000000000000000000000000000000000dEaD",
 
     // Network for payments
