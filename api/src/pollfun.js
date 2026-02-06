@@ -529,6 +529,69 @@ class PollFunService {
   }
 
   /**
+   * Close a resolved & settled market to reclaim rent SOL
+   * Call this after all settlement batches are complete (status = Distributed)
+   * Returns ~0.039 SOL rent back to the creator wallet
+   *
+   * @param {Object} params Parameters
+   * @param {string} params.betPda Market PDA address
+   * @param {Keypair} params.creatorKeypair Creator's keypair (must be original creator)
+   * @returns {Object} Result with reclaimed rent info
+   */
+  async closeBet(params) {
+    const { betPda, creatorKeypair } = params;
+
+    const creator = creatorKeypair || this.creatorKeypair;
+    if (!creator) {
+      return { success: false, error: 'Creator keypair required to close bet' };
+    }
+
+    console.log(`[PollFun] Closing bet to reclaim rent: ${betPda}`);
+
+    try {
+      // Verify bet is in Distributed status before closing
+      const betAccount = await this.sdk.accounts.betV2.single(new PublicKey(betPda));
+      const status = SDK.convertRustEnumValueToString(betAccount.status);
+
+      if (status !== 'Distributed') {
+        return {
+          success: false,
+          error: `Cannot close bet in "${status}" status. Must be "Distributed" (fully settled).`
+        };
+      }
+
+      // Get creator SOL balance before close (to calculate reclaimed amount)
+      const balanceBefore = await this.connection.getBalance(creator.publicKey);
+
+      const txHash = await this.sdk.closeBetV2({
+        bet: new PublicKey(betPda),
+        signers: [creator],
+        payerOverride: creator.publicKey
+      });
+
+      console.log('[PollFun] Bet closed, rent reclaimed:', txHash);
+
+      // Get balance after to calculate reclaimed amount
+      const balanceAfter = await this.connection.getBalance(creator.publicKey);
+      const reclaimedLamports = balanceAfter - balanceBefore;
+      const reclaimedSOL = reclaimedLamports / 1e9;
+
+      console.log(`[PollFun] Reclaimed ~${reclaimedSOL.toFixed(6)} SOL from closed bet`);
+
+      return {
+        success: true,
+        betPda,
+        txSignature: txHash,
+        reclaimedLamports,
+        reclaimedSOL
+      };
+    } catch (error) {
+      console.error('[PollFun] Failed to close bet:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * Cancel/withdraw a wager if market hasn't started resolving
    * @param {Object} params Parameters
    * @param {string} params.betPda Market PDA address

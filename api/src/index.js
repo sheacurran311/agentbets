@@ -97,13 +97,35 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'", "https://api.devnet.solana.com", "https://api.mainnet.solana.com", "https://api.mainnet-beta.solana.com", "wss://api.mainnet.solana.com", "wss://api.mainnet-beta.solana.com"],
+      connectSrc: [
+        "'self'",
+        "https://api.devnet.solana.com",
+        "https://api.mainnet.solana.com",
+        "https://api.mainnet-beta.solana.com",
+        "wss://api.mainnet.solana.com",
+        "wss://api.mainnet-beta.solana.com",
+        "https://*.solflare.com",
+        "https://*.phantom.app",
+        "https://*.coinbase.com",
+      ],
+      frameSrc: [
+        "'self'",
+        "https://connect.solflare.com",
+        "https://*.solflare.com",
+        "https://*.phantom.app",
+        "https://*.coinbase.com",
+        "https://dial.to",
+      ],
+      childSrc: ["'self'", "blob:"],
+      workerSrc: ["'self'", "blob:"],
     },
   },
   crossOriginEmbedderPolicy: false, // Allow embedding for Solana Actions
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' }, // Allow wallet popups
 }));
 
 // CORS configuration - restrict origins in production
@@ -1234,6 +1256,19 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdmin, asyn
 
         market.settlementStatus = 'settled';
         market.settledAt = new Date().toISOString();
+
+        // Auto-close bet to reclaim ~0.039 SOL rent back to bot wallet
+        try {
+          const closeResult = await pollFunService.closeBet({ betPda: market.betPda });
+          if (closeResult.success) {
+            market.settlementStatus = 'closed';
+            console.log(`[Resolution] Bet closed, reclaimed ${closeResult.reclaimedSOL?.toFixed(6)} SOL`);
+          } else {
+            console.warn(`[Resolution] Could not close bet yet: ${closeResult.error}`);
+          }
+        } catch (closeErr) {
+          console.warn(`[Resolution] Failed to close bet (can retry later): ${closeErr.message}`);
+        }
       }
     }
 
@@ -2319,6 +2354,21 @@ app.post('/api/onchain/wager', async (req, res) => {
       return res.status(400).json({ error: 'Outcome must be YES or NO' });
     }
 
+    // Check 50-wager limit (Poll.fun on-chain max)
+    try {
+      const onChainData = await pollFunService.getMarketData(pdaAddress);
+      if (onChainData.success && onChainData.currentUserCount >= 50) {
+        return res.status(400).json({
+          error: 'Market has reached the maximum of 50 wagers (on-chain limit). No more bets can be placed.',
+          currentWagers: onChainData.currentUserCount,
+          maxWagers: 50
+        });
+      }
+    } catch (limitErr) {
+      console.warn('[API] Could not check wager limit:', limitErr.message);
+      // Continue anyway - the on-chain program will reject if actually full
+    }
+
     // Determine if gasless mode is requested and available
     const useGasless = gasless && gaslessService.enabled && gaslessService.feePayerKeypair;
     const userPubkey = new PublicKey(wallet);
@@ -2780,6 +2830,23 @@ app.post('/api/onchain/settle-all', async (req, res) => {
       markets.set(marketId, market);
     }
 
+    // Auto-close bet to reclaim rent SOL back to bot wallet
+    let closeResult = null;
+    if (errorCount === 0) {
+      try {
+        closeResult = await pollFunService.closeBet({ betPda: pdaAddress });
+        if (closeResult.success) {
+          console.log(`[Settle] Bet closed, reclaimed ${closeResult.reclaimedSOL?.toFixed(6)} SOL`);
+          if (market) {
+            market.settlementStatus = 'closed';
+            markets.set(marketId, market);
+          }
+        }
+      } catch (closeErr) {
+        console.warn(`[Settle] Failed to close bet (can retry later): ${closeErr.message}`);
+      }
+    }
+
     res.json({
       success: errorCount === 0,
       betPda: pdaAddress,
@@ -2790,9 +2857,54 @@ app.post('/api/onchain/settle-all', async (req, res) => {
       successfulBatches: successCount,
       failedBatches: errorCount,
       settlements,
+      rentReclaimed: closeResult?.success ? {
+        reclaimedSOL: closeResult.reclaimedSOL,
+        txSignature: closeResult.txSignature
+      } : null,
       message: errorCount === 0
-        ? `Successfully settled all ${totalBatches} batches for ${totalUsers} users!`
+        ? `Successfully settled all ${totalBatches} batches for ${totalUsers} users! Rent reclaimed: ${closeResult?.reclaimedSOL?.toFixed(6) || 'pending'} SOL`
         : `Settled ${successCount}/${totalBatches} batches with ${errorCount} errors`
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Close a settled bet to reclaim rent SOL
+ * POST /api/onchain/close
+ * 
+ * Call after settle-all completes. Returns ~0.039 SOL to bot wallet.
+ */
+app.post('/api/onchain/close', async (req, res) => {
+  try {
+    const { betPda, marketId } = req.body;
+
+    if (!betPda) {
+      return res.status(400).json({ error: 'betPda is required' });
+    }
+
+    const result = await pollFunService.closeBet({ betPda });
+
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    // Update local market status if we have the marketId
+    if (marketId) {
+      const market = await markets.get(marketId);
+      if (market) {
+        market.settlementStatus = 'closed';
+        await markets.set(marketId, market);
+      }
+    }
+
+    res.json({
+      success: true,
+      betPda,
+      reclaimedSOL: result.reclaimedSOL,
+      txSignature: result.txSignature,
+      message: `Bet closed. Reclaimed ${result.reclaimedSOL?.toFixed(6)} SOL back to bot wallet.`
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -3503,6 +3615,7 @@ app.get('/api', (req, res) => {
         'POST /api/onchain/resolve': 'Resolve market (oracle/admin)',
         'POST /api/onchain/settle': 'Settle single batch of winners',
         'POST /api/onchain/settle-all': 'Settle ALL batches (full payout)',
+        'POST /api/onchain/close': 'Close settled bet, reclaim ~0.039 SOL rent',
         'GET /api/onchain/settle-status/:betPda': 'Check settlement status',
         'POST /api/onchain/payout-preview': 'Preview potential payout',
         'GET /api/onchain/user/:wallet': 'Get user on-chain data'
