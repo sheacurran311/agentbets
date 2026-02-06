@@ -20,9 +20,22 @@ const AgentVerifier = require('./verifier');
 const ResolutionEngine = require('./resolver');
 const AgentBetsAPI = require('./api-client');
 
-// Database (shared with API)
-const db = require('../../api/src/db');
-const { Resolution, ProcessedTweet } = require('../../api/src/db/models');
+// Database (optional - only available when running with full monorepo)
+// On Railway, the bot runs standalone and uses file-based storage
+let db = null;
+let Resolution = null;
+let ProcessedTweet = null;
+
+try {
+  // Try to load shared database (only works in monorepo environment like Replit)
+  db = require('../../api/src/db');
+  const models = require('../../api/src/db/models');
+  Resolution = models.Resolution;
+  ProcessedTweet = models.ProcessedTweet;
+  console.log('[Bot] Shared database modules loaded');
+} catch (err) {
+  console.log('[Bot] Running standalone - using file-based storage (this is normal on Railway)');
+}
 
 const app = express();
 app.use(express.json());
@@ -31,7 +44,7 @@ const PORT = process.env.BOT_PORT || 3003;
 // Database connection flag
 let dbConnected = false;
 
-// Fallback file paths (used when database not available)
+// Fallback file paths (used when database not available or on Railway)
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const PENDING_RESOLUTIONS_FILE = path.join(DATA_DIR, 'pending-resolutions.json');
 const PROCESSED_TWEETS_FILE = path.join(DATA_DIR, 'processed-tweets.json');
@@ -277,18 +290,30 @@ const scheduledJobs = new Map(); // Track scheduled resolution jobs
  * Initialize storage (database or file-based)
  */
 async function initializeStorage() {
-  // Try to connect to database
-  if (process.env.DATABASE_URL) {
+  // Try to connect to database (only if db module is available and DATABASE_URL is set)
+  if (db && process.env.DATABASE_URL) {
     console.log('[Bot] Connecting to PostgreSQL...');
-    const connected = await db.initDatabase();
-    if (connected) {
-      dbConnected = true;
-      console.log('[Bot] Database connected successfully');
-    } else {
-      console.warn('[Bot] Database connection failed, using file-based storage');
+    try {
+      const connected = await db.initDatabase();
+      if (connected) {
+        dbConnected = true;
+        console.log('[Bot] Database connected successfully');
+      } else {
+        console.warn('[Bot] Database connection failed, using file-based storage');
+        ensureDataDir();
+      }
+    } catch (dbError) {
+      console.warn('[Bot] Database initialization error:', dbError.message);
+      console.warn('[Bot] Falling back to file-based storage');
+      ensureDataDir();
     }
   } else {
-    console.warn('[Bot] DATABASE_URL not set, using file-based storage');
+    if (!db) {
+      console.log('[Bot] Running standalone (no shared database module)');
+    } else {
+      console.log('[Bot] DATABASE_URL not set');
+    }
+    console.log('[Bot] Using file-based storage');
     ensureDataDir();
   }
   
@@ -1127,7 +1152,7 @@ process.on('SIGTERM', async () => {
   }
   
   // Close database connection
-  if (dbConnected) {
+  if (dbConnected && db && db.closePool) {
     await db.closePool();
   }
   
@@ -1145,7 +1170,7 @@ process.on('SIGINT', async () => {
   }
   
   // Close database connection
-  if (dbConnected) {
+  if (dbConnected && db && db.closePool) {
     await db.closePool();
   }
   
