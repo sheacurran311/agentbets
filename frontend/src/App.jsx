@@ -1275,6 +1275,40 @@ function App() {
     }
   }
 
+  // Poll-based transaction confirmation to avoid WebSocket signatureSubscribe errors.
+  // connection.confirmTransaction() uses WebSocket subscriptions internally, which can
+  // enter an infinite retry loop when the RPC's WebSocket endpoint fails or rate-limits.
+  const pollTransactionConfirmation = useCallback(async (signature, timeoutMs = 60000) => {
+    const start = Date.now()
+    const pollIntervalMs = 2000
+
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const { value } = await connection.getSignatureStatuses([signature])
+        const status = value?.[0]
+
+        if (status) {
+          if (status.err) {
+            throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`)
+          }
+          // 'confirmed' or 'finalized' means success
+          if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
+            return status
+          }
+        }
+      } catch (err) {
+        // If it's our own thrown error (tx failed on-chain), re-throw
+        if (err.message?.startsWith('Transaction failed:')) throw err
+        // Otherwise it's a network blip — keep polling
+        console.warn('Polling signature status failed, retrying...', err.message)
+      }
+
+      await new Promise(r => setTimeout(r, pollIntervalMs))
+    }
+
+    throw new Error('Transaction confirmation timed out after 60s. Check your wallet or explorer.')
+  }, [connection])
+
   const placeBet = async (outcome) => {
     // If not connected, trigger wallet modal
     if (!connected || !publicKey) {
@@ -1350,11 +1384,9 @@ function App() {
 
         setTxStatus({ type: 'pending', message: 'Confirming on-chain wager...' })
 
-        await connection.confirmTransaction({
-          signature,
-          blockhash: wagerData.blockhash,
-          lastValidBlockHeight: wagerData.lastValidBlockHeight
-        })
+        // Use polling instead of WebSocket-based confirmTransaction to avoid
+        // infinite signatureSubscribe retry loops
+        await pollTransactionConfirmation(signature)
 
         setTxStatus({ type: 'success', message: `Bet placed! No SOL needed. ${signature.slice(0, 8)}...` })
       } else {
@@ -1397,11 +1429,9 @@ function App() {
 
         setTxStatus({ type: 'pending', message: 'Confirming on-chain wager...' })
 
-        await connection.confirmTransaction({
-          signature,
-          blockhash,
-          lastValidBlockHeight
-        })
+        // Use polling instead of WebSocket-based confirmTransaction to avoid
+        // infinite signatureSubscribe retry loops
+        await pollTransactionConfirmation(signature)
 
         setTxStatus({ type: 'success', message: `On-chain bet placed! ${signature.slice(0, 8)}...` })
       }

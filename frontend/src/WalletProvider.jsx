@@ -28,8 +28,16 @@ export function WalletProvider({ children }) {
     []
   )
 
+  // Disable WebSocket subscriptions to prevent infinite signatureSubscribe
+  // retry loops when the RPC's WebSocket endpoint fails or rate-limits.
+  // We use HTTP polling for tx confirmation instead.
+  const connectionConfig = useMemo(() => ({
+    commitment: 'confirmed',
+    wsEndpoint: false, // disable WebSocket entirely
+  }), [])
+
   return (
-    <ConnectionProvider endpoint={endpoint}>
+    <ConnectionProvider endpoint={endpoint} config={connectionConfig}>
       <SolanaWalletProvider wallets={wallets} autoConnect>
         <WalletModalProvider>
           {children}
