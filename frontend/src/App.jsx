@@ -250,14 +250,14 @@ const Icons2 = {
 // Market categories with modern icons
 const CATEGORIES = [
   { id: 'all', label: 'Active Markets', icon: Icons.grid },
-  { id: 'ended', label: 'Ended', icon: Icons.clock },
   { id: 'competition', label: 'Competitions', icon: Icons.trophy },
   { id: 'performance', label: 'Performance', icon: Icons.activity },
   { id: 'token', label: 'Token/Price', icon: Icons.dollarSign },
   { id: 'milestone', label: 'Milestones', icon: Icons.target },
   { id: 'head-to-head', label: 'Head-to-Head', icon: Icons.swords },
   { id: 'app', label: 'Apps/Platforms', icon: Icons2.app },
-  { id: 'general', label: 'General', icon: Icons.zap }
+  { id: 'general', label: 'General', icon: Icons.zap },
+  { id: 'ended', label: 'Ended', icon: Icons.clock }
 ]
 
 // Sort options
@@ -861,7 +861,7 @@ const formatDateTimeLocal = (dateTimeString) => {
 
 function App() {
   const navigate = useNavigate()
-  const { publicKey, sendTransaction, connected } = useWallet()
+  const { publicKey, sendTransaction, signTransaction, connected } = useWallet()
   const { connection } = useConnection()
   const { setVisible: setWalletModalVisible } = useWalletModal()
 
@@ -1334,11 +1334,19 @@ function App() {
 
       if (wagerData.gasless && wagerData.transaction) {
         // GASLESS: Transaction is pre-signed by API as feePayer
-        // User just signs their part and broadcasts
+        // User signs their part, then we broadcast manually (skip preflight
+        // since simulation fails on partially-signed transactions)
         const txBuffer = Buffer.from(wagerData.transaction, 'base64')
         const transaction = Transaction.from(txBuffer)
 
-        const signature = await sendTransaction(transaction, connection)
+        // Use signTransaction (not sendTransaction) to avoid wallet's built-in simulation
+        const signed = await signTransaction(transaction)
+
+        // Broadcast the fully-signed transaction, skipping preflight simulation
+        const signature = await connection.sendRawTransaction(signed.serialize(), {
+          skipPreflight: true,
+          preflightCommitment: 'confirmed'
+        })
 
         setTxStatus({ type: 'pending', message: 'Confirming on-chain wager...' })
 
@@ -2249,9 +2257,14 @@ function App() {
       {/* Bet Modal */}
       {selectedMarket && (
         <div style={styles.modalOverlay} onClick={() => { setSelectedMarket(null); setTxStatus(null); }}>
-          <div style={styles.modal} className="bet-modal" onClick={(e) => e.stopPropagation()}>
+          <div style={{
+            ...styles.modal,
+            ...(isMarketEnded(selectedMarket) ? { opacity: 0.5, filter: 'grayscale(60%)' } : {})
+          }} className="bet-modal" onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
-              <h2 style={{fontSize: '20px', fontWeight: '600', color: COLORS.textPrimary}}>Place Your Bet</h2>
+              <h2 style={{fontSize: '20px', fontWeight: '600', color: COLORS.textPrimary}}>
+                {isMarketEnded(selectedMarket) ? 'Market Ended' : 'Place Your Bet'}
+              </h2>
               <button style={styles.closeBtn} onClick={() => { setSelectedMarket(null); setTxStatus(null); }}>
                 {Icons.x}
               </button>
@@ -2518,7 +2531,7 @@ function App() {
                     min="1"
                     value={betAmount}
                     onChange={(e) => setBetAmount(e.target.value)}
-                    disabled={txStatus?.type === 'pending'}
+                    disabled={txStatus?.type === 'pending' || isMarketEnded(selectedMarket)}
                   />
                   {gaslessConfig?.enabled && betAmount && parseFloat(betAmount) > 0 && (
                     <div style={{
@@ -2545,11 +2558,11 @@ function App() {
                   <button
                     style={{
                       ...styles.betBtnYesLarge,
-                      opacity: txStatus?.type === 'pending' ? 0.6 : 1,
-                      cursor: txStatus?.type === 'pending' ? 'not-allowed' : 'pointer'
+                      opacity: (txStatus?.type === 'pending' || isMarketEnded(selectedMarket)) ? 0.6 : 1,
+                      cursor: (txStatus?.type === 'pending' || isMarketEnded(selectedMarket)) ? 'not-allowed' : 'pointer'
                     }}
                     onClick={() => placeBet('YES')}
-                    disabled={txStatus?.type === 'pending'}
+                    disabled={txStatus?.type === 'pending' || isMarketEnded(selectedMarket)}
                     onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.02)'}
                     onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
                   >
@@ -2559,11 +2572,11 @@ function App() {
                   <button
                     style={{
                       ...styles.betBtnNoLarge,
-                      opacity: txStatus?.type === 'pending' ? 0.6 : 1,
-                      cursor: txStatus?.type === 'pending' ? 'not-allowed' : 'pointer'
+                      opacity: (txStatus?.type === 'pending' || isMarketEnded(selectedMarket)) ? 0.6 : 1,
+                      cursor: (txStatus?.type === 'pending' || isMarketEnded(selectedMarket)) ? 'not-allowed' : 'pointer'
                     }}
                     onClick={() => placeBet('NO')}
-                    disabled={txStatus?.type === 'pending'}
+                    disabled={txStatus?.type === 'pending' || isMarketEnded(selectedMarket)}
                     onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.02)'}
                     onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
                   >
