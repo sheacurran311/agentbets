@@ -617,8 +617,8 @@ class MoltbookService {
       return true;
     }
 
-    // Quoted questions
-    if (/[""].+\?[""]/.test(text)) {
+    // Quoted questions (straight or smart/curly quotes from Twitter API)
+    if (/["\u201C\u201D].+\?["\u201C\u201D]/.test(text)) {
       return true;
     }
 

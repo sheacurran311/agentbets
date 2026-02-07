@@ -67,7 +67,7 @@ class BetParser {
       /(?:@\w+\s+)?Is\s+.+\?/i,
       /(?:@\w+\s+)?Are\s+.+\?/i,
       /(?:@\w+\s+)?How\s+many\s+.+\?/i,
-      /(?:@\w+\s+)?[""].+[""]/,    // Quoted question (with or without @mention)
+      /(?:@\w+\s+)?["\u201C\u201D].+["\u201C\u201D]/,    // Quoted question (with or without @mention, straight or smart quotes)
     ];
 
     if (naturalQuestionPatterns.some(pattern => pattern.test(text))) {
@@ -247,10 +247,10 @@ class BetParser {
 
       // Extract question (in quotes or after bet: or natural language with ?)
       // Patterns work with or without @handle prefix (supports Twitter and Moltbook)
-      const questionMatch = text.match(/[""]([^""]+)[""]/) ||
+      // Note: Twitter API returns smart/curly quotes (\u201C \u201D), so match all quote types
+      const questionMatch = text.match(/["\u201C\u201D]([^"\u201C\u201D]+)["\u201C\u201D]/) ||
                            text.match(/bet:\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
                            text.match(/prediction:\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
-                           text.match(/(?:create|new)\s+(?:bet|market)\s*:?\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
                            text.match(/(?:@\w+\s+)?(Will\s+.+\?)/i) ||
                            text.match(/(?:@\w+\s+)?(Who\s+.+\?)/i) ||
                            text.match(/(?:@\w+\s+)?(What\s+.+\?)/i) ||
@@ -258,7 +258,8 @@ class BetParser {
                            text.match(/(?:@\w+\s+)?(Does\s+.+\?)/i) ||
                            text.match(/(?:@\w+\s+)?(Is\s+.+\?)/i) ||
                            text.match(/(?:@\w+\s+)?(Are\s+.+\?)/i) ||
-                           text.match(/(?:@\w+\s+)?(How\s+many\s+.+\?)/i);
+                           text.match(/(?:@\w+\s+)?(How\s+many\s+.+\?)/i) ||
+                           text.match(/(?:create|new)\s+(?:bet|market)\s*:?\s*(.+?)(?:\n|ends:|resolution:|$)/i);
 
       if (questionMatch) {
         result.question = questionMatch[1].trim();

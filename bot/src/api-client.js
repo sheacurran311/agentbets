@@ -9,8 +9,19 @@ const axios = require('axios');
 
 class AgentBetsAPI {
   constructor() {
-    this.baseUrl = process.env.AGENTBETS_API_URL || 'http://localhost:3002/api';
+    let url = process.env.AGENTBETS_API_URL || 'http://localhost:3002/api';
+
+    // Ensure HTTPS for production URLs (HTTP→HTTPS redirects convert POST to GET, causing 404s)
+    if (url.startsWith('http://') && !url.includes('localhost') && !url.includes('127.0.0.1')) {
+      console.warn(`[API] WARNING: AGENTBETS_API_URL uses http:// — upgrading to https:// to prevent redirect issues`);
+      url = url.replace('http://', 'https://');
+    }
+
+    // Remove trailing slash
+    this.baseUrl = url.replace(/\/+$/, '');
     this.apiKey = process.env.AGENTBETS_API_KEY || null;
+
+    console.log(`[API] Base URL: ${this.baseUrl}`);
   }
 
   /**
@@ -35,15 +46,28 @@ class AgentBetsAPI {
   async createMarket(params) {
     try {
       // Use on-chain endpoint - bot creates PDA with its keypair
+      const body = {
+        question: params.question,
+        description: params.description || '',
+        category: params.category || 'general',
+        endDate: params.endDate,
+        creatorAgent: params.creatorAgent // For royalty tracking
+      };
+
+      // Pass optional fields if provided
+      if (params.resolutionSource) body.resolutionSource = params.resolutionSource;
+      if (params.threshold) body.threshold = params.threshold;
+      if (params.verificationMethod) body.verificationMethod = params.verificationMethod;
+      if (params.verificationUrl) body.verificationUrl = params.verificationUrl;
+      if (params.tags) body.tags = params.tags;
+      if (params.expectedUserCount) body.expectedUserCount = params.expectedUserCount;
+      if (params.proposerWallet) body.proposerWallet = params.proposerWallet;
+
+      console.log(`[API] Creating market: "${params.question?.slice(0, 60)}..." → ${this.baseUrl}/onchain/markets`);
+
       const response = await axios.post(
         `${this.baseUrl}/onchain/markets`,
-        {
-          question: params.question,
-          description: params.description || '',
-          category: params.category || 'general',
-          endDate: params.endDate,
-          creatorAgent: params.creatorAgent // For royalty tracking
-        },
+        body,
         {
           headers: this.getHeaders()
         }
@@ -52,7 +76,10 @@ class AgentBetsAPI {
       return response.data;
 
     } catch (error) {
-      console.error('[API] Error creating on-chain market:', error.response?.data || error.message);
+      const errorDetail = error.response?.data || error.message;
+      const status = error.response?.status;
+      console.error(`[API] Error creating on-chain market (HTTP ${status || 'N/A'}):`, 
+        typeof errorDetail === 'string' ? errorDetail.slice(0, 200) : errorDetail);
       return {
         success: false,
         error: error.response?.data?.error || error.message
