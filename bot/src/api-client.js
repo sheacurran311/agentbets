@@ -80,6 +80,29 @@ class AgentBetsAPI {
       const status = error.response?.status;
       console.error(`[API] Error creating on-chain market (HTTP ${status || 'N/A'}):`, 
         typeof errorDetail === 'string' ? errorDetail.slice(0, 200) : errorDetail);
+      
+      // Special handling for 409 Conflict (duplicate market)
+      if (status === 409 && error.response?.data?.existingMarket) {
+        return {
+          success: false,
+          isDuplicate: true,
+          existingMarket: error.response.data.existingMarket,
+          error: error.response.data.error || 'Market already exists'
+        };
+      }
+      
+      // Special handling for 429 Too Many Requests (rate limit)
+      if (status === 429) {
+        return {
+          success: false,
+          isRateLimited: true,
+          limit: error.response?.data?.limit,
+          used: error.response?.data?.used,
+          resetsAt: error.response?.data?.resetsAt,
+          error: error.response?.data?.error || 'Rate limit exceeded'
+        };
+      }
+      
       return {
         success: false,
         error: error.response?.data?.error || error.message

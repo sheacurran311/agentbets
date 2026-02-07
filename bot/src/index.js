@@ -51,11 +51,50 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const PENDING_RESOLUTIONS_FILE = path.join(DATA_DIR, 'pending-resolutions.json');
 const PROCESSED_TWEETS_FILE = path.join(DATA_DIR, 'processed-tweets.json');
 const PENDING_CONFIRMATIONS_FILE = path.join(DATA_DIR, 'pending-confirmations.json');
+const PROCESSED_MOLTBOOK_FILE = path.join(DATA_DIR, 'processed-moltbook.json');
+const PENDING_MOLTBOOK_CONFIRMATIONS_FILE = path.join(DATA_DIR, 'pending-moltbook-confirmations.json');
 
 // Pending market creation confirmations (awaiting date clarification from agents)
 // Key: tweetId (the bot's clarification reply tweet ID)
 // Value: { authorHandle, authorId, originalTweetId, betParams, suggestedDate, suggestedLabel, createdAt }
 let pendingConfirmations = new Map();
+
+// Track market creation threads for thread-aware betting
+// Key: conversation_id (original tweet ID) → { marketId, shortId, question, createdAt }
+// Allows agents to bet in same thread without specifying market ID
+const marketThreads = new Map();
+const MARKET_THREAD_FILE = path.join(DATA_DIR, 'market-threads.json');
+
+function loadMarketThreads() {
+  try {
+    if (fs.existsSync(MARKET_THREAD_FILE)) {
+      const data = JSON.parse(fs.readFileSync(MARKET_THREAD_FILE, 'utf8'));
+      const map = new Map(Object.entries(data));
+      // Expire entries older than 30 days
+      const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      for (const [key, val] of map) {
+        if (new Date(val.createdAt).getTime() < thirtyDaysAgo) {
+          map.delete(key);
+        }
+      }
+      console.log(`[Persistence] Loaded ${map.size} market threads from disk`);
+      return map;
+    }
+  } catch (error) {
+    console.error('[Persistence] Error loading market threads:', error.message);
+  }
+  return new Map();
+}
+
+function saveMarketThreads() {
+  try {
+    ensureDataDir();
+    const data = Object.fromEntries(marketThreads);
+    fs.writeFileSync(MARKET_THREAD_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('[Persistence] Error saving market threads:', error.message);
+  }
+}
 
 /**
  * Validate required environment variables
@@ -379,10 +418,81 @@ async function initializeStorage() {
   processedTweets = await loadProcessedTweets();
   pendingResolutions = await loadPendingResolutions();
   pendingConfirmations = loadPendingConfirmations();
+  processedMoltbookItems = loadProcessedMoltbookItems();
+  pendingMoltbookConfirmations = loadPendingMoltbookConfirmations();
+  
+  // Load market threads for thread-aware betting
+  const loadedThreads = loadMarketThreads();
+  for (const [k, v] of loadedThreads) {
+    marketThreads.set(k, v);
+  }
   
   console.log(`[Bot] Loaded ${processedTweets.size} processed tweets`);
   console.log(`[Bot] Loaded ${pendingResolutions.size} pending resolutions`);
-  console.log(`[Bot] Loaded ${pendingConfirmations.size} pending market confirmations`);
+  console.log(`[Bot] Loaded ${marketThreads.size} market threads`);
+  console.log(`[Bot] Loaded ${pendingConfirmations.size} pending Twitter market confirmations`);
+  console.log(`[Bot] Loaded ${processedMoltbookItems.size} processed Moltbook items`);
+  console.log(`[Bot] Loaded ${pendingMoltbookConfirmations.size} pending Moltbook confirmations`);
+
+  // SAFETY: On restart, check pending confirmations against existing markets
+  // If the market was already created (e.g., server crashed after creation but before cleanup),
+  // clear the pending confirmation to prevent the restart-duplicate bug
+  const hasPendingConfirmations = pendingConfirmations.size > 0 || pendingMoltbookConfirmations.size > 0;
+  if (hasPendingConfirmations) {
+    let existingQuestions = new Set();
+    
+    // Retry API call up to 3 times with exponential backoff
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const marketResponse = await agentbets.getMarkets();
+        const existingMarketsList = marketResponse?.markets || marketResponse || [];
+        existingQuestions = new Set(
+          existingMarketsList.map(m => (m.question || '').replace(/\s+/g, ' ').trim().toLowerCase())
+        );
+        console.log(`[Bot] Loaded ${existingQuestions.size} existing markets for safety check`);
+        break;
+      } catch (err) {
+        console.warn(`[Bot] Could not check existing markets (attempt ${attempt}/3): ${err.message}`);
+        if (attempt < 3) {
+          await new Promise(r => setTimeout(r, 2000 * attempt)); // Exponential backoff
+        }
+      }
+    }
+    
+    // Clear Twitter pending confirmations for already-created markets
+    let clearedTwitter = 0;
+    for (const [botReplyId, pending] of pendingConfirmations) {
+      if (pending.betParams?.question) {
+        const normalizedQ = pending.betParams.question.replace(/\s+/g, ' ').trim().toLowerCase();
+        if (existingQuestions.has(normalizedQ)) {
+          console.log(`[Bot] Clearing Twitter pending confirmation "${pending.betParams.question.slice(0, 50)}" — market already exists`);
+          pendingConfirmations.delete(botReplyId);
+          clearedTwitter++;
+        }
+      }
+    }
+    if (clearedTwitter > 0) {
+      savePendingConfirmations();
+      console.log(`[Bot] Cleared ${clearedTwitter} stale Twitter confirmations (markets already created)`);
+    }
+    
+    // Clear Moltbook pending confirmations for already-created markets
+    let clearedMoltbook = 0;
+    for (const [botCommentId, pending] of pendingMoltbookConfirmations) {
+      if (pending.betParams?.question) {
+        const normalizedQ = pending.betParams.question.replace(/\s+/g, ' ').trim().toLowerCase();
+        if (existingQuestions.has(normalizedQ)) {
+          console.log(`[Bot] Clearing Moltbook pending confirmation "${pending.betParams.question.slice(0, 50)}" — market already exists`);
+          pendingMoltbookConfirmations.delete(botCommentId);
+          clearedMoltbook++;
+        }
+      }
+    }
+    if (clearedMoltbook > 0) {
+      savePendingMoltbookConfirmations();
+      console.log(`[Bot] Cleared ${clearedMoltbook} stale Moltbook confirmations (markets already created)`);
+    }
+  }
 }
 
 /**
@@ -883,10 +993,11 @@ async function processMention(tweet) {
   const text = tweet.text;
 
   // Skip if already processed
-  if (processedTweets.has(tweetId)) {
+  if (await isTweetProcessed(tweetId)) {
     return;
   }
-  processedTweets.add(tweetId);
+  await markTweetProcessed(tweetId);
+  saveProcessedTweets(); // Persist immediately so restarts don't re-process
 
   console.log(`[Bot] Processing tweet ${tweetId} from ${authorId}`);
   console.log(`[Bot] Text: ${text}`);
@@ -922,9 +1033,9 @@ async function processMention(tweet) {
       return;
     }
 
-    // Check if this is a bot command (balance, withdraw, help, stats)
+    // Check if this is a bot command (balance, withdraw, help, stats, bet)
     if (parser.isCommand(text)) {
-      await processCommand(tweetId, authorHandle, text);
+      await processCommand(tweetId, authorHandle, text, tweet);
       return;
     }
 
@@ -1169,8 +1280,31 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
     }
 
     if (!market.success) {
-      console.log(`[Bot] Failed to create market: ${market.error}`);
       marketCreationInProgress.delete(normalizedQ);
+      
+      // Handle duplicate market (409) - this is a success case, not an error
+      if (market.isDuplicate && market.existingMarket) {
+        console.log(`[Bot] Market already exists: ${market.existingMarket.id}`);
+        const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+        recentlyCreatedMarkets.set(normalizedQ, { timestamp: Date.now(), marketId: market.existingMarket.id });
+        await twitter.reply(tweetId,
+          `@${authorHandle} This market already exists!\n\n` +
+          `View and bet here: ${baseUrl}/markets/${market.existingMarket.id}`
+        );
+        return;
+      }
+      
+      // Handle rate limit (429)
+      if (market.isRateLimited) {
+        console.warn(`[Bot] API rate limited: ${market.error}`);
+        const resetInfo = market.resetsAt ? ` Resets: ${new Date(market.resetsAt).toUTCString()}` : '';
+        await twitter.reply(tweetId,
+          `@${authorHandle} Rate limit reached (${market.used || '?'}/${market.limit || '?'} markets per day).${resetInfo}`
+        );
+        return;
+      }
+      
+      console.log(`[Bot] Failed to create market: ${market.error}`);
       await twitter.reply(tweetId,
         `@${authorHandle} Sorry, I couldn't create your bet: ${market.error}`
       );
@@ -1217,9 +1351,11 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
       year: 'numeric'
     });
 
-    // Build reply message
+    // Build reply message - include short market ID for easy reference
+    const shortId = market.market.id.split('-')[0]; // First segment of UUID (8 chars)
     let replyMessage = `New bet created by @${authorHandle}!\n\n` +
       `"${betParams.question}"\n\n` +
+      `ID: ${shortId}\n` +
       `Ends: ${endDateFormatted}\n` +
       `Resolution: ${betParams.resolution}\n\n`;
 
@@ -1233,6 +1369,17 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
 
     // Post reply with Blink URL for in-feed betting
     await twitter.reply(tweetId, replyMessage);
+
+    // Track this thread for thread-aware betting
+    // Agents can reply in this thread with "bet $1 YES" without specifying market ID
+    marketThreads.set(tweetId, {
+      marketId: market.market.id,
+      shortId,
+      question: betParams.question,
+      creatorHandle: authorHandle,
+      createdAt: new Date().toISOString()
+    });
+    saveMarketThreads();
 
     // Notify any agents mentioned in the market question
     await notifyMentionedAgents(market.market.id, betParams.question, authorHandle, marketUrl);
@@ -1269,9 +1416,9 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
 }
 
 /**
- * Process bot commands (balance, withdraw, help, stats)
+ * Process bot commands (balance, withdraw, help, stats, bet)
  */
-async function processCommand(tweetId, authorHandle, text) {
+async function processCommand(tweetId, authorHandle, text, tweet = null) {
   const command = parser.parseCommand(text);
   console.log(`[Bot] Processing command: ${command.command} from @${authorHandle}`);
 
@@ -1406,40 +1553,91 @@ async function processCommand(tweetId, authorHandle, text) {
 
       case 'bet': {
         // Agent wants to place a bet on an existing market
-        // Format: @AgentBetsBot bet 10 USDC YES on market abc123
+        // Formats:
+        //   @AgentBetsBot bet 1 USDC YES on market abc123
+        //   @AgentBetsBot bet $1 YES (in same thread as market)
+        //   @AgentBetsBot bet 1 USDC YES on abc123
         const betParams = command;
 
-        if (!betParams.valid) {
+        // Check basic validation (amount, outcome)
+        if (!betParams.outcome) {
           await twitter.reply(tweetId,
-            `@${authorHandle} ${betParams.error}\n\n` +
-            `Format: @AgentBetsBot bet [amount] USDC [YES/NO] on market [ID]\n\n` +
-            `Example: @AgentBetsBot bet 10 USDC YES on market abc123`
+            `@${authorHandle} Please specify YES or NO.\n\n` +
+            `Format: @AgentBetsBot bet [amount] USDC [YES/NO]\n\n` +
+            `Example: @AgentBetsBot bet 1 USDC YES`
+          );
+          break;
+        }
+        if (!betParams.amount) {
+          await twitter.reply(tweetId,
+            `@${authorHandle} Please specify an amount.\n\n` +
+            `Format: @AgentBetsBot bet [amount] USDC [YES/NO]\n\n` +
+            `Example: @AgentBetsBot bet 1 USDC YES`
           );
           break;
         }
 
-        // Find market by ID or question
+        // Find market by ID, short ID, or thread context
         let marketId = betParams.marketId;
-        if (!marketId && betParams.marketQuestion) {
-          // Search for market by question (would need API endpoint)
+        let foundVia = 'explicit ID';
+
+        // Strategy 1: Check if they provided a short ID (8 chars) and expand it
+        if (marketId && marketId.length === 8) {
+          // Search for full market ID by short ID prefix
+          try {
+            const marketsResponse = await agentbets.getMarkets({ status: 'active' });
+            const marketsList = marketsResponse?.markets || marketsResponse || [];
+            const matchingMarket = marketsList.find(m => m.id.startsWith(marketId));
+            if (matchingMarket) {
+              marketId = matchingMarket.id;
+              foundVia = `short ID (${betParams.marketId})`;
+            }
+          } catch (err) {
+            console.warn(`[Bot] Could not expand short ID: ${err.message}`);
+          }
+        }
+
+        // Strategy 2: Check thread context if no market ID provided
+        if (!marketId && tweet) {
+          const replyToId = getReplyToTweetId(tweet);
+          const conversationId = tweet.conversation_id;
+
+          // Check if replying to a market creation tweet
+          if (replyToId && marketThreads.has(replyToId)) {
+            const threadInfo = marketThreads.get(replyToId);
+            marketId = threadInfo.marketId;
+            foundVia = 'thread context (reply to market)';
+          }
+          // Check if in same conversation as a market creation
+          else if (conversationId && marketThreads.has(conversationId)) {
+            const threadInfo = marketThreads.get(conversationId);
+            marketId = threadInfo.marketId;
+            foundVia = 'thread context (same conversation)';
+          }
+        }
+
+        // Strategy 3: Still no market ID? Ask for it
+        if (!marketId) {
           await twitter.reply(tweetId,
-            `@${authorHandle} Please specify the market ID.\n\n` +
-            `Format: @AgentBetsBot bet 10 USDC YES on market [ID]\n\n` +
+            `@${authorHandle} Which market do you want to bet on?\n\n` +
+            `• Reply in the same thread as the market, OR\n` +
+            `• Specify: bet 1 USDC YES on [ID]\n\n` +
             `Find market IDs at agentbets.gg/markets`
           );
           break;
         }
 
+        console.log(`[Bot] Bet command: ${betParams.amount} USDC ${betParams.outcome} on ${marketId} (found via ${foundVia})`);
+
         // Reply with x402 payment instructions
         const baseUrl = process.env.AGENTBETS_API_URL?.replace('/api', '') || 'https://agentbets.gg';
+        const shortMarketId = marketId.split('-')[0];
 
         await twitter.reply(tweetId,
-          `@${authorHandle} To place this bet programmatically:\n\n` +
+          `@${authorHandle} To bet ${betParams.amount} USDC ${betParams.outcome} on market ${shortMarketId}:\n\n` +
           `POST ${baseUrl}/api/agent/bet/${marketId}\n` +
-          `Body: { outcome: "${betParams.outcome}", amount: ${betParams.amount}, agentHandle: "${authorHandle}" }\n\n` +
-          `Use x402 payment (USDC on Base).\n` +
-          `Docs: agentbets.gg/docs/agent-api\n\n` +
-          `Or bet via Blink: ${baseUrl}/api/actions/bet/${marketId}`
+          `Body: { outcome: "${betParams.outcome}", amount: ${betParams.amount} }\n\n` +
+          `Or use Blink: ${baseUrl}/api/actions/bet/${marketId}`
         );
         break;
       }
@@ -1456,10 +1654,80 @@ async function processCommand(tweetId, authorHandle, text) {
 }
 
 // Track processed Moltbook post/comment IDs to avoid duplicates
-const processedMoltbookItems = new Set();
+// Now persisted to disk to survive restarts
+let processedMoltbookItems = new Set();
 
 // Track pending Moltbook date confirmations (keyed by bot comment ID)
-const pendingMoltbookConfirmations = new Map();
+// Now persisted to disk to survive restarts
+let pendingMoltbookConfirmations = new Map();
+
+/**
+ * Load processed Moltbook items from disk
+ */
+function loadProcessedMoltbookItems() {
+  try {
+    if (fs.existsSync(PROCESSED_MOLTBOOK_FILE)) {
+      const items = JSON.parse(fs.readFileSync(PROCESSED_MOLTBOOK_FILE, 'utf8'));
+      // Keep last 5000 items to prevent unbounded growth
+      const set = new Set(items.slice(-5000));
+      console.log(`[Persistence] Loaded ${set.size} processed Moltbook items from disk`);
+      return set;
+    }
+  } catch (error) {
+    console.error('[Persistence] Error loading Moltbook items from disk:', error.message);
+  }
+  return new Set();
+}
+
+/**
+ * Save processed Moltbook items to disk
+ */
+function saveProcessedMoltbookItems() {
+  try {
+    ensureDataDir();
+    const items = Array.from(processedMoltbookItems).slice(-5000);
+    fs.writeFileSync(PROCESSED_MOLTBOOK_FILE, JSON.stringify(items));
+  } catch (error) {
+    console.error('[Persistence] Error saving Moltbook items to disk:', error.message);
+  }
+}
+
+/**
+ * Load pending Moltbook confirmations from disk
+ */
+function loadPendingMoltbookConfirmations() {
+  try {
+    if (fs.existsSync(PENDING_MOLTBOOK_CONFIRMATIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PENDING_MOLTBOOK_CONFIRMATIONS_FILE, 'utf8'));
+      const map = new Map(Object.entries(data));
+      // Expire confirmations older than 24 hours
+      const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+      for (const [key, val] of map) {
+        if (new Date(val.createdAt).getTime() < oneDayAgo) {
+          map.delete(key);
+        }
+      }
+      console.log(`[Persistence] Loaded ${map.size} pending Moltbook confirmations from disk`);
+      return map;
+    }
+  } catch (error) {
+    console.error('[Persistence] Error loading pending Moltbook confirmations from disk:', error.message);
+  }
+  return new Map();
+}
+
+/**
+ * Save pending Moltbook confirmations to disk
+ */
+function savePendingMoltbookConfirmations() {
+  try {
+    ensureDataDir();
+    const data = Object.fromEntries(pendingMoltbookConfirmations);
+    fs.writeFileSync(PENDING_MOLTBOOK_CONFIRMATIONS_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('[Persistence] Error saving pending Moltbook confirmations to disk:', error.message);
+  }
+}
 
 /**
  * Check Moltbook for new bet requests
@@ -1495,6 +1763,7 @@ async function checkMoltbookRequests() {
       const itemKey = `${request.type}_${request.id}`;
       if (processedMoltbookItems.has(itemKey)) continue;
       processedMoltbookItems.add(itemKey);
+      saveProcessedMoltbookItems(); // Persist immediately to survive restarts
 
       console.log(`[Moltbook] Processing ${request.type} from ${request.author}: ${request.text.slice(0, 80)}...`);
 
@@ -1550,6 +1819,7 @@ async function checkMoltbookRequests() {
                   suggestedLabel: betParams.suggestedDateLabel || null,
                   createdAt: new Date().toISOString()
                 });
+                savePendingMoltbookConfirmations(); // Persist immediately
                 console.log(`[Moltbook] Awaiting date confirmation from ${request.author} (comment ${commentId})`);
               }
             }
@@ -1597,12 +1867,15 @@ async function checkMoltbookConfirmationReplies() {
 
   // Expire old confirmations (older than 24 hours)
   const now = Date.now();
+  let expiredCount = 0;
   for (const [commentId, pending] of pendingMoltbookConfirmations) {
     if (now - new Date(pending.createdAt).getTime() > 24 * 60 * 60 * 1000) {
       console.log(`[Moltbook] Expiring stale confirmation from ${pending.authorHandle} (${commentId})`);
       pendingMoltbookConfirmations.delete(commentId);
+      expiredCount++;
     }
   }
+  if (expiredCount > 0) savePendingMoltbookConfirmations();
 
   for (const [botCommentId, pending] of pendingMoltbookConfirmations) {
     try {
@@ -1634,6 +1907,7 @@ async function checkMoltbookConfirmationReplies() {
 
         // This looks like a confirmation reply — process it
         processedMoltbookItems.add(commentKey);
+        saveProcessedMoltbookItems(); // Persist immediately to survive restarts
         console.log(`[Moltbook] Processing confirmation reply from ${commentAuthor}: "${commentText.slice(0, 60)}"`);
 
         const confirmation = parser.parseConfirmationReply(commentText);
@@ -1641,6 +1915,7 @@ async function checkMoltbookConfirmationReplies() {
         if (confirmation.action === 'cancel') {
           console.log(`[Moltbook] ${commentAuthor} cancelled market creation`);
           pendingMoltbookConfirmations.delete(botCommentId);
+          savePendingMoltbookConfirmations();
           await moltbook.comment(pending.postId, `Market creation cancelled.`, commentId);
           break;
         }
@@ -1657,6 +1932,7 @@ async function checkMoltbookConfirmationReplies() {
             pending.betParams.initialCurrency = confirmation.bet.currency;
           }
           pendingMoltbookConfirmations.delete(botCommentId);
+          savePendingMoltbookConfirmations(); // Persist BEFORE creating market
           const request = { type: pending.originalItemType, id: pending.originalItemId, postId: pending.postId, author: pending.authorHandle, text: '', platform: 'moltbook' };
           await createMarketFromMoltbook(request, pending.betParams);
           break;
@@ -1675,6 +1951,7 @@ async function checkMoltbookConfirmationReplies() {
               pending.betParams.initialCurrency = confirmation.bet.currency;
             }
             pendingMoltbookConfirmations.delete(botCommentId);
+            savePendingMoltbookConfirmations(); // Persist BEFORE creating market
             const request = { type: pending.originalItemType, id: pending.originalItemId, postId: pending.postId, author: pending.authorHandle, text: '', platform: 'moltbook' };
             await createMarketFromMoltbook(request, pending.betParams);
           } else {
@@ -1699,6 +1976,7 @@ async function checkMoltbookConfirmationReplies() {
               pending.suggestedLabel = confirmation.suggestedLabel;
               pendingMoltbookConfirmations.delete(botCommentId);
               pendingMoltbookConfirmations.set(newCommentId, pending);
+              savePendingMoltbookConfirmations();
             }
           }
           break;
@@ -1801,6 +2079,32 @@ async function createMarketFromMoltbook(request, betParams) {
       creatorAgent: request.author,
       tags: ['moltbook-created', request.author, betParams.resolution]
     });
+
+    // Handle duplicate market (409) - treat as success
+    if (market.isDuplicate && market.existingMarket) {
+      console.log(`[Moltbook] Market already exists: ${market.existingMarket.id}`);
+      const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+      recentlyCreatedMarkets.set(normalizedQ, { timestamp: Date.now(), marketId: market.existingMarket.id });
+      marketCreationInProgress.delete(normalizedQ);
+      await moltbook.replyToRequest(request, {
+        success: true,
+        market: market.existingMarket,
+        message: `This market already exists! View it here: ${baseUrl}/markets/${market.existingMarket.id}`
+      });
+      return;
+    }
+    
+    // Handle rate limit (429)
+    if (market.isRateLimited) {
+      console.warn(`[Moltbook] API rate limited: ${market.error}`);
+      marketCreationInProgress.delete(normalizedQ);
+      const resetInfo = market.resetsAt ? ` Resets: ${new Date(market.resetsAt).toUTCString()}` : '';
+      await moltbook.replyToRequest(request, {
+        success: false,
+        error: `Rate limit reached (${market.used || '?'}/${market.limit || '?'} markets per day).${resetInfo}`
+      });
+      return;
+    }
 
     if (market.success) {
       console.log(`[Moltbook] Market created: ${market.market.id} by ${request.author}`);

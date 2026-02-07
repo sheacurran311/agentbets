@@ -221,6 +221,7 @@ class PollFunService {
         const needed = ((MIN_BALANCE_LAMPORTS - balance) / 1e9).toFixed(4);
         console.error(`[PollFun] Insufficient SOL! Balance: ${balanceSOL} SOL, need at least 0.05 SOL per market`);
         console.error(`[PollFun] Send at least ${needed} SOL to ${creator.publicKey.toBase58()}`);
+        this._creationLock = false; // Release lock on early return
         return {
           success: false,
           error: `Insufficient SOL in creator wallet. Balance: ${balanceSOL} SOL, need ~0.05 SOL. Send SOL to ${creator.publicKey.toBase58()}`
@@ -232,6 +233,7 @@ class PollFunService {
       const userResult = await this.ensureCreatorUserExists();
       if (!userResult.success) {
         console.error('[PollFun] Failed to ensure creator user account:', userResult.error);
+        this._creationLock = false; // Release lock on early return
         return { success: false, error: `Failed to initialize creator account: ${userResult.error}` };
       }
 
