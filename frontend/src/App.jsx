@@ -2551,6 +2551,62 @@ function App() {
                       </span>
                     </div>
                   )}
+
+                  {/* Potential Payout Estimate */}
+                  {betAmount && parseFloat(betAmount) > 0 && (() => {
+                    const amt = parseFloat(betAmount)
+                    const yesPool = (selectedMarket.yesPool || 0) / 1e6 // Convert from USDC micro-units
+                    const noPool = (selectedMarket.noPool || 0) / 1e6
+                    const totalPool = yesPool + noPool + amt
+                    const PROTOCOL_FEE = 0.04 // 3% Poll.fun + 1% platform
+
+                    // If user bets YES
+                    const newYesPool = yesPool + amt
+                    const yesGross = (amt / newYesPool) * (totalPool)
+                    const yesPayout = yesGross * (1 - PROTOCOL_FEE)
+                    const yesMultiplier = yesPayout / amt
+
+                    // If user bets NO
+                    const newNoPool = noPool + amt
+                    const noGross = (amt / newNoPool) * (totalPool)
+                    const noPayout = noGross * (1 - PROTOCOL_FEE)
+                    const noMultiplier = noPayout / amt
+
+                    return (
+                      <div style={{
+                        padding: '10px 12px',
+                        background: `${COLORS.border}30`,
+                        borderRadius: '8px',
+                        border: `1px solid ${COLORS.border}`,
+                        marginTop: '8px',
+                        fontSize: '12px',
+                        fontFamily: 'JetBrains Mono, monospace'
+                      }}>
+                        <div style={{color: COLORS.textMuted, fontSize: '10px', fontWeight: '600', marginBottom: '6px', letterSpacing: '0.5px'}}>
+                          POTENTIAL PAYOUT
+                        </div>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px'}}>
+                          <span style={{color: COLORS.success}}>
+                            If YES wins
+                          </span>
+                          <span style={{color: COLORS.success, fontWeight: '700'}}>
+                            {yesPayout.toFixed(2)} USDC ({yesMultiplier.toFixed(2)}x)
+                          </span>
+                        </div>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                          <span style={{color: COLORS.error}}>
+                            If NO wins
+                          </span>
+                          <span style={{color: COLORS.error, fontWeight: '700'}}>
+                            {noPayout.toFixed(2)} USDC ({noMultiplier.toFixed(2)}x)
+                          </span>
+                        </div>
+                        <div style={{color: COLORS.textMuted, fontSize: '9px', marginTop: '6px', opacity: 0.7}}>
+                          Estimates based on current pool. Fees: 3% protocol + 1% platform.
+                        </div>
+                      </div>
+                    )
+                  })()}
                 </div>
 
                 {/* Large YES/NO Buttons */}
