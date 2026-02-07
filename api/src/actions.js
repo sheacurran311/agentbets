@@ -102,9 +102,9 @@ router.get('/bet/:marketId', async (req, res) => {
     const noPool = onChainData?.success ? onChainData.noPool : (market.noPool || 0) / 1e6;
     const totalPool = yesPool + noPool;
 
-    // Calculate odds
-    const yesOdds = totalPool > 0 ? noPool / totalPool : 0.5;
-    const noOdds = totalPool > 0 ? yesPool / totalPool : 0.5;
+    // Calculate odds (probability-based)
+    const yesOdds = totalPool > 0 ? yesPool / totalPool : 0.5;
+    const noOdds = totalPool > 0 ? noPool / totalPool : 0.5;
     const yesPercent = (yesOdds * 100).toFixed(0);
     const noPercent = (noOdds * 100).toFixed(0);
 
@@ -435,11 +435,11 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
       market.totalVolume = (market.totalVolume || 0) + amountUsdc;
       market.totalBets = (market.totalBets || 0) + 1;
 
-      // Recalculate odds
+      // Recalculate odds (probability-based)
       const totalPool = (market.yesPool || 0) + (market.noPool || 0);
       if (totalPool > 0) {
-        market.yesOdds = (market.noPool || 0) / totalPool;
-        market.noOdds = (market.yesPool || 0) / totalPool;
+        market.yesOdds = (market.yesPool || 0) / totalPool;
+        market.noOdds = (market.noPool || 0) / totalPool;
       }
 
       req.app.locals.markets.set(marketId, market);

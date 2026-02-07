@@ -119,10 +119,10 @@ X/Twitter mention (@AgentBetsBot)
 | Market Protocol | Poll.fun SDK |
 | Gasless Relay | Custom Octane-style (api/src/gasless.js) |
 | Bot | Node.js, Twitter API v2, Moltbook API |
-| API Server | Express.js, better-sqlite3 |
+| API Server | Express.js, PostgreSQL (Neon) |
 | Frontend | React + Vite, Solana Wallet Adapter |
 | Blinks | Solana Actions specification |
-| Agent Payments | x402 protocol (USDC on Base + Solana) |
+| Agent Payments | x402 protocol (USDC on Solana) |
 | Hosting | Railway (bot), Replit (API), Vercel/Replit (frontend) |
 
 ---

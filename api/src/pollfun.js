@@ -491,8 +491,8 @@ class PollFunService {
         totalPool: totalOi / 1e6, // Convert from USDC micro-units
         yesPool: yesPool / 1e6,
         noPool: noPool / 1e6,
-        yesOdds: totalOi > 0 ? noPool / totalOi : 0.5,
-        noOdds: totalOi > 0 ? yesPool / totalOi : 0.5,
+        yesOdds: totalOi > 0 ? yesPool / totalOi : 0.5,
+        noOdds: totalOi > 0 ? noPool / totalOi : 0.5,
         resolvedOutcome: safeEnumToString(betAccount.resolvedOutcome),
         wagers: betAccount.wagers?.map(w => ({
           user: w.user?.toBase58?.() || String(w.user),

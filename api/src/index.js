@@ -1612,8 +1612,8 @@ app.post('/api/bets', betLimiter, async (req, res) => {
     // Recalculate odds
     const totalPool = market.yesPool + market.noPool;
     if (totalPool > 0) {
-      market.yesOdds = market.noPool / totalPool; // Payout ratio for YES
-      market.noOdds = market.yesPool / totalPool; // Payout ratio for NO
+      market.yesOdds = market.yesPool / totalPool; // Probability of YES
+      market.noOdds = market.noPool / totalPool; // Probability of NO
     }
 
     await markets.set(marketId, market);
@@ -3636,10 +3636,17 @@ app.get('/api/stats', async (req, res) => {
     const allMarkets = await markets.values();
     const allBets = await bets.values();
 
-    // Calculate USDC volume from bets that have amountUSDC field
-    const totalVolumeUSDC = allBets
+    // Calculate USDC volume from market totalVolume (authoritative, includes on-chain synced data)
+    const totalVolumeFromMarkets = allMarkets
+      .reduce((sum, m) => sum + (m.totalVolume || 0), 0) / 1e6;
+
+    // Also check bets table as fallback
+    const totalVolumeFromBets = allBets
       .filter(b => b.amountUSDC)
       .reduce((sum, b) => sum + (b.amountUSDC || 0), 0);
+
+    // Use whichever is larger (markets totalVolume includes on-chain synced data)
+    const totalVolumeUSDC = Math.max(totalVolumeFromMarkets, totalVolumeFromBets);
     
     const activeMarkets = allMarkets.filter(m => m.status === 'active').length;
     const resolvedMarkets = allMarkets.filter(m => m.status === 'resolved').length;
@@ -3843,11 +3850,11 @@ app.post('/api/agent/bet/:marketId',
         market.noPool = (market.noPool || 0) + lamportsEquiv;
       }
 
-      // Recalculate odds (AMM-style)
+      // Recalculate odds (probability-based)
       const totalPool = market.yesPool + market.noPool;
       if (totalPool > 0) {
-        market.yesOdds = market.noPool / totalPool;
-        market.noOdds = market.yesPool / totalPool;
+        market.yesOdds = market.yesPool / totalPool;
+        market.noOdds = market.noPool / totalPool;
       }
 
       market.totalVolume = (market.totalVolume || 0) + lamportsEquiv;
@@ -4041,11 +4048,11 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
         market.noPool = lamportsEquiv;
       }
 
-      // Recalculate odds
+      // Recalculate odds (probability-based)
       const totalPool = market.yesPool + market.noPool;
       if (totalPool > 0) {
-        market.yesOdds = market.noPool / totalPool;
-        market.noOdds = market.yesPool / totalPool;
+        market.yesOdds = market.yesPool / totalPool;
+        market.noOdds = market.noPool / totalPool;
       }
 
       market.totalVolume = lamportsEquiv;
@@ -4136,8 +4143,8 @@ app.get('/api/agent/bet/:marketId/price', async (req, res) => {
       outcome: betOutcome,
       amountUSDC,
       potentialWinnings: betOutcome === 'YES'
-        ? amountUSDC / market.yesOdds
-        : amountUSDC / market.noOdds
+        ? (market.yesOdds > 0 ? amountUSDC / market.yesOdds : amountUSDC * 2)
+        : (market.noOdds > 0 ? amountUSDC / market.noOdds : amountUSDC * 2)
     },
     x402: {
       payTo: x402.getPayToAddress(),
