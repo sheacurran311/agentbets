@@ -1339,7 +1339,8 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
     scheduleMarketResolution(market.market.id, marketData);
 
     // Reply with success - include Blink URL for direct betting
-    const baseUrl = process.env.AGENTBETS_API_URL?.replace('/api', '') || 'https://agentbets.gg';
+    // IMPORTANT: Use AGENTBETS_URL (public frontend URL), NOT AGENTBETS_API_URL
+    const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
     const marketUrl = `${baseUrl}/markets/${market.market.id}`;
     const actionUrl = `${baseUrl}/api/actions/bet/${market.market.id}`;
     const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
@@ -1630,7 +1631,8 @@ async function processCommand(tweetId, authorHandle, text, tweet = null) {
         console.log(`[Bot] Bet command: ${betParams.amount} USDC ${betParams.outcome} on ${marketId} (found via ${foundVia})`);
 
         // Reply with x402 payment instructions
-        const baseUrl = process.env.AGENTBETS_API_URL?.replace('/api', '') || 'https://agentbets.gg';
+        // IMPORTANT: Use AGENTBETS_URL (public frontend URL), NOT AGENTBETS_API_URL
+        const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
         const shortMarketId = marketId.split('-')[0];
 
         await twitter.reply(tweetId,
