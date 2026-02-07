@@ -17,23 +17,31 @@ const { execSync, exec } = require('child_process');
 
 class TwitterService {
   constructor() {
-    // Initialize client with credentials
-    if (process.env.TWITTER_BEARER_TOKEN) {
-      this.readClient = new TwitterApi(process.env.TWITTER_BEARER_TOKEN);
-    }
-
-    // For posting, we need OAuth 1.0a credentials
+    // Initialize OAuth 1.0a client (user context - supports BOTH reads and writes)
+    // Under X's new pay-per-use model, user context auth is the primary auth method
+    // that's tied to billing. Bearer token (app-only) may not be authorized for all endpoints.
     if (process.env.TWITTER_API_KEY &&
         process.env.TWITTER_API_SECRET &&
         process.env.TWITTER_ACCESS_TOKEN &&
         process.env.TWITTER_ACCESS_SECRET) {
 
-      this.writeClient = new TwitterApi({
+      this.oauthClient = new TwitterApi({
         appKey: process.env.TWITTER_API_KEY,
         appSecret: process.env.TWITTER_API_SECRET,
         accessToken: process.env.TWITTER_ACCESS_TOKEN,
         accessSecret: process.env.TWITTER_ACCESS_SECRET,
       });
+
+      // Use OAuth 1.0a as primary for BOTH reads and writes
+      this.readClient = this.oauthClient;
+      this.writeClient = this.oauthClient;
+      console.log('[Twitter] Using OAuth 1.0a (user context) for reads and writes');
+    }
+
+    // Fallback: Bearer token for read-only if OAuth 1.0a not available
+    if (!this.readClient && process.env.TWITTER_BEARER_TOKEN) {
+      this.readClient = new TwitterApi(process.env.TWITTER_BEARER_TOKEN);
+      console.log('[Twitter] Using Bearer Token (app-only) for reads - some endpoints may be restricted');
     }
 
     // Track last seen mention for pagination
@@ -53,6 +61,10 @@ class TwitterService {
     if (this.useInfsh) {
       console.log('[Twitter] Using inference.sh CLI as primary posting method');
     }
+
+    // Log auth status
+    const authStatus = this.isConfigured();
+    console.log(`[Twitter] Auth status - Read: ${authStatus.read}, Write: ${authStatus.write}, OAuth: ${!!this.oauthClient}, infsh: ${authStatus.infsh}`);
   }
 
   /**
@@ -75,9 +87,18 @@ class TwitterService {
       throw new Error('Twitter read client not configured');
     }
 
-    const me = await this.readClient.v2.me();
-    this.botUserId = me.data.id;
-    return me.data;
+    try {
+      const me = await this.readClient.v2.me();
+      this.botUserId = me.data.id;
+      console.log(`[Twitter] Authenticated as user ID: ${this.botUserId}`);
+      return me.data;
+    } catch (error) {
+      console.error('[Twitter] Error in getMe():', error.message);
+      if (error.code === 403) {
+        console.error('[Twitter] 403 Forbidden on getMe() - check your OAuth credentials and X Developer Console settings');
+      }
+      throw error;
+    }
   }
 
   /**
@@ -122,6 +143,14 @@ class TwitterService {
 
     } catch (error) {
       console.error('[Twitter] Error getting mentions:', error.message);
+      if (error.code === 403 || error.message?.includes('403')) {
+        console.error('[Twitter] 403 on mentions - this may indicate:');
+        console.error('[Twitter]   1. OAuth credentials not properly configured in X Developer Console');
+        console.error('[Twitter]   2. App permissions need to be updated (requires Read access)');
+        console.error('[Twitter]   3. Callback URI mismatch in Developer Console settings');
+        console.error('[Twitter]   4. Bearer token being used instead of OAuth user context');
+        console.error(`[Twitter]   Current auth: ${this.oauthClient ? 'OAuth 1.0a' : 'Bearer Token only'}`);
+      }
       return [];
     }
   }
@@ -305,6 +334,7 @@ class TwitterService {
     return {
       read: !!this.readClient,
       write: !!this.writeClient,
+      oauth: !!this.oauthClient,
       infsh: this.infshAvailable
     };
   }
