@@ -1702,7 +1702,7 @@ app.post('/api/positions/claim', async (req, res) => {
     }
 
     const position = positions.get(positionKey);
-    const market = markets.get(marketId);
+    const market = await markets.get(marketId);
 
     if (!market || market.status !== 'resolved') {
       return res.status(400).json({ error: 'Market not resolved yet' });
@@ -1813,7 +1813,7 @@ app.get('/api/oracle/moltbook/stats', async (req, res) => {
  * GET /api/oracle/:marketId/evaluate
  */
 app.get('/api/oracle/:marketId/evaluate', async (req, res) => {
-  const market = markets.get(req.params.marketId);
+  const market = await markets.get(req.params.marketId);
 
   if (!market) {
     return res.status(404).json({ error: 'Market not found' });
@@ -1834,7 +1834,7 @@ app.get('/api/oracle/:marketId/evaluate', async (req, res) => {
  * GET /api/oracle/:marketId
  */
 app.get('/api/oracle/:marketId', async (req, res) => {
-  const market = markets.get(req.params.marketId);
+  const market = await markets.get(req.params.marketId);
 
   if (!market) {
     return res.status(404).json({ error: 'Market not found' });
@@ -2038,7 +2038,7 @@ app.post('/api/escrow/payout', async (req, res) => {
   try {
     const { marketId } = req.body;
 
-    const market = markets.get(marketId);
+    const market = await markets.get(marketId);
     if (!market) {
       return res.status(404).json({ error: 'Market not found' });
     }
@@ -2351,7 +2351,7 @@ app.post('/api/onchain/wager', async (req, res) => {
     let market = null;
 
     if (marketId) {
-      market = markets.get(marketId);
+      market = await markets.get(marketId);
       if (!market) {
         return res.status(404).json({ error: 'Market not found' });
       }
@@ -2636,7 +2636,7 @@ app.post('/api/onchain/resolve', async (req, res) => {
     let market = null;
 
     if (marketId) {
-      market = markets.get(marketId);
+      market = await markets.get(marketId);
       if (!market) {
         return res.status(404).json({ error: 'Market not found' });
       }
@@ -2695,7 +2695,7 @@ app.post('/api/onchain/settle', async (req, res) => {
     let pdaAddress = betPda;
 
     if (marketId) {
-      const market = markets.get(marketId);
+      const market = await markets.get(marketId);
       if (!market) {
         return res.status(404).json({ error: 'Market not found' });
       }
@@ -2751,7 +2751,7 @@ app.post('/api/onchain/settle-all', async (req, res) => {
     let market = null;
 
     if (marketId) {
-      market = markets.get(marketId);
+      market = await markets.get(marketId);
       if (!market) {
         return res.status(404).json({ error: 'Market not found' });
       }
@@ -3133,8 +3133,8 @@ app.get('/api/royalties/:agentHandle', (req, res) => {
  * Get Blink URL for a market
  * GET /api/blink/:marketId
  */
-app.get('/api/blink/:marketId', (req, res) => {
-  const market = markets.get(req.params.marketId);
+app.get('/api/blink/:marketId', async (req, res) => {
+  const market = await markets.get(req.params.marketId);
 
   if (!market) {
     return res.status(404).json({ error: 'Market not found' });
@@ -3669,334 +3669,9 @@ app.get('/api', (req, res) => {
   });
 });
 
-// Initialize test markets on startup
-function initializeTestMarkets() {
-  const testMarkets = [
-    {
-      id: uuidv4(),
-      question: "Will Butters finish top 3 in Colosseum Solana Agent Hackathon?",
-      description: "Resolution based on official Colosseum hackathon results announcement.",
-      category: "competition",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "colosseum",
-      verificationUrl: "https://www.colosseum.org/hackathon",
-      verificationMethod: "Official Colosseum announcement of hackathon winners",
-      threshold: "Top 3 placement",
-      tags: ["hackathon", "butters", "colosseum"],
-      endDate: new Date("2026-02-12T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 150000000,   // 150 USDC (6 decimals)
-      noPool: 100000000,    // 100 USDC
-      totalVolume: 250000000, // 250 USDC total
-      totalBets: 5,
-      yesOdds: 0.4,
-      noOdds: 0.6
-    },
-    {
-      id: uuidv4(),
-      question: "Will CrabKarmaBot reach 75K Karma by Feb 10, 2026?",
-      description: "Verified via CrabKarmaBot's Moltbook profile karma count at end date.",
-      category: "milestone",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "moltbook",
-      verificationUrl: "https://www.moltbook.com/u/crabkarmabot",
-      verificationMethod: "Check karma count on Moltbook profile page at resolution time",
-      threshold: "75,000 karma",
-      tags: ["moltbook", "karma", "crabkarmabot"],
-      endDate: new Date("2026-02-10T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    {
-      id: uuidv4(),
-      question: "Will Moltbook cross 2M agents by Feb 12, 2026?",
-      description: "Verified via Moltbook homepage agent counter.",
-      category: "app",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "moltbook",
-      verificationUrl: "https://www.moltbook.com/",
-      verificationMethod: "Check total agent count displayed on Moltbook homepage",
-      threshold: "2,000,000 agents",
-      tags: ["moltbook", "agents", "growth"],
-      endDate: new Date("2026-02-12T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    {
-      id: uuidv4(),
-      question: "How many Submolts on Feb 16, 2026? Over/Under 25,000",
-      description: "Bet YES for Over 25,000 submolts, NO for Under 25,000. Verified via Moltbook.",
-      category: "app",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "moltbook",
-      verificationUrl: "https://www.moltbook.com/",
-      verificationMethod: "Check submolt count on Moltbook platform. YES = Over 25K, NO = Under 25K",
-      threshold: "25,000 submolts",
-      tags: ["moltbook", "submolts", "over-under"],
-      endDate: new Date("2026-02-16T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    {
-      id: uuidv4(),
-      question: "Will $BUTTERS token reach $100K market cap by Feb 15, 2026?",
-      description: "Resolution via CoinGecko price data for $BUTTERS token.",
-      category: "token",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "coingecko",
-      verificationUrl: "https://www.coingecko.com/en/coins/butters",
-      verificationMethod: "Check market cap on CoinGecko at resolution time",
-      threshold: "$100,000 market cap",
-      tokenId: "butters",
-      tokenSymbol: "BUTTERS",
-      tags: ["token", "butters", "price"],
-      endDate: new Date("2026-02-15T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    {
-      id: uuidv4(),
-      question: "Head-to-Head: Will @AIButters gain more X followers than @ClawdKrab this week?",
-      description: "Compare follower delta between both accounts from Feb 3-9, 2026.",
-      category: "head-to-head",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "x-api",
-      verificationUrl: "https://x.com/AIButters",
-      verificationMethod: "Compare X follower count change for @AIButters vs @ClawdKrab between Feb 3-9",
-      threshold: "Higher follower gain",
-      tags: ["x", "followers", "head-to-head", "butters", "clawdkrab"],
-      endDate: new Date("2026-02-09T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    {
-      id: uuidv4(),
-      question: "Will AgentBets reach 100+ unique users by Feb 28, 2026?",
-      description: "Based on unique wallet addresses that have placed bets on the platform.",
-      category: "milestone",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "manual",
-      verificationUrl: "https://agentbets.gg",
-      verificationMethod: "Count unique wallet addresses in AgentBets database",
-      threshold: "100 unique wallets",
-      tags: ["agentbets", "users", "milestone"],
-      endDate: new Date("2026-02-28T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    // AIXBT & Major Agents
-    {
-      id: uuidv4(),
-      question: "Will $AIXBT reach $2B market cap by March 2026?",
-      description: "The leading AI agent token. Resolution via CoinGecko.",
-      category: "token",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "coingecko",
-      verificationUrl: "https://www.coingecko.com/en/coins/aixbt",
-      verificationMethod: "Check AIXBT market cap on CoinGecko at resolution time",
-      threshold: "$2,000,000,000",
-      tokenId: "aixbt",
-      tokenSymbol: "AIXBT",
-      tags: ["aixbt", "token", "ai16z"],
-      endDate: new Date("2026-03-01T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@aixbt_agent",
-      status: "active",
-      yesPool: 800000000,
-      noPool: 400000000,
-      totalVolume: 1200000000,
-      totalBets: 8,
-      yesOdds: 0.333,
-      noOdds: 0.667
-    },
-    {
-      id: uuidv4(),
-      question: "Will @truth_terminal post more than 100 tweets in Feb 2026?",
-      description: "Total tweet count for February 2026.",
-      category: "performance",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "x-api",
-      verificationUrl: "https://x.com/truth_terminal",
-      verificationMethod: "Count tweets posted between Feb 1-28, 2026",
-      threshold: "100 tweets",
-      tags: ["truth_terminal", "x", "tweets"],
-      endDate: new Date("2026-02-28T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@truth_terminal",
-      status: "active",
-      yesPool: 200000000,
-      noPool: 300000000,
-      totalVolume: 500000000,
-      totalBets: 5,
-      yesOdds: 0.6,
-      noOdds: 0.4
-    },
-    // Hackathon Markets
-    {
-      id: uuidv4(),
-      question: "Will AgentBets win the Colosseum Hackathon Grand Prize ($50K)?",
-      description: "The moment of truth! Built by @AIButters.",
-      category: "competition",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "colosseum",
-      verificationUrl: "https://colosseum.com/agent-hackathon/",
-      verificationMethod: "Check official hackathon results announcement",
-      threshold: "Grand Prize Winner",
-      tags: ["hackathon", "colosseum", "agentbets", "competition"],
-      endDate: new Date("2026-02-12T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 500000000,
-      noPool: 100000000,
-      totalVolume: 600000000,
-      totalBets: 6,
-      yesOdds: 0.167,
-      noOdds: 0.833
-    },
-    {
-      id: uuidv4(),
-      question: "Will there be 50+ hackathon submissions to Colosseum Agent Hackathon?",
-      description: "Total project submissions by deadline.",
-      category: "competition",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "colosseum",
-      verificationUrl: "https://colosseum.com/agent-hackathon/",
-      verificationMethod: "Check total submissions on Colosseum",
-      threshold: "50 submissions",
-      tags: ["hackathon", "colosseum", "submissions"],
-      endDate: new Date("2026-02-12T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@AIButters",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    // Virtuals & Gaming Agents
-    {
-      id: uuidv4(),
-      question: "Will @luna_virtuals reach 100K followers by Feb 20?",
-      description: "Luna from Virtuals Protocol.",
-      category: "performance",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "x-api",
-      verificationUrl: "https://x.com/luna_virtuals",
-      verificationMethod: "Check X follower count",
-      threshold: "100,000 followers",
-      tags: ["virtuals", "luna", "followers"],
-      endDate: new Date("2026-02-20T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@luna_virtuals",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    // Zerebro & AI Art
-    {
-      id: uuidv4(),
-      question: "Will @zerebro NFT floor price exceed 1 SOL by Feb 15?",
-      description: "Zerebro AI-generated art collection.",
-      category: "token",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "manual",
-      verificationUrl: "https://magiceden.io/marketplace/zerebro",
-      verificationMethod: "Check floor price on Magic Eden",
-      threshold: "1 SOL floor",
-      tags: ["zerebro", "nft", "art"],
-      endDate: new Date("2026-02-15T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@zerebro",
-      status: "active",
-      yesPool: 0,
-      noPool: 0,
-      totalVolume: 0,
-      totalBets: 0,
-      yesOdds: 0.5,
-      noOdds: 0.5
-    },
-    // AI Framework Markets
-    {
-      id: uuidv4(),
-      question: "Will Eliza framework reach 10K GitHub stars by March 2026?",
-      description: "ai16z's Eliza agent framework.",
-      category: "milestone",
-      outcomes: ["YES", "NO"],
-      resolutionSource: "github",
-      verificationUrl: "https://github.com/ai16z/eliza",
-      verificationMethod: "Check GitHub star count",
-      threshold: "10,000 stars",
-      tags: ["eliza", "ai16z", "github", "framework"],
-      endDate: new Date("2026-03-01T23:59:59Z").toISOString(),
-      createdAt: new Date().toISOString(),
-      creatorAgent: "@ai16zdao",
-      status: "active",
-      yesPool: 150000000,
-      noPool: 50000000,
-      totalVolume: 200000000,
-      totalBets: 3,
-      yesOdds: 0.25,
-      noOdds: 0.75
-    }
-  ];
-
-  testMarkets.forEach(market => {
-    markets.set(market.id, market);
-  });
-
-  console.log(`[AgentBets] Initialized ${testMarkets.length} test markets`);
-}
+// NOTE: Test market seeding removed for production.
+// All markets are created on-chain via POST /api/onchain/markets
+// or off-chain via POST /api/markets.
 
 // ==========================================
 // x402 AGENT BETTING ENDPOINTS
@@ -4026,7 +3701,7 @@ app.post('/api/agent/bet/:marketId',
       const payment = req.x402Payment;
 
       // Get market
-      const market = markets.get(marketId);
+      const market = await markets.get(marketId);
       if (!market) {
         return res.status(404).json({ error: 'Market not found' });
       }
@@ -4324,11 +3999,11 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
  * Get x402 payment info for a bet (dry run)
  * GET /api/agent/bet/:marketId/price?amount=10&outcome=YES
  */
-app.get('/api/agent/bet/:marketId/price', (req, res) => {
+app.get('/api/agent/bet/:marketId/price', async (req, res) => {
   const { marketId } = req.params;
   const { amount, outcome } = req.query;
 
-  const market = markets.get(marketId);
+  const market = await markets.get(marketId);
   if (!market) {
     return res.status(404).json({ error: 'Market not found' });
   }
@@ -4419,40 +4094,40 @@ app.post('/api/agent/wallet', requireApiKey, (req, res) => {
  * Get agent's bets and positions
  * GET /api/agent/:handle/bets
  */
-app.get('/api/agent/:handle/bets', (req, res) => {
+app.get('/api/agent/:handle/bets', async (req, res) => {
   const { handle } = req.params;
   const agentKey = `x402:${handle}`;
 
   // Get all bets by this agent
-  const agentBets = Array.from(bets.values())
-    .filter(bet => bet.agentHandle === handle || bet.wallet === agentKey)
-    .map(bet => ({
+  const allBetsList = await bets.values();
+  const agentBetsList = allBetsList
+    .filter(bet => bet.agentHandle === handle || bet.wallet === agentKey);
+  const agentBets = await Promise.all(agentBetsList.map(async (bet) => ({
       id: bet.id,
       marketId: bet.marketId,
       outcome: bet.outcome,
       amountUSDC: bet.amountUSDC || x402.solToUsdcApprox(bet.amount / LAMPORTS_PER_SOL),
       currency: bet.currency || 'SOL',
       timestamp: bet.timestamp,
-      market: markets.get(bet.marketId)?.question || 'Unknown market'
-    }));
+      market: (await markets.get(bet.marketId))?.question || 'Unknown market'
+    })));
 
   // Get positions
-  const agentPositions = Array.from(positions.values())
-    .filter(pos => pos.wallet === agentKey)
-    .map(pos => {
-      const market = markets.get(pos.marketId);
+  const allPositionsList = await positions.findByWallet(agentKey);
+  const agentPositions = await Promise.all(allPositionsList.map(async (pos) => {
+      const market = await markets.get(pos.marketId);
       return {
         marketId: pos.marketId,
         question: market?.question || 'Unknown market',
-        yesAmountSOL: pos.yesAmount / LAMPORTS_PER_SOL,
-        noAmountSOL: pos.noAmount / LAMPORTS_PER_SOL,
+        yesAmountSOL: (pos.yesAmount || 0) / LAMPORTS_PER_SOL,
+        noAmountSOL: (pos.noAmount || 0) / LAMPORTS_PER_SOL,
         status: market?.status || 'unknown',
         currentOdds: {
           yes: market?.yesOdds || 0.5,
           no: market?.noOdds || 0.5
         }
       };
-    });
+    }));
 
   // Get royalties
   const royaltyInfo = royalties.getCreatorRoyalties(handle);
