@@ -56,18 +56,18 @@ class BetParser {
       return true;
     }
 
-    // Check for natural language question patterns directed at the bot
-    // These match the same patterns that parseBet() can extract questions from
+    // Check for natural language question patterns
+    // These match with or without @handle prefix (supports both Twitter and Moltbook)
     const naturalQuestionPatterns = [
-      /@\w+\s+Will\s+.+\?/i,
-      /@\w+\s+Who\s+.+\?/i,
-      /@\w+\s+What\s+.+\?/i,
-      /@\w+\s+Can\s+.+\?/i,
-      /@\w+\s+Does\s+.+\?/i,
-      /@\w+\s+Is\s+.+\?/i,
-      /@\w+\s+Are\s+.+\?/i,
-      /@\w+\s+How\s+many\s+.+\?/i,
-      /@\w+\s+[""].+[""]/,    // Quoted question directed at bot
+      /(?:@\w+\s+)?Will\s+.+\?/i,
+      /(?:@\w+\s+)?Who\s+.+\?/i,
+      /(?:@\w+\s+)?What\s+.+\?/i,
+      /(?:@\w+\s+)?Can\s+.+\?/i,
+      /(?:@\w+\s+)?Does\s+.+\?/i,
+      /(?:@\w+\s+)?Is\s+.+\?/i,
+      /(?:@\w+\s+)?Are\s+.+\?/i,
+      /(?:@\w+\s+)?How\s+many\s+.+\?/i,
+      /(?:@\w+\s+)?[""].+[""]/,    // Quoted question (with or without @mention)
     ];
 
     if (naturalQuestionPatterns.some(pattern => pattern.test(text))) {
@@ -246,18 +246,19 @@ class BetParser {
       };
 
       // Extract question (in quotes or after bet: or natural language with ?)
+      // Patterns work with or without @handle prefix (supports Twitter and Moltbook)
       const questionMatch = text.match(/[""]([^""]+)[""]/) ||
                            text.match(/bet:\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
                            text.match(/prediction:\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
                            text.match(/(?:create|new)\s+(?:bet|market)\s*:?\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
-                           text.match(/@\w+\s+(Will\s+.+\?)/i) ||
-                           text.match(/@\w+\s+(Who\s+.+\?)/i) ||
-                           text.match(/@\w+\s+(What\s+.+\?)/i) ||
-                           text.match(/@\w+\s+(Can\s+.+\?)/i) ||
-                           text.match(/@\w+\s+(Does\s+.+\?)/i) ||
-                           text.match(/@\w+\s+(Is\s+.+\?)/i) ||
-                           text.match(/@\w+\s+(Are\s+.+\?)/i) ||
-                           text.match(/@\w+\s+(How\s+many\s+.+\?)/i);
+                           text.match(/(?:@\w+\s+)?(Will\s+.+\?)/i) ||
+                           text.match(/(?:@\w+\s+)?(Who\s+.+\?)/i) ||
+                           text.match(/(?:@\w+\s+)?(What\s+.+\?)/i) ||
+                           text.match(/(?:@\w+\s+)?(Can\s+.+\?)/i) ||
+                           text.match(/(?:@\w+\s+)?(Does\s+.+\?)/i) ||
+                           text.match(/(?:@\w+\s+)?(Is\s+.+\?)/i) ||
+                           text.match(/(?:@\w+\s+)?(Are\s+.+\?)/i) ||
+                           text.match(/(?:@\w+\s+)?(How\s+many\s+.+\?)/i);
 
       if (questionMatch) {
         result.question = questionMatch[1].trim();
@@ -307,6 +308,15 @@ class BetParser {
       // Extract threshold
       const thresholdMatch = text.match(/threshold:\s*([\d,\.]+\s*\w*)/i) ||
                             text.match(/target:\s*([\d,\.]+\s*\w*)/i) ||
+                            // "2.5 million agents", "100 thousand followers", "1 billion karma"
+                            text.match(/(\d+(?:\.\d+)?\s*(?:thousand|million|billion|trillion|mil|mm))\s*(?:\w+)/i) ||
+                            // "2.5M agents", "10K followers"
+                            text.match(/(\d+(?:\.\d+)?\s*[KkMmBb])\s*(?:followers|agents|users|karma|mcap|\$|registered)/i) ||
+                            // "1,000,000 followers"
+                            text.match(/(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\s*(?:followers|agents|users|karma|mcap|\$|registered)/i) ||
+                            // "$1M mcap", "$200 price"
+                            text.match(/(\$[\d,.]+\s*[KkMmBb]?)\s*(?:mcap|market\s*cap|price)/i) ||
+                            // Fallback: number + common metric words
                             text.match(/(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(?:followers|karma|mcap|\$)/i);
 
       if (thresholdMatch) {
@@ -792,8 +802,22 @@ class BetParser {
    * Check if the question has an implicit numeric threshold embedded in it
    */
   hasImplicitThreshold(question) {
-    // Patterns like "hit $1M", "reach 10K", "above 100", "$200 price"
-    return /\$[\d,.]+[KkMmBb]?|\d{2,}[KkMmBb]\b|\b\d+(?:,\d{3})+\b/.test(question);
+    // Dollar amounts: $200, $1M, $2.5B, $100K
+    if (/\$[\d,.]+\s*[KkMmBb]?/.test(question)) return true;
+
+    // Number + abbreviated multiplier: 10K, 2.5M, 100B (with optional decimal)
+    if (/\d+(?:\.\d+)?\s*[KkMmBb]\b/.test(question)) return true;
+
+    // Number + spelled-out multiplier: 2.5 million, 100 thousand, 1 billion
+    if (/\d+(?:\.\d+)?\s*(?:thousand|million|billion|trillion|mil|mm)\b/i.test(question)) return true;
+
+    // Comma-separated numbers: 1,000,000 or 2,500,000
+    if (/\b\d{1,3}(?:,\d{3})+\b/.test(question)) return true;
+
+    // Comparison phrases with a number: "more than 500", "at least 10000", "exceed 50", "over 100", "reach 5000"
+    if (/\b(?:more\s+than|at\s+least|exceed|over|above|reach|hit|pass|surpass|below|under)\s+[\d,.]+/i.test(question)) return true;
+
+    return false;
   }
 
   /**

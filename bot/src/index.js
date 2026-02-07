@@ -1391,9 +1391,13 @@ async function processCommand(tweetId, authorHandle, text) {
 // Track processed Moltbook post/comment IDs to avoid duplicates
 const processedMoltbookItems = new Set();
 
+// Track pending Moltbook date confirmations (keyed by bot comment ID)
+const pendingMoltbookConfirmations = new Map();
+
 /**
  * Check Moltbook for new bet requests
  * Polls the m/agentbets submolt for posts/comments containing bet syntax
+ * Now supports: natural language questions, date clarification, confirmation flow
  */
 async function checkMoltbookRequests() {
   if (!moltbook.enabled) return;
@@ -1401,6 +1405,9 @@ async function checkMoltbookRequests() {
   console.log(`[Moltbook] Checking for new bet requests...`);
 
   try {
+    // Check for confirmation replies to pending date clarifications
+    await checkMoltbookConfirmationReplies();
+
     const requests = await moltbook.checkForBetRequests();
 
     if (!requests || requests.length === 0) {
@@ -1435,56 +1442,65 @@ async function checkMoltbookRequests() {
           continue;
         }
 
-        // Create market via AgentBets API
-        const market = await agentbets.createMarket({
-          question: betParams.question,
-          description: `Created by ${request.author} via Moltbook`,
-          category: betParams.category || 'general',
-          endDate: betParams.endDate,
-          resolutionSource: betParams.resolution,
-          threshold: betParams.threshold,
-          verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
-          creatorAgent: request.author,
-          tags: ['moltbook-created', request.author, betParams.resolution]
-        });
+        // DATE CLARIFICATION: If the date is vague or missing, ask the agent to confirm
+        if (betParams.needsDateClarification) {
+          console.log(`[Moltbook] Date needs clarification from ${request.author}`);
 
-        if (market.success) {
-          console.log(`[Moltbook] Market created: ${market.market.id} by ${request.author}`);
-
-          // Track for auto-resolution
-          const marketData = {
-            moltbookItemId: request.id,
-            authorHandle: request.author,
-            question: betParams.question,
-            endDate: betParams.endDate,
-            resolution: betParams.resolution,
-            threshold: betParams.threshold,
-            targetHandle: betParams.targetHandle,
-            targetToken: betParams.targetToken,
-            createdAt: new Date().toISOString(),
-            platform: 'moltbook'
-          };
-          pendingResolutions.set(market.market.id, marketData);
-          savePendingResolutions();
-
-          // Schedule resolution
-          scheduleMarketResolution(market.market.id, marketData);
-
-          // Cross-post to Twitter if available
-          if (twitter.writeClient || twitter.infshAvailable) {
-            const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-            const actionUrl = `${baseUrl}/api/actions/bet/${market.market.id}`;
-            const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
-            await twitter.tweet(
-              `New bet from Moltbook agent ${request.author}!\n\n` +
-              `"${betParams.question.slice(0, 80)}"\n\n` +
-              `Bet now: ${blinkUrl}`
-            );
+          let clarificationMsg;
+          if (betParams.detectedDatePhrase && betParams.suggestedDate) {
+            clarificationMsg = `I found your market question:\n\n` +
+              `"${betParams.question}"\n\n` +
+              `You said "${betParams.detectedDatePhrase}" — did you mean ${betParams.suggestedDateLabel || new Date(betParams.suggestedDate).toISOString().split('T')[0]}?\n\n` +
+              `Reply "confirm" to use that date, or provide a specific date like: 2026-02-28`;
+          } else {
+            clarificationMsg = `I found your market question:\n\n` +
+              `"${betParams.question}"\n\n` +
+              `When should this market end? Reply with a date, e.g.:\n` +
+              `• 2026-02-28\n` +
+              `• March 1, 2026`;
           }
+
+          // Reply as a comment on the post
+          const postId = request.type === 'post' ? request.id : request.postId;
+          if (postId) {
+            const replyResult = await moltbook.comment(postId, clarificationMsg, request.type !== 'post' ? request.id : null);
+            if (replyResult.success) {
+              const commentId = replyResult.id || replyResult.data?.id;
+              if (commentId) {
+                pendingMoltbookConfirmations.set(commentId, {
+                  authorHandle: request.author,
+                  postId,
+                  originalItemId: request.id,
+                  originalItemType: request.type,
+                  betParams,
+                  suggestedDate: betParams.suggestedDate || null,
+                  suggestedLabel: betParams.suggestedDateLabel || null,
+                  createdAt: new Date().toISOString()
+                });
+                console.log(`[Moltbook] Awaiting date confirmation from ${request.author} (comment ${commentId})`);
+              }
+            }
+          }
+          continue;
         }
 
-        // Reply on Moltbook
-        await moltbook.replyToRequest(request, market);
+        // VALIDATION: Check if the bet outcome is verifiable
+        const verifiability = parser.validateVerifiability(betParams);
+        if (!verifiability.verifiable) {
+          console.log(`[Moltbook] Unverifiable bet from ${request.author}: ${verifiability.warnings.join(', ')}`);
+          let errorMsg = `Your bet needs a measurable, verifiable outcome.\n\nIssues:\n`;
+          for (const warning of verifiability.warnings.slice(0, 2)) {
+            errorMsg += `- ${warning}\n`;
+          }
+          if (verifiability.suggestion) {
+            errorMsg += `\n${verifiability.suggestion}`;
+          }
+          await moltbook.replyToRequest(request, { success: false, error: errorMsg });
+          continue;
+        }
+
+        // Create market via shared Moltbook market creation logic
+        await createMarketFromMoltbook(request, betParams);
 
       } catch (err) {
         console.error(`[Moltbook] Error processing request from ${request.author}:`, err.message);
@@ -1492,6 +1508,212 @@ async function checkMoltbookRequests() {
     }
   } catch (error) {
     console.error(`[Moltbook] Error checking requests:`, error);
+  }
+}
+
+/**
+ * Check for confirmation replies to pending Moltbook date clarifications
+ * Mirrors the Twitter confirmation flow but uses Moltbook comments
+ */
+async function checkMoltbookConfirmationReplies() {
+  if (pendingMoltbookConfirmations.size === 0) return;
+
+  console.log(`[Moltbook] Checking ${pendingMoltbookConfirmations.size} pending confirmation(s)...`);
+
+  // Expire old confirmations (older than 24 hours)
+  const now = Date.now();
+  for (const [commentId, pending] of pendingMoltbookConfirmations) {
+    if (now - new Date(pending.createdAt).getTime() > 24 * 60 * 60 * 1000) {
+      console.log(`[Moltbook] Expiring stale confirmation from ${pending.authorHandle} (${commentId})`);
+      pendingMoltbookConfirmations.delete(commentId);
+    }
+  }
+
+  for (const [botCommentId, pending] of pendingMoltbookConfirmations) {
+    try {
+      // Get replies/comments on the post where we asked for clarification
+      const comments = await moltbook.getPostComments(pending.postId, 'new');
+      if (!comments.success) continue;
+
+      const commentList = comments.data || comments.comments || (Array.isArray(comments) ? comments : []);
+
+      for (const comment of commentList) {
+        // Skip our own comments
+        const commentAuthor = typeof comment.author === 'string' ? comment.author : comment.author?.name;
+        if (commentAuthor === moltbook.botName) continue;
+
+        const commentText = comment.content || '';
+        const commentId = comment.id;
+
+        // Must be from the same agent who requested the market
+        if (!commentAuthor || commentAuthor.toLowerCase() !== pending.authorHandle.toLowerCase()) continue;
+
+        // Skip already-processed comments
+        const commentKey = `confirmation_${commentId}`;
+        if (processedMoltbookItems.has(commentKey)) continue;
+
+        // Check if this comment is newer than our bot's clarification reply
+        const commentTime = new Date(comment.created_at || comment.createdAt).getTime();
+        const botReplyTime = new Date(pending.createdAt).getTime();
+        if (commentTime < botReplyTime) continue;
+
+        // This looks like a confirmation reply — process it
+        processedMoltbookItems.add(commentKey);
+        console.log(`[Moltbook] Processing confirmation reply from ${commentAuthor}: "${commentText.slice(0, 60)}"`);
+
+        const confirmation = parser.parseConfirmationReply(commentText);
+
+        if (confirmation.action === 'cancel') {
+          console.log(`[Moltbook] ${commentAuthor} cancelled market creation`);
+          pendingMoltbookConfirmations.delete(botCommentId);
+          await moltbook.comment(pending.postId, `Market creation cancelled.`, commentId);
+          break;
+        }
+
+        if (confirmation.action === 'confirm' && confirmation.endDate) {
+          // Agent provided a specific date
+          console.log(`[Moltbook] ${commentAuthor} confirmed with specific date: ${confirmation.endDate}`);
+          pending.betParams.endDate = confirmation.endDate;
+          pending.betParams.needsDateClarification = false;
+          if (confirmation.bet) {
+            console.log(`[Moltbook] ${commentAuthor} also wants to bet: ${confirmation.bet.amount} ${confirmation.bet.currency} ${confirmation.bet.outcome}`);
+            pending.betParams.initialBet = confirmation.bet.amount;
+            pending.betParams.initialOutcome = confirmation.bet.outcome;
+            pending.betParams.initialCurrency = confirmation.bet.currency;
+          }
+          pendingMoltbookConfirmations.delete(botCommentId);
+          const request = { type: pending.originalItemType, id: pending.originalItemId, postId: pending.postId, author: pending.authorHandle, text: '', platform: 'moltbook' };
+          await createMarketFromMoltbook(request, pending.betParams);
+          break;
+        }
+
+        if (confirmation.action === 'confirm_suggested') {
+          // Agent confirmed the suggested date
+          if (pending.suggestedDate) {
+            console.log(`[Moltbook] ${commentAuthor} confirmed suggested date: ${pending.suggestedDate}`);
+            pending.betParams.endDate = pending.suggestedDate;
+            pending.betParams.needsDateClarification = false;
+            if (confirmation.bet) {
+              console.log(`[Moltbook] ${commentAuthor} also wants to bet: ${confirmation.bet.amount} ${confirmation.bet.currency} ${confirmation.bet.outcome}`);
+              pending.betParams.initialBet = confirmation.bet.amount;
+              pending.betParams.initialOutcome = confirmation.bet.outcome;
+              pending.betParams.initialCurrency = confirmation.bet.currency;
+            }
+            pendingMoltbookConfirmations.delete(botCommentId);
+            const request = { type: pending.originalItemType, id: pending.originalItemId, postId: pending.postId, author: pending.authorHandle, text: '', platform: 'moltbook' };
+            await createMarketFromMoltbook(request, pending.betParams);
+          } else {
+            await moltbook.comment(pending.postId,
+              `I don't have a suggested date to confirm. Please reply with a specific date:\n\n• 2026-02-28\n• March 1, 2026`,
+              commentId
+            );
+          }
+          break;
+        }
+
+        if (confirmation.action === 'needs_clarification') {
+          // They provided another vague date — suggest again
+          const newReply = await moltbook.comment(pending.postId,
+            `Did you mean ${confirmation.suggestedLabel || new Date(confirmation.suggestedDate).toISOString().split('T')[0]}?\n\nReply "confirm" to use that date, or provide a specific date like: 2026-02-28`,
+            commentId
+          );
+          if (newReply.success) {
+            const newCommentId = newReply.id || newReply.data?.id;
+            if (newCommentId) {
+              pending.suggestedDate = confirmation.suggestedDate;
+              pending.suggestedLabel = confirmation.suggestedLabel;
+              pendingMoltbookConfirmations.delete(botCommentId);
+              pendingMoltbookConfirmations.set(newCommentId, pending);
+            }
+          }
+          break;
+        }
+
+        // Could not understand the reply
+        console.log(`[Moltbook] Could not parse confirmation reply from ${commentAuthor}: "${commentText}"`);
+        await moltbook.comment(pending.postId,
+          `I didn't understand that. Please reply with:\n\n• "confirm" to use the suggested date\n• A specific date like: 2026-02-28\n• "cancel" to cancel`,
+          commentId
+        );
+        break;
+      }
+    } catch (err) {
+      console.error(`[Moltbook] Error checking confirmation replies for ${botCommentId}:`, err.message);
+    }
+  }
+}
+
+/**
+ * Create a market from a Moltbook request with validated bet parameters
+ * Mirrors createMarketFromParams() but uses Moltbook for replies
+ * Includes: phishing scan, verifiability check, cross-post to Twitter
+ */
+async function createMarketFromMoltbook(request, betParams) {
+  try {
+    // SECURITY: Scan the parsed question for phishing content
+    const questionScan = phishingDetector.scanQuestion(betParams.question);
+    if (questionScan.isPhishing) {
+      console.log(`[Moltbook] PHISHING in bet question from ${request.author}: ${questionScan.reason}`);
+      await moltbook.replyToRequest(request, {
+        success: false,
+        error: `Your bet question was blocked for safety. ${questionScan.reason}`
+      });
+      return;
+    }
+
+    // Create market via AgentBets API
+    const market = await agentbets.createMarket({
+      question: betParams.question,
+      description: `Created by ${request.author} via Moltbook`,
+      category: betParams.category || 'general',
+      endDate: betParams.endDate,
+      resolutionSource: betParams.resolution,
+      threshold: betParams.threshold,
+      verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
+      creatorAgent: request.author,
+      tags: ['moltbook-created', request.author, betParams.resolution]
+    });
+
+    if (market.success) {
+      console.log(`[Moltbook] Market created: ${market.market.id} by ${request.author}`);
+
+      // Track for auto-resolution
+      const marketData = {
+        moltbookItemId: request.id,
+        authorHandle: request.author,
+        question: betParams.question,
+        endDate: betParams.endDate,
+        resolution: betParams.resolution,
+        threshold: betParams.threshold,
+        targetHandle: betParams.targetHandle,
+        targetToken: betParams.targetToken,
+        createdAt: new Date().toISOString(),
+        platform: 'moltbook'
+      };
+      pendingResolutions.set(market.market.id, marketData);
+      savePendingResolutions();
+
+      // Schedule resolution
+      scheduleMarketResolution(market.market.id, marketData);
+
+      // Cross-post to Twitter if available
+      if (twitter.writeClient || twitter.infshAvailable) {
+        const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+        const actionUrl = `${baseUrl}/api/actions/bet/${market.market.id}`;
+        const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
+        await twitter.tweet(
+          `New bet from Moltbook agent ${request.author}!\n\n` +
+          `"${betParams.question.slice(0, 80)}"\n\n` +
+          `Bet now: ${blinkUrl}`
+        );
+      }
+    }
+
+    // Reply on Moltbook with market details
+    await moltbook.replyToRequest(request, market);
+
+  } catch (err) {
+    console.error(`[Moltbook] Error creating market from ${request.author}:`, err.message);
   }
 }
 
@@ -1752,6 +1974,15 @@ async function startBot() {
 
             // Ensure m/agentbets submolt exists
             await moltbook.ensureSubmolt();
+
+            // Post introduction if the submolt is empty (first-time setup)
+            const hasPosts = await moltbook.submoltHasPosts();
+            if (!hasPosts) {
+              console.log('[Moltbook] Submolt m/agentbets has no posts — publishing introduction...');
+              await moltbook.postIntroduction();
+            } else {
+              console.log('[Moltbook] Submolt m/agentbets already has posts, skipping intro');
+            }
 
             // Poll Moltbook for bet requests every 3 minutes
             const moltbookJob = new CronJob('*/3 * * * *', checkMoltbookRequests);
