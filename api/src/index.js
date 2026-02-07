@@ -1257,17 +1257,13 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdmin, asyn
         market.settlementStatus = 'settled';
         market.settledAt = new Date().toISOString();
 
-        // Auto-close bet to reclaim ~0.039 SOL rent back to bot wallet
-        try {
-          const closeResult = await pollFunService.closeBet({ betPda: market.betPda });
-          if (closeResult.success) {
-            market.settlementStatus = 'closed';
-            console.log(`[Resolution] Bet closed, reclaimed ${closeResult.reclaimedSOL?.toFixed(6)} SOL`);
-          } else {
-            console.warn(`[Resolution] Could not close bet yet: ${closeResult.error}`);
-          }
-        } catch (closeErr) {
-          console.warn(`[Resolution] Failed to close bet (can retry later): ${closeErr.message}`);
+        // Attempt to close bet to reclaim rent (requires Poll.fun protocol authority)
+        const closeResult = await pollFunService.closeBet({ betPda: market.betPda });
+        if (closeResult.success) {
+          market.settlementStatus = 'closed';
+          console.log(`[Resolution] Bet closed, reclaimed ${closeResult.reclaimedSOL?.toFixed(6)} SOL`);
+        } else if (closeResult.protocolLimited) {
+          console.log(`[Resolution] Rent reclaim not available (Poll.fun protocol authority required)`);
         }
       }
     }
@@ -2830,20 +2826,18 @@ app.post('/api/onchain/settle-all', async (req, res) => {
       markets.set(marketId, market);
     }
 
-    // Auto-close bet to reclaim rent SOL back to bot wallet
+    // Attempt to close bet to reclaim rent (requires Poll.fun protocol authority)
     let closeResult = null;
     if (errorCount === 0) {
-      try {
-        closeResult = await pollFunService.closeBet({ betPda: pdaAddress });
-        if (closeResult.success) {
-          console.log(`[Settle] Bet closed, reclaimed ${closeResult.reclaimedSOL?.toFixed(6)} SOL`);
-          if (market) {
-            market.settlementStatus = 'closed';
-            markets.set(marketId, market);
-          }
+      closeResult = await pollFunService.closeBet({ betPda: pdaAddress });
+      if (closeResult.success) {
+        console.log(`[Settle] Bet closed, reclaimed ${closeResult.reclaimedSOL?.toFixed(6)} SOL`);
+        if (market) {
+          market.settlementStatus = 'closed';
+          markets.set(marketId, market);
         }
-      } catch (closeErr) {
-        console.warn(`[Settle] Failed to close bet (can retry later): ${closeErr.message}`);
+      } else if (closeResult.protocolLimited) {
+        console.log(`[Settle] Rent reclaim not available (Poll.fun protocol authority required)`);
       }
     }
 
@@ -4483,7 +4477,6 @@ app.get('*', (req, res, next) => {
 
 // Store server reference for graceful shutdown
 let server = null;
-const connections = new Set();
 
 // Initialize database and start server
 async function startServer() {
@@ -4567,11 +4560,9 @@ async function startServer() {
       `);
     });
     
-    // Track connections for graceful shutdown
-    server.on('connection', (conn) => {
-      connections.add(conn);
-      conn.on('close', () => connections.delete(conn));
-    });
+    // Disable keep-alive so connections close promptly on shutdown
+    server.keepAliveTimeout = 5000;
+    server.headersTimeout = 6000;
   } catch (error) {
     console.error('[Server] Failed to start:', error);
     process.exit(1);
@@ -4585,67 +4576,53 @@ let isShuttingDown = false;
 async function gracefulShutdown(signal) {
   // Prevent multiple shutdown attempts
   if (isShuttingDown) {
-    console.log('[Server] Shutdown already in progress...');
+    console.log('[Server] Shutdown already in progress, forcing exit...');
+    process.exit(1);
     return;
   }
   isShuttingDown = true;
   
-  console.log(`\n[Server] Received ${signal}, shutting down gracefully...`);
+  console.log(`\n[Server] Received ${signal}, shutting down...`);
   
-  // Set a hard timeout - force exit after 10 seconds
+  // Hard timeout: force exit after 5 seconds no matter what
   const forceExitTimeout = setTimeout(() => {
-    console.error('[Server] Forced shutdown after timeout');
+    console.error('[Server] Forced exit after 5s timeout');
     process.exit(1);
-  }, 10000);
+  }, 5000);
+  forceExitTimeout.unref(); // Don't let this timer keep the event loop alive
   
-  // Close HTTP server first (stop accepting new connections)
+  // Close HTTP server (stop accepting new connections)
   if (server) {
     try {
-      // Close all active connections
-      console.log(`[Server] Closing ${connections.size} active connections...`);
-      for (const conn of connections) {
-        conn.destroy();
+      // closeAllConnections() immediately destroys all sockets (Node 18.2+)
+      if (typeof server.closeAllConnections === 'function') {
+        server.closeAllConnections();
       }
-      connections.clear();
       
-      await new Promise((resolve, reject) => {
-        server.close((err) => {
-          if (err) {
-            console.error('[Server] Error closing HTTP server:', err);
-            reject(err);
-          } else {
-            console.log('[Server] HTTP server closed');
-            resolve();
-          }
-        });
-        
-        // Force resolve after 3 seconds if server.close hangs
-        setTimeout(() => {
-          console.log('[Server] Server close timed out, continuing...');
-          resolve();
-        }, 3000);
+      server.close(() => {
+        console.log('[Server] HTTP server closed');
       });
     } catch (err) {
-      console.error('[Server] Error during server shutdown:', err);
+      console.error('[Server] Error closing HTTP server:', err.message);
     }
   }
   
-  // Close database connection
+  // Close database connection pool
   try {
     await db.closePool();
-    console.log('[Server] Database connection closed');
+    console.log('[Server] Database pool closed');
   } catch (err) {
-    console.error('[Server] Error closing database:', err);
+    console.error('[Server] Error closing database:', err.message);
   }
   
-  clearTimeout(forceExitTimeout);
   console.log('[Server] Shutdown complete');
   process.exit(0);
 }
 
-// Handle shutdown signals
+// Handle ALL shutdown signals (Replit may send SIGHUP)
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {

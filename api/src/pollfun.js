@@ -530,13 +530,17 @@ class PollFunService {
 
   /**
    * Close a resolved & settled market to reclaim rent SOL
-   * Call this after all settlement batches are complete (status = Distributed)
-   * Returns ~0.039 SOL rent back to the creator wallet
+   * 
+   * NOTE: closeBetV2 requires the Poll.fun protocol's update authority,
+   * NOT the market creator. Only the Poll.fun team can close bets.
+   * This method is kept for future use if Poll.fun adds creator-level close.
+   * 
+   * Current cost per market: ~0.039 SOL rent (non-recoverable by creators)
    *
    * @param {Object} params Parameters
    * @param {string} params.betPda Market PDA address
-   * @param {Keypair} params.creatorKeypair Creator's keypair (must be original creator)
-   * @returns {Object} Result with reclaimed rent info
+   * @param {Keypair} params.creatorKeypair Creator's keypair
+   * @returns {Object} Result
    */
   async closeBet(params) {
     const { betPda, creatorKeypair } = params;
@@ -546,21 +550,22 @@ class PollFunService {
       return { success: false, error: 'Creator keypair required to close bet' };
     }
 
-    console.log(`[PollFun] Closing bet to reclaim rent: ${betPda}`);
+    console.log(`[PollFun] Attempting to close bet: ${betPda}`);
+    console.warn('[PollFun] Note: closeBetV2 requires Poll.fun protocol authority. Market creators cannot reclaim rent.');
 
     try {
-      // Verify bet is in Distributed status before closing
       const betAccount = await this.sdk.accounts.betV2.single(new PublicKey(betPda));
       const status = SDK.convertRustEnumValueToString(betAccount.status);
 
       if (status !== 'Distributed') {
         return {
           success: false,
-          error: `Cannot close bet in "${status}" status. Must be "Distributed" (fully settled).`
+          error: `Cannot close bet in "${status}" status. Must be "Distributed" (fully settled).`,
+          note: 'Even after settlement, only the Poll.fun protocol admin can close bets and reclaim rent.'
         };
       }
 
-      // Get creator SOL balance before close (to calculate reclaimed amount)
+      // Attempt close (will fail with InvalidWithdrawAuthority unless caller is protocol admin)
       const balanceBefore = await this.connection.getBalance(creator.publicKey);
 
       const txHash = await this.sdk.closeBetV2({
@@ -569,14 +574,11 @@ class PollFunService {
         payerOverride: creator.publicKey
       });
 
-      console.log('[PollFun] Bet closed, rent reclaimed:', txHash);
-
-      // Get balance after to calculate reclaimed amount
       const balanceAfter = await this.connection.getBalance(creator.publicKey);
       const reclaimedLamports = balanceAfter - balanceBefore;
       const reclaimedSOL = reclaimedLamports / 1e9;
 
-      console.log(`[PollFun] Reclaimed ~${reclaimedSOL.toFixed(6)} SOL from closed bet`);
+      console.log(`[PollFun] Bet closed, reclaimed ~${reclaimedSOL.toFixed(6)} SOL`);
 
       return {
         success: true,
@@ -586,6 +588,15 @@ class PollFunService {
         reclaimedSOL
       };
     } catch (error) {
+      // Expected: InvalidWithdrawAuthority if caller is not protocol admin
+      if (error.message?.includes('InvalidWithdrawAuthority')) {
+        console.warn(`[PollFun] Cannot close bet: requires Poll.fun protocol authority (not market creator)`);
+        return {
+          success: false,
+          error: 'Only the Poll.fun protocol admin can close bets and reclaim rent. Contact Poll.fun team.',
+          protocolLimited: true
+        };
+      }
       console.error('[PollFun] Failed to close bet:', error);
       return { success: false, error: error.message };
     }

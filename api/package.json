@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "jest"
+    "test": "jest",
+    "stop": "pkill -9 -f 'node src/index.js' || true",
+    "restart": "npm run stop && sleep 2 && npm start"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.29.0",
