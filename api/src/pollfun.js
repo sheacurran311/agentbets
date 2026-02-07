@@ -467,34 +467,39 @@ class PollFunService {
     try {
       const betAccount = await this.sdk.accounts.betV2.single(new PublicKey(betPda));
 
-      // Calculate odds from pool sizes
-      const totalOi = (betAccount.totalOiFor || 0) + (betAccount.totalOiAgainst || 0);
-      const yesPool = betAccount.totalOiFor || 0;
-      const noPool = betAccount.totalOiAgainst || 0;
+      // totalOiFor/Against are BN objects from Anchor - convert to numbers
+      const yesPool = betAccount.totalOiFor ? betAccount.totalOiFor.toNumber() : 0;
+      const noPool = betAccount.totalOiAgainst ? betAccount.totalOiAgainst.toNumber() : 0;
+      const totalOi = yesPool + noPool;
+
+      // Safely convert enum values (some may be undefined)
+      const safeEnumToString = (val) => {
+        if (val === undefined || val === null) return null;
+        try { return SDK.convertRustEnumValueToString(val); } catch { return null; }
+      };
 
       return {
         success: true,
         betPda,
         question: betAccount.question,
-        creator: betAccount.creator.toBase58(),
-        status: SDK.convertRustEnumValueToString(betAccount.status),
+        creator: betAccount.creator?.toBase58?.() || String(betAccount.creator),
+        status: safeEnumToString(betAccount.status) || 'Unknown',
         isCreatorResolver: betAccount.isCreatorResolver,
         expectedUserCount: betAccount.expectedUserCount,
         currentUserCount: betAccount.wagers?.length || 0,
         minimumVoteCount: betAccount.minimumVoteCount,
-        totalPool: totalOi / 1e6, // Convert from USDC lamports
+        totalPool: totalOi / 1e6, // Convert from USDC micro-units
         yesPool: yesPool / 1e6,
         noPool: noPool / 1e6,
         yesOdds: totalOi > 0 ? noPool / totalOi : 0.5,
         noOdds: totalOi > 0 ? yesPool / totalOi : 0.5,
-        resolvedOutcome: betAccount.resolvedOutcome !== undefined ?
-          SDK.convertRustEnumValueToString(betAccount.resolvedOutcome) : null,
+        resolvedOutcome: safeEnumToString(betAccount.resolvedOutcome),
         wagers: betAccount.wagers?.map(w => ({
-          user: w.user.toBase58(),
-          amount: (w.amount || 0) / 1e6,
-          side: SDK.convertRustEnumValueToString(w.side),
-          hasVoted: w.hasVoted,
-          votedOutcome: w.votedOutcome ? SDK.convertRustEnumValueToString(w.votedOutcome) : null
+          user: w.user?.toBase58?.() || String(w.user),
+          amount: (w.amount ? w.amount.toNumber() : 0) / 1e6,
+          side: safeEnumToString(w.outcome) || 'Unknown',
+          status: safeEnumToString(w.status) || 'Unknown',
+          isVoteInitiator: w.isVoteInitiator || false
         })) || []
       };
     } catch (error) {
