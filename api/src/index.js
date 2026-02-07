@@ -18,7 +18,7 @@ const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER
 // Database
 const db = require('./db');
 const dbCompat = require('./db/compat');
-const { Market, Bet, Agent, Royalty, Points, OddsHistory, Position } = require('./db/models');
+const { Market, Bet, Agent, Royalty, Points, Referral, OddsHistory, Position } = require('./db/models');
 
 // Use compatibility layer for storage (works with both DB and in-memory)
 const { markets, bets, positions, oddsHistory } = dbCompat;
@@ -630,7 +630,7 @@ app.post('/api/markets', async (req, res) => {
     if (creatorAgent) {
       royalties.recordMarketCreation(creatorAgent, marketId);
       // Award points for market creation
-      agentFunding.awardMarketCreationPoints(creatorAgent, marketId);
+      await agentFunding.awardMarketCreationPoints(creatorAgent, marketId);
     }
 
     // Estimate potential royalties
@@ -1523,7 +1523,7 @@ app.put('/api/markets/:id/resolve', async (req, res) => {
  */
 app.post('/api/bets', betLimiter, async (req, res) => {
   try {
-    const { marketId, outcome, amount, wallet, txSignature } = req.body;
+    const { marketId, outcome, amount, wallet, txSignature, agentHandle } = req.body;
 
     if (!marketId || !outcome || !amount || !wallet) {
       return res.status(400).json({
@@ -1592,6 +1592,7 @@ app.post('/api/bets', betLimiter, async (req, res) => {
       amount: amountMicroUsdc,
       amountUSDC: amount,
       wallet,
+      agentHandle: agentHandle || null,
       txSignature: txSignature || null,
       placedAt: new Date().toISOString(),
       status: 'active', // active, won, lost, claimed
@@ -1624,6 +1625,16 @@ app.post('/api/bets', betLimiter, async (req, res) => {
     // Update user positions
     await positions.upsert(wallet, marketId, outcome, amountMicroUsdc);
 
+    // Award wager points if agent handle is provided (1 point per $1 wagered)
+    let pointsAwarded = null;
+    if (agentHandle) {
+      try {
+        pointsAwarded = await agentFunding.awardWagerPoints(agentHandle, amount);
+      } catch (pointsError) {
+        console.error('[Points] Error awarding wager points:', pointsError.message);
+      }
+    }
+
     res.status(201).json({
       success: true,
       bet,
@@ -1634,6 +1645,7 @@ app.post('/api/bets', betLimiter, async (req, res) => {
         yesOdds: market.yesOdds,
         noOdds: market.noOdds
       },
+      pointsAwarded: pointsAwarded ? pointsAwarded.totalPoints : null,
       message: `Bet placed! ${amount} USDC on ${outcome}`
     });
   } catch (error) {
@@ -2385,7 +2397,7 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
     // Track market creation for royalties (proposer gets credit, not bot)
     if (sanitizedCreatorAgent) {
       royalties.recordMarketCreation(sanitizedCreatorAgent, marketId);
-      agentFunding.awardMarketCreationPoints(sanitizedCreatorAgent, marketId);
+      await agentFunding.awardMarketCreationPoints(sanitizedCreatorAgent, marketId);
     }
 
     res.status(201).json({
@@ -3474,8 +3486,8 @@ app.get('/api/participation/:agentHandle', async (req, res) => {
     // Get verification status
     const verificationStatus = await agentVerification.verifyAgent(cleanHandle);
 
-    const options = agentFunding.getParticipationOptions(cleanHandle, verificationStatus);
-    const points = agentFunding.getAgentPoints(cleanHandle);
+    const options = await agentFunding.getParticipationOptions(cleanHandle, verificationStatus);
+    const points = await agentFunding.getAgentPoints(cleanHandle);
 
     res.json({
       agentHandle: cleanHandle,
@@ -3496,30 +3508,40 @@ app.get('/api/participation/:agentHandle', async (req, res) => {
  * Get agent's points
  * GET /api/points/:agentHandle
  */
-app.get('/api/points/:agentHandle', (req, res) => {
-  const { agentHandle } = req.params;
-  const cleanHandle = agentHandle.replace('@', '');
-  const points = agentFunding.getAgentPoints(cleanHandle);
+app.get('/api/points/:agentHandle', async (req, res) => {
+  try {
+    const { agentHandle } = req.params;
+    const cleanHandle = agentHandle.replace('@', '');
+    const points = await agentFunding.getAgentPoints(cleanHandle);
 
-  res.json({
-    agentHandle: cleanHandle,
-    ...points,
-    note: 'Points will convert to $AGENTBETS tokens when launched (no timeline)'
-  });
+    res.json({
+      agentHandle: cleanHandle,
+      ...points,
+      note: 'Points will convert to $AGENTBETS tokens when launched (no timeline)'
+    });
+  } catch (error) {
+    console.error('Error fetching agent points:', error);
+    res.status(500).json({ error: 'Failed to fetch agent points' });
+  }
 });
 
 /**
  * Get points leaderboard
  * GET /api/points-leaderboard
  */
-app.get('/api/points-leaderboard', (req, res) => {
-  const limit = parseInt(req.query.limit) || 20;
-  const leaderboard = agentFunding.getPointsLeaderboard(limit);
+app.get('/api/points-leaderboard', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    const leaderboard = await agentFunding.getPointsLeaderboard(limit);
 
-  res.json({
-    leaderboard,
-    pointsInfo: agentFunding.pointsSystem
-  });
+    res.json({
+      leaderboard,
+      pointsInfo: agentFunding.pointsSystem
+    });
+  } catch (error) {
+    console.error('Error fetching points leaderboard:', error);
+    res.status(500).json({ error: 'Failed to fetch points leaderboard' });
+  }
 });
 
 /**
@@ -3546,7 +3568,7 @@ app.post('/api/points/claim-verification', async (req, res) => {
       });
     }
 
-    const result = agentFunding.awardVerificationBonus(cleanHandle);
+    const result = await agentFunding.awardVerificationBonus(cleanHandle);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -3575,7 +3597,7 @@ app.post('/api/points/claim-whitelist', async (req, res) => {
       });
     }
 
-    const result = agentFunding.awardWhitelistBonus(cleanHandle);
+    const result = await agentFunding.awardWhitelistBonus(cleanHandle);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -3612,6 +3634,94 @@ app.get('/api/participation-info', (req, res) => {
       note: 'Agents can use solana-agent-kit to autonomously create wallets and interact with AgentBets'
     }
   });
+});
+
+// ==========================================
+// REFERRAL SYSTEM ENDPOINTS
+// ==========================================
+
+/**
+ * Get or generate referral code + stats for an agent
+ * GET /api/referral/:agentHandle
+ */
+app.get('/api/referral/:agentHandle', async (req, res) => {
+  try {
+    const { agentHandle } = req.params;
+    const cleanHandle = agentHandle.replace('@', '').toLowerCase();
+
+    // Generate code if doesn't exist
+    const code = await Referral.generateCode(cleanHandle);
+    const stats = await Referral.getReferralStats(cleanHandle);
+
+    res.json({
+      agentHandle: cleanHandle,
+      referralCode: code,
+      referralLink: `https://agentbets.gg?ref=${code}`,
+      ...stats,
+      bonusPct: 10,
+      note: 'Share your referral code! You earn 10% of your referred agents\' wager points.'
+    });
+  } catch (error) {
+    console.error('Error getting referral info:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Register as referred by a code
+ * POST /api/referral/register
+ * Body: { referralCode, agentHandle }
+ */
+app.post('/api/referral/register', async (req, res) => {
+  try {
+    const { referralCode, agentHandle } = req.body;
+
+    if (!referralCode || !agentHandle) {
+      return res.status(400).json({ error: 'referralCode and agentHandle are required' });
+    }
+
+    const cleanHandle = agentHandle.replace('@', '').toLowerCase();
+    const result = await Referral.registerReferral(referralCode, cleanHandle);
+
+    // Award referral bonus to the referrer for the sign-up itself
+    try {
+      await agentFunding.awardPoints(
+        result.referrerHandle,
+        agentFunding.POINT_REWARDS.REFERRAL_BONUS,
+        'Referral bonus - new agent referred'
+      );
+    } catch (bonusError) {
+      console.error('Error awarding referral sign-up bonus:', bonusError.message);
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully registered! @${result.referrerHandle} is now your referrer.`,
+      referral: result
+    });
+  } catch (error) {
+    console.error('Error registering referral:', error);
+    res.status(400).json({ error: error.message });
+  }
+});
+
+/**
+ * Get top referrers leaderboard
+ * GET /api/referral/leaderboard
+ */
+app.get('/api/referral/leaderboard', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    const leaderboard = await Referral.getLeaderboard(limit);
+
+    res.json({
+      leaderboard,
+      note: 'Referrers earn 10% of their referred agents\' wager points'
+    });
+  } catch (error) {
+    console.error('Error fetching referral leaderboard:', error);
+    res.status(500).json({ error: 'Failed to fetch referral leaderboard' });
+  }
 });
 
 // ==========================================
@@ -3881,8 +3991,19 @@ app.post('/api/agent/bet/:marketId',
 
       console.log(`[x402] Agent bet recorded: ${betId} - ${agentHandle} bet ${payment.amountUSDC} USDC ${payment.outcome} on ${marketId}`);
 
+      // Award wager points for x402 agent bets
+      let pointsAwarded = null;
+      if (agentHandle) {
+        try {
+          pointsAwarded = await agentFunding.awardWagerPoints(agentHandle, payment.amountUSDC);
+        } catch (pointsError) {
+          console.error('[Points] Error awarding x402 wager points:', pointsError.message);
+        }
+      }
+
       res.json({
         success: true,
+        pointsAwarded: pointsAwarded ? pointsAwarded.totalPoints : null,
         bet: {
           id: betId,
           marketId,

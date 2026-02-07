@@ -228,14 +228,16 @@ const Points = {
       'marketCreation': 'market_creation_points',
       'marketVolume': 'market_volume_points',
       'predictions': 'prediction_points',
-      'bonus': 'bonus_points'
+      'bonus': 'bonus_points',
+      'wager': 'wager_points',
+      'referral': 'referral_points'
     }[category] || 'bonus_points';
     
     const result = await query(`
       UPDATE agent_points 
       SET 
         total_points = total_points + $2,
-        ${column} = ${column} + $2,
+        ${column} = COALESCE(${column}, 0) + $2,
         updated_at = NOW()
       WHERE agent_handle = $1
       RETURNING *
@@ -258,6 +260,50 @@ const Points = {
   },
 
   /**
+   * Add wager points to an agent (1 point per $1 wagered)
+   */
+  async addWagerPoints(agentHandle, points) {
+    const handle = agentHandle.toLowerCase().replace('@', '');
+    
+    // Ensure record exists
+    await this.getOrCreate(handle);
+    
+    const result = await query(`
+      UPDATE agent_points 
+      SET 
+        total_points = total_points + $2,
+        wager_points = COALESCE(wager_points, 0) + $2,
+        updated_at = NOW()
+      WHERE agent_handle = $1
+      RETURNING *
+    `, [handle, points]);
+    
+    return result.rows[0] ? this.toJS(result.rows[0]) : null;
+  },
+
+  /**
+   * Add referral points to an agent (earned from referred agents' wagers)
+   */
+  async addReferralPoints(agentHandle, points) {
+    const handle = agentHandle.toLowerCase().replace('@', '');
+    
+    // Ensure record exists
+    await this.getOrCreate(handle);
+    
+    const result = await query(`
+      UPDATE agent_points 
+      SET 
+        total_points = total_points + $2,
+        referral_points = COALESCE(referral_points, 0) + $2,
+        updated_at = NOW()
+      WHERE agent_handle = $1
+      RETURNING *
+    `, [handle, points]);
+    
+    return result.rows[0] ? this.toJS(result.rows[0]) : null;
+  },
+
+  /**
    * Convert database row to JavaScript object (camelCase)
    */
   toJS(row) {
@@ -269,11 +315,223 @@ const Points = {
         marketCreation: parseInt(row.market_creation_points) || 0,
         marketVolume: parseInt(row.market_volume_points) || 0,
         predictions: parseInt(row.prediction_points) || 0,
-        bonuses: parseInt(row.bonus_points) || 0
+        bonuses: parseInt(row.bonus_points) || 0,
+        wager: parseInt(row.wager_points) || 0,
+        referral: parseInt(row.referral_points) || 0
       },
       updatedAt: row.updated_at?.toISOString()
     };
   }
 };
 
-module.exports = { Royalty, Points };
+/**
+ * Agent Referral Model
+ */
+const Referral = {
+  /**
+   * Generate a unique referral code for an agent
+   */
+  async generateCode(agentHandle) {
+    const handle = agentHandle.toLowerCase().replace('@', '');
+    
+    // Check if agent already has a code
+    const existing = await query(
+      'SELECT referral_code FROM agents WHERE handle = $1',
+      [handle]
+    );
+    
+    if (existing.rows[0]?.referral_code) {
+      return existing.rows[0].referral_code;
+    }
+    
+    // Generate 8-char alphanumeric code
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars (0/O, 1/I)
+    let code;
+    let attempts = 0;
+    
+    while (attempts < 10) {
+      code = '';
+      for (let i = 0; i < 8; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      
+      // Check uniqueness
+      const check = await query(
+        'SELECT 1 FROM agents WHERE referral_code = $1',
+        [code]
+      );
+      
+      if (check.rows.length === 0) break;
+      attempts++;
+    }
+    
+    // Ensure agent exists, then set code
+    await query(`
+      INSERT INTO agents (handle, verification_method, is_verified)
+      VALUES ($1, 'whitelisted', true)
+      ON CONFLICT (handle) DO NOTHING
+    `, [handle]);
+    
+    await query(
+      'UPDATE agents SET referral_code = $1 WHERE handle = $2',
+      [code, handle]
+    );
+    
+    return code;
+  },
+
+  /**
+   * Get an agent's referral code (without generating one)
+   */
+  async getCode(agentHandle) {
+    const handle = agentHandle.toLowerCase().replace('@', '');
+    const result = await query(
+      'SELECT referral_code FROM agents WHERE handle = $1',
+      [handle]
+    );
+    return result.rows[0]?.referral_code || null;
+  },
+
+  /**
+   * Register a referral relationship
+   * @param {string} referralCode - The referrer's code
+   * @param {string} referredHandle - The agent being referred
+   */
+  async registerReferral(referralCode, referredHandle) {
+    const referred = referredHandle.toLowerCase().replace('@', '');
+    
+    // Look up referrer by code
+    const referrerResult = await query(
+      'SELECT handle FROM agents WHERE referral_code = $1',
+      [referralCode.toUpperCase()]
+    );
+    
+    if (!referrerResult.rows[0]) {
+      throw new Error('Invalid referral code');
+    }
+    
+    const referrer = referrerResult.rows[0].handle;
+    
+    // Can't refer yourself
+    if (referrer === referred) {
+      throw new Error('Cannot refer yourself');
+    }
+    
+    // Check if already referred
+    const existingCheck = await query(
+      'SELECT 1 FROM agent_referrals WHERE referred_handle = $1',
+      [referred]
+    );
+    
+    if (existingCheck.rows.length > 0) {
+      throw new Error('Agent already has a referrer');
+    }
+    
+    // Ensure referred agent exists
+    await query(`
+      INSERT INTO agents (handle, verification_method, is_verified)
+      VALUES ($1, 'whitelisted', true)
+      ON CONFLICT (handle) DO NOTHING
+    `, [referred]);
+    
+    // Create referral record
+    const result = await query(`
+      INSERT INTO agent_referrals (referrer_handle, referred_handle, referral_code)
+      VALUES ($1, $2, $3)
+      RETURNING *
+    `, [referrer, referred, referralCode.toUpperCase()]);
+    
+    return {
+      id: result.rows[0].id,
+      referrerHandle: result.rows[0].referrer_handle,
+      referredHandle: result.rows[0].referred_handle,
+      referralCode: result.rows[0].referral_code,
+      bonusPct: parseFloat(result.rows[0].referral_bonus_pct),
+      createdAt: result.rows[0].created_at?.toISOString()
+    };
+  },
+
+  /**
+   * Get who referred this agent (if anyone)
+   */
+  async getReferrer(agentHandle) {
+    const handle = agentHandle.toLowerCase().replace('@', '');
+    const result = await query(
+      'SELECT referrer_handle, referral_bonus_pct FROM agent_referrals WHERE referred_handle = $1',
+      [handle]
+    );
+    
+    if (!result.rows[0]) return null;
+    
+    return {
+      referrerHandle: result.rows[0].referrer_handle,
+      bonusPct: parseFloat(result.rows[0].referral_bonus_pct)
+    };
+  },
+
+  /**
+   * Get referral stats for an agent (as a referrer)
+   */
+  async getReferralStats(agentHandle) {
+    const handle = agentHandle.toLowerCase().replace('@', '');
+    
+    // Count referrals
+    const countResult = await query(
+      'SELECT COUNT(*) as count FROM agent_referrals WHERE referrer_handle = $1',
+      [handle]
+    );
+    
+    // Get referred agents list
+    const referredResult = await query(`
+      SELECT ar.referred_handle, ar.created_at, COALESCE(ap.total_points, 0) as referred_points
+      FROM agent_referrals ar
+      LEFT JOIN agent_points ap ON ar.referred_handle = ap.agent_handle
+      WHERE ar.referrer_handle = $1
+      ORDER BY ar.created_at DESC
+    `, [handle]);
+    
+    // Get referral points earned
+    const pointsResult = await query(
+      'SELECT COALESCE(referral_points, 0) as referral_points FROM agent_points WHERE agent_handle = $1',
+      [handle]
+    );
+    
+    return {
+      referralCount: parseInt(countResult.rows[0]?.count) || 0,
+      referralPointsEarned: parseInt(pointsResult.rows[0]?.referral_points) || 0,
+      referredAgents: referredResult.rows.map(r => ({
+        handle: r.referred_handle,
+        totalPoints: parseInt(r.referred_points) || 0,
+        referredAt: r.created_at?.toISOString()
+      }))
+    };
+  },
+
+  /**
+   * Get top referrers leaderboard
+   */
+  async getLeaderboard(limit = 20) {
+    const result = await query(`
+      SELECT 
+        ar.referrer_handle,
+        COUNT(ar.referred_handle) as referral_count,
+        COALESCE(ap.referral_points, 0) as referral_points,
+        COALESCE(ap.total_points, 0) as total_points
+      FROM agent_referrals ar
+      LEFT JOIN agent_points ap ON ar.referrer_handle = ap.agent_handle
+      GROUP BY ar.referrer_handle, ap.referral_points, ap.total_points
+      ORDER BY COALESCE(ap.referral_points, 0) DESC
+      LIMIT $1
+    `, [limit]);
+    
+    return result.rows.map((row, i) => ({
+      rank: i + 1,
+      handle: row.referrer_handle,
+      referralCount: parseInt(row.referral_count) || 0,
+      referralPoints: parseInt(row.referral_points) || 0,
+      totalPoints: parseInt(row.total_points) || 0
+    }));
+  }
+};
+
+module.exports = { Royalty, Points, Referral };

@@ -244,6 +244,11 @@ const Icons2 = {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
     </svg>
+  ),
+  xTwitter: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+    </svg>
   )
 }
 
@@ -870,6 +875,8 @@ function App() {
   const [filteredMarkets, setFilteredMarkets] = useState([])
   const [stats, setStats] = useState(null)
   const [leaderboard, setLeaderboard] = useState([])
+  const [pointsLeaderboard, setPointsLeaderboard] = useState([])
+  const [leaderboardTab, setLeaderboardTab] = useState('predictors') // 'predictors' | 'points'
   const [selectedMarket, setSelectedMarket] = useState(null)
   const [betAmount, setBetAmount] = useState('')
   const [walletBalance, setWalletBalance] = useState(null)
@@ -967,6 +974,20 @@ function App() {
     }
   }
 
+  // Share a market on X/Twitter with its Blink URL for in-tweet betting
+  const handleShareOnX = (market, e) => {
+    if (e) e.stopPropagation()
+    const baseUrl = 'https://agentbets.gg'
+    const actionUrl = `solana-action:${baseUrl}/api/actions/bet/${market.id}`
+    const blinkShareUrl = `https://dial.to/?action=${encodeURIComponent(actionUrl)}`
+    const appLink = `${baseUrl}/app?market=${market.id}`
+    const yesPercent = Math.round(market.yesOdds * 100)
+    const noPercent = Math.round(market.noOdds * 100)
+    const tweetText = `"${market.question}"\n\nYES ${yesPercent}% | NO ${noPercent}%\n\nBet directly on @agentbetsgg\n${appLink}`
+    const intentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(tweetText)}&url=${encodeURIComponent(blinkShareUrl)}`
+    window.open(intentUrl, '_blank', 'noopener,noreferrer')
+  }
+
   // Fetch gasless relay configuration
   const fetchGaslessConfig = useCallback(async () => {
     try {
@@ -1046,8 +1067,24 @@ function App() {
     fetchMarkets()
     fetchStats()
     fetchLeaderboard()
+    fetchPointsLeaderboard()
     fetchRecentActivity()
   }, [])
+
+  // Deep-link: auto-open market modal if ?market=<id> is in URL
+  useEffect(() => {
+    if (markets.length === 0) return
+    const params = new URLSearchParams(window.location.search)
+    const marketId = params.get('market')
+    if (marketId) {
+      const target = markets.find(m => m.id === marketId)
+      if (target) {
+        setSelectedMarket(target)
+        // Clean up the URL without triggering a navigation
+        window.history.replaceState({}, '', window.location.pathname)
+      }
+    }
+  }, [markets])
 
   // Fetch pending resolutions when admin wallet connects
   useEffect(() => {
@@ -1257,6 +1294,16 @@ function App() {
       setLeaderboard(data.leaderboard || [])
     } catch (err) {
       console.error('Failed to fetch leaderboard:', err)
+    }
+  }
+
+  const fetchPointsLeaderboard = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/points-leaderboard?limit=50`)
+      const data = await res.json()
+      setPointsLeaderboard(data.leaderboard || [])
+    } catch (err) {
+      console.error('Failed to fetch points leaderboard:', err)
     }
   }
 
@@ -2072,6 +2119,28 @@ function App() {
                             {Icons2.onchain} On-chain
                           </span>
                         )}
+                        <button
+                          onClick={(e) => handleShareOnX(market, e)}
+                          title="Share on X"
+                          style={{
+                            background: 'none',
+                            border: `1px solid ${COLORS.border}`,
+                            borderRadius: '6px',
+                            padding: '4px 8px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            color: COLORS.textMuted,
+                            fontSize: '11px',
+                            transition: 'all 0.2s ease',
+                            marginLeft: 'auto'
+                          }}
+                          onMouseEnter={(e) => { e.currentTarget.style.color = COLORS.textPrimary; e.currentTarget.style.borderColor = COLORS.secondary; e.currentTarget.style.background = `${COLORS.secondary}10` }}
+                          onMouseLeave={(e) => { e.currentTarget.style.color = COLORS.textMuted; e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = 'none' }}
+                        >
+                          {Icons2.xTwitter} Share
+                        </button>
                       </div>
 
                       {/* End date detail */}
@@ -2270,43 +2339,183 @@ function App() {
           {/* Leaderboard View */}
           {view === 'leaderboard' && (
             <div style={styles.leaderboardContainer}>
-              <h1 style={styles.pageTitle}>Top Predictors</h1>
-              <p style={styles.formSubtitle}>Best performers on AgentBets</p>
+              <h1 style={styles.pageTitle}>Leaderboard</h1>
+              <p style={styles.formSubtitle}>Top performers and point earners on AgentBets</p>
 
-              {leaderboard.length === 0 ? (
-                <div style={styles.emptyState}>
-                  <div style={styles.emptyIcon}>{Icons.crown}</div>
-                  <h3>No predictions yet</h3>
-                  <p>Be the first to place a bet and claim the top spot!</p>
-                </div>
-              ) : (
-                <div style={styles.leaderboardTable}>
-                  <div style={styles.leaderboardHeader}>
-                    <span style={{width: '60px'}}>#</span>
-                    <span style={{flex: 1}}>Wallet</span>
-                    <span style={{width: '80px', textAlign: 'right'}}>Win Rate</span>
-                    <span style={{width: '60px', textAlign: 'right'}}>Bets</span>
-                    <span style={{width: '100px', textAlign: 'right'}}>Profit</span>
-                  </div>
-                  {leaderboard.map((entry, i) => (
-                    <div key={entry.wallet} style={styles.leaderboardRow}>
-                      <span style={{width: '60px', fontWeight: '600', color: i < 3 ? COLORS.primary : COLORS.textMuted}}>
-                        {i + 1}
-                      </span>
-                      <span style={{flex: 1, fontFamily: 'monospace', color: COLORS.textSecondary}}>{shortAddress(entry.wallet)}</span>
-                      <span style={{width: '80px', textAlign: 'right'}}>{entry.winRate}</span>
-                      <span style={{width: '60px', textAlign: 'right'}}>{entry.totalBets}</span>
-                      <span style={{
-                        width: '100px',
-                        textAlign: 'right',
-                        fontWeight: '600',
-                        color: parseFloat(entry.profit) >= 0 ? COLORS.success : COLORS.error
-                      }}>
-                        {parseFloat(entry.profit) >= 0 ? '+' : ''}{entry.profit}
-                      </span>
+              {/* Tab Toggle */}
+              <div style={{
+                display: 'flex',
+                gap: '4px',
+                background: COLORS.bgCard,
+                borderRadius: '12px',
+                padding: '4px',
+                marginBottom: '24px',
+                border: `1px solid ${COLORS.border}`,
+                width: 'fit-content'
+              }}>
+                <button
+                  onClick={() => setLeaderboardTab('predictors')}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: '10px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    transition: 'all 0.2s',
+                    background: leaderboardTab === 'predictors' ? COLORS.primary : 'transparent',
+                    color: leaderboardTab === 'predictors' ? COLORS.bgDark : COLORS.textMuted
+                  }}
+                >
+                  {Icons.crown} Predictors
+                </button>
+                <button
+                  onClick={() => { setLeaderboardTab('points'); fetchPointsLeaderboard(); }}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: '10px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    transition: 'all 0.2s',
+                    background: leaderboardTab === 'points' ? COLORS.primary : 'transparent',
+                    color: leaderboardTab === 'points' ? COLORS.bgDark : COLORS.textMuted
+                  }}
+                >
+                  {Icons.fire} Points
+                </button>
+              </div>
+
+              {/* Predictors Tab */}
+              {leaderboardTab === 'predictors' && (
+                <>
+                  {leaderboard.length === 0 ? (
+                    <div style={styles.emptyState}>
+                      <div style={styles.emptyIcon}>{Icons.crown}</div>
+                      <h3>No predictions yet</h3>
+                      <p>Be the first to place a bet and claim the top spot!</p>
                     </div>
-                  ))}
-                </div>
+                  ) : (
+                    <div style={styles.leaderboardTable}>
+                      <div style={styles.leaderboardHeader}>
+                        <span style={{width: '60px'}}>#</span>
+                        <span style={{flex: 1}}>Wallet</span>
+                        <span style={{width: '80px', textAlign: 'right'}}>Win Rate</span>
+                        <span style={{width: '60px', textAlign: 'right'}}>Bets</span>
+                        <span style={{width: '100px', textAlign: 'right'}}>Profit</span>
+                      </div>
+                      {leaderboard.map((entry, i) => (
+                        <div key={entry.wallet} style={styles.leaderboardRow}>
+                          <span style={{width: '60px', fontWeight: '600', color: i < 3 ? COLORS.primary : COLORS.textMuted}}>
+                            {i + 1}
+                          </span>
+                          <span style={{flex: 1, fontFamily: 'monospace', color: COLORS.textSecondary}}>{shortAddress(entry.wallet)}</span>
+                          <span style={{width: '80px', textAlign: 'right'}}>{entry.winRate}</span>
+                          <span style={{width: '60px', textAlign: 'right'}}>{entry.totalBets}</span>
+                          <span style={{
+                            width: '100px',
+                            textAlign: 'right',
+                            fontWeight: '600',
+                            color: parseFloat(entry.profit) >= 0 ? COLORS.success : COLORS.error
+                          }}>
+                            {parseFloat(entry.profit) >= 0 ? '+' : ''}{entry.profit}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Points Tab */}
+              {leaderboardTab === 'points' && (
+                <>
+                  {/* Points Info Banner */}
+                  <div style={{
+                    background: `linear-gradient(135deg, ${COLORS.secondary}15, ${COLORS.primary}10)`,
+                    border: `1px solid ${COLORS.secondary}30`,
+                    borderRadius: '12px',
+                    padding: '16px 20px',
+                    marginBottom: '20px',
+                    fontSize: '13px',
+                    color: COLORS.textSecondary,
+                    lineHeight: '1.6'
+                  }}>
+                    <strong style={{color: COLORS.primary}}>Earn points for future $AGENTBETS airdrop!</strong>
+                    <span style={{margin: '0 8px', color: COLORS.textMuted}}>|</span>
+                    +1 pt per $1 wagered
+                    <span style={{margin: '0 8px', color: COLORS.textMuted}}>|</span>
+                    +100 pts per market created
+                    <span style={{margin: '0 8px', color: COLORS.textMuted}}>|</span>
+                    +10% referral bonus
+                  </div>
+
+                  {pointsLeaderboard.length === 0 ? (
+                    <div style={styles.emptyState}>
+                      <div style={styles.emptyIcon}>{Icons.fire}</div>
+                      <h3>No points earned yet</h3>
+                      <p>Start betting or creating markets to earn points for the airdrop!</p>
+                    </div>
+                  ) : (
+                    <div style={styles.leaderboardTable}>
+                      <div style={styles.leaderboardHeader}>
+                        <span style={{width: '50px'}}>#</span>
+                        <span style={{flex: 1}}>Agent</span>
+                        <span style={{width: '100px', textAlign: 'right'}}>Total Pts</span>
+                        <span style={{width: '90px', textAlign: 'right'}}>Wager</span>
+                        <span style={{width: '90px', textAlign: 'right'}}>Referral</span>
+                        <span style={{width: '80px', textAlign: 'right'}}>Other</span>
+                      </div>
+                      {pointsLeaderboard.map((entry, i) => (
+                        <div key={entry.handle} style={styles.leaderboardRow}>
+                          <span style={{width: '50px', fontWeight: '600', color: i < 3 ? COLORS.primary : COLORS.textMuted}}>
+                            {i === 0 ? '\u{1F947}' : i === 1 ? '\u{1F948}' : i === 2 ? '\u{1F949}' : entry.rank || i + 1}
+                          </span>
+                          <span style={{flex: 1, fontWeight: '500', color: COLORS.textPrimary}}>
+                            @{entry.handle}
+                          </span>
+                          <span style={{
+                            width: '100px',
+                            textAlign: 'right',
+                            fontWeight: '700',
+                            color: COLORS.primary,
+                            fontFamily: '"JetBrains Mono", monospace'
+                          }}>
+                            {(entry.totalPoints || 0).toLocaleString()}
+                          </span>
+                          <span style={{
+                            width: '90px',
+                            textAlign: 'right',
+                            color: COLORS.textSecondary,
+                            fontFamily: '"JetBrains Mono", monospace',
+                            fontSize: '13px'
+                          }}>
+                            {(entry.breakdown?.wager || 0).toLocaleString()}
+                          </span>
+                          <span style={{
+                            width: '90px',
+                            textAlign: 'right',
+                            color: entry.breakdown?.referral > 0 ? COLORS.secondary : COLORS.textMuted,
+                            fontFamily: '"JetBrains Mono", monospace',
+                            fontSize: '13px'
+                          }}>
+                            {(entry.breakdown?.referral || 0).toLocaleString()}
+                          </span>
+                          <span style={{
+                            width: '80px',
+                            textAlign: 'right',
+                            color: COLORS.textMuted,
+                            fontFamily: '"JetBrains Mono", monospace',
+                            fontSize: '13px'
+                          }}>
+                            {((entry.breakdown?.marketCreation || 0) + (entry.breakdown?.marketVolume || 0) + (entry.breakdown?.predictions || 0) + (entry.breakdown?.bonuses || 0)).toLocaleString()}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -2610,9 +2819,32 @@ function App() {
               <h2 style={{fontSize: '20px', fontWeight: '600', color: COLORS.textPrimary}}>
                 {isMarketEnded(selectedMarket) ? 'Market Ended' : 'Place Your Bet'}
               </h2>
-              <button style={styles.closeBtn} onClick={() => { setSelectedMarket(null); setTxStatus(null); setBetConfirmation(null); }}>
-                {Icons.x}
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  onClick={(e) => handleShareOnX(selectedMarket, e)}
+                  title="Share on X"
+                  style={{
+                    background: 'none',
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: '8px',
+                    padding: '6px 12px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    color: COLORS.textMuted,
+                    fontSize: '13px',
+                    transition: 'all 0.2s ease'
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = COLORS.textPrimary; e.currentTarget.style.borderColor = COLORS.secondary; e.currentTarget.style.background = `${COLORS.secondary}10` }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = COLORS.textMuted; e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = 'none' }}
+                >
+                  {Icons2.xTwitter} Share
+                </button>
+                <button style={styles.closeBtn} onClick={() => { setSelectedMarket(null); setTxStatus(null); setBetConfirmation(null); }}>
+                  {Icons.x}
+                </button>
+              </div>
             </div>
 
             <p style={styles.modalQuestion}>{selectedMarket.question}</p>

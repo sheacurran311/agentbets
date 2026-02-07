@@ -1,6 +1,6 @@
 /**
  * AgentBets Agent Participation & Points System
- * Realistic ways for AI agents to participate and earn rewards
+ * DB-backed points system for AI agent participation rewards
  *
  * Problem: Many AI agents don't have wallets or have wallets without funds
  * Solution: Points system for participation + creator earnings per market
@@ -10,6 +10,8 @@
  *
  * Integration with solana-agent-kit for autonomous agent operations
  */
+
+const { Points, Referral } = require('./db/models/Royalty');
 
 // ==========================================
 // POINTS SYSTEM
@@ -24,17 +26,16 @@ const pointsSystem = {
   description: 'Earn points for participation - converts to tokens at launch',
   note: 'No timeline for token launch. Points are tracked and will convert when ready.',
   howToEarn: [
+    'Wager on markets (+1 point per $1 USDC wagered)',
     'Create markets (+100 points per market)',
     'Markets with volume (+10 points per SOL volume on your markets)',
     'Successful predictions (+50 points per win)',
     'Verified agent status (+500 points one-time)',
-    'Whitelisted agent bonus (+1000 points one-time)'
+    'Whitelisted agent bonus (+1000 points one-time)',
+    'Refer other agents (+10% of their wager points)'
   ],
   conversion: 'Points will convert to $AGENTBETS tokens at a rate TBD at launch'
 };
-
-// In-memory points storage (replace with DB in production)
-const agentPoints = new Map();
 
 /**
  * Point rewards configuration
@@ -45,7 +46,9 @@ const POINT_REWARDS = {
   SUCCESSFUL_PREDICTION: 50,
   VERIFICATION_BONUS: 500,
   WHITELIST_BONUS: 1000,
-  REFERRAL_BONUS: 200 // When referred agent creates first market
+  REFERRAL_BONUS: 200, // When referred agent creates first market
+  WAGER_POINTS_PER_DOLLAR: 1, // 1 point per $1 USDC wagered
+  REFERRAL_PCT: 0.10 // 10% of referred agent's wager points go to referrer
 };
 
 // ==========================================
@@ -111,11 +114,13 @@ const pointsEarning = {
   name: 'Points System',
   description: 'Earn points that convert to tokens at launch',
   earnings: {
+    wager: '+1 point per $1 USDC wagered',
     marketCreation: '+100 points per market created',
     marketVolume: '+10 points per SOL volume on your markets',
     winningBets: '+50 points per successful prediction',
     verification: '+500 points (one-time for getting verified)',
-    whitelist: '+1000 points (one-time for whitelisted agents)'
+    whitelist: '+1000 points (one-time for whitelisted agents)',
+    referrals: '+10% of referred agent\'s wager points'
   },
   conversion: 'Points convert to $AGENTBETS tokens when launched (TBD)'
 };
@@ -147,62 +152,80 @@ const whitelistBenefits = {
 };
 
 // ==========================================
-// POINTS API FUNCTIONS
+// POINTS API FUNCTIONS (DB-BACKED)
 // ==========================================
 
 /**
- * Get agent's current points
+ * Get agent's current points (from database)
  */
-function getAgentPoints(agentHandle) {
+async function getAgentPoints(agentHandle) {
   const cleanHandle = agentHandle.replace('@', '').toLowerCase();
-  const data = agentPoints.get(cleanHandle) || {
-    handle: cleanHandle,
-    totalPoints: 0,
-    breakdown: {
-      marketCreation: 0,
-      marketVolume: 0,
-      predictions: 0,
-      bonuses: 0
-    },
-    history: []
-  };
-  return data;
+  try {
+    const data = await Points.getOrCreate(cleanHandle);
+    return data || {
+      agentHandle: cleanHandle,
+      totalPoints: 0,
+      breakdown: {
+        marketCreation: 0,
+        marketVolume: 0,
+        predictions: 0,
+        bonuses: 0,
+        wager: 0,
+        referral: 0
+      }
+    };
+  } catch (error) {
+    console.error(`[Points] Error getting points for ${cleanHandle}:`, error.message);
+    return {
+      agentHandle: cleanHandle,
+      totalPoints: 0,
+      breakdown: {
+        marketCreation: 0,
+        marketVolume: 0,
+        predictions: 0,
+        bonuses: 0,
+        wager: 0,
+        referral: 0
+      }
+    };
+  }
 }
 
 /**
- * Award points to an agent
+ * Award points to an agent (generic, DB-backed)
  */
-function awardPoints(agentHandle, amount, reason, metadata = {}) {
+async function awardPoints(agentHandle, amount, reason, metadata = {}) {
   const cleanHandle = agentHandle.replace('@', '').toLowerCase();
-  const data = getAgentPoints(cleanHandle);
-
-  data.totalPoints += amount;
-  data.history.push({
-    amount,
-    reason,
-    metadata,
-    timestamp: new Date().toISOString()
-  });
-
-  // Update breakdown
+  
+  // Determine category from reason
+  let category = 'bonus';
   if (reason.includes('market') && reason.includes('creat')) {
-    data.breakdown.marketCreation += amount;
+    category = 'marketCreation';
   } else if (reason.includes('volume')) {
-    data.breakdown.marketVolume += amount;
+    category = 'marketVolume';
   } else if (reason.includes('prediction') || reason.includes('win')) {
-    data.breakdown.predictions += amount;
-  } else {
-    data.breakdown.bonuses += amount;
+    category = 'predictions';
+  } else if (reason.includes('wager')) {
+    category = 'wager';
+  } else if (reason.includes('referral')) {
+    category = 'referral';
   }
 
-  agentPoints.set(cleanHandle, data);
-  return data;
+  try {
+    await Points.getOrCreate(cleanHandle);
+    const data = await Points.addPoints(cleanHandle, amount, category);
+    console.log(`[Points] Awarded ${amount} points to @${cleanHandle} for: ${reason}`);
+    return data;
+  } catch (error) {
+    console.error(`[Points] Error awarding points to ${cleanHandle}:`, error.message);
+    return await getAgentPoints(cleanHandle);
+  }
 }
 
 /**
  * Award market creation points
  */
-function awardMarketCreationPoints(agentHandle, marketId) {
+async function awardMarketCreationPoints(agentHandle, marketId) {
   return awardPoints(
     agentHandle,
     POINT_REWARDS.MARKET_CREATION,
@@ -214,7 +237,7 @@ function awardMarketCreationPoints(agentHandle, marketId) {
 /**
  * Award volume points (called when market gets volume)
  */
-function awardVolumePoints(agentHandle, volumeSOL, marketId) {
+async function awardVolumePoints(agentHandle, volumeSOL, marketId) {
   const points = Math.floor(volumeSOL * POINT_REWARDS.MARKET_VOLUME_MULTIPLIER);
   if (points > 0) {
     return awardPoints(
@@ -228,55 +251,116 @@ function awardVolumePoints(agentHandle, volumeSOL, marketId) {
 }
 
 /**
+ * Award wager points (1 point per $1 USDC wagered)
+ */
+async function awardWagerPoints(agentHandle, amountUSDC) {
+  const cleanHandle = agentHandle.replace('@', '').toLowerCase();
+  const points = Math.floor(amountUSDC * POINT_REWARDS.WAGER_POINTS_PER_DOLLAR);
+  
+  if (points <= 0) return getAgentPoints(cleanHandle);
+  
+  try {
+    await Points.getOrCreate(cleanHandle);
+    const data = await Points.addWagerPoints(cleanHandle, points);
+    console.log(`[Points] Awarded ${points} wager points to @${cleanHandle} for $${amountUSDC} wagered`);
+    
+    // Check for referrer and award referral points
+    try {
+      const referrer = await Referral.getReferrer(cleanHandle);
+      if (referrer) {
+        const referralPoints = Math.floor(points * POINT_REWARDS.REFERRAL_PCT);
+        if (referralPoints > 0) {
+          await awardReferralPoints(referrer.referrerHandle, referralPoints);
+        }
+      }
+    } catch (refError) {
+      console.error(`[Points] Error awarding referral points:`, refError.message);
+    }
+    
+    return data;
+  } catch (error) {
+    console.error(`[Points] Error awarding wager points to ${cleanHandle}:`, error.message);
+    return getAgentPoints(cleanHandle);
+  }
+}
+
+/**
+ * Award referral points to a referrer
+ */
+async function awardReferralPoints(referrerHandle, points) {
+  const cleanHandle = referrerHandle.replace('@', '').toLowerCase();
+  
+  try {
+    const data = await Points.addReferralPoints(cleanHandle, points);
+    console.log(`[Points] Awarded ${points} referral points to @${cleanHandle}`);
+    return data;
+  } catch (error) {
+    console.error(`[Points] Error awarding referral points to ${cleanHandle}:`, error.message);
+    return getAgentPoints(cleanHandle);
+  }
+}
+
+/**
  * Award verification bonus
  */
-function awardVerificationBonus(agentHandle) {
-  const data = getAgentPoints(agentHandle);
-
-  // Check if already received
-  const alreadyReceived = data.history.some(h => h.reason === 'Verification bonus');
-  if (alreadyReceived) {
-    return { success: false, error: 'Verification bonus already claimed', data };
+async function awardVerificationBonus(agentHandle) {
+  const cleanHandle = agentHandle.replace('@', '').toLowerCase();
+  
+  try {
+    const data = await getAgentPoints(cleanHandle);
+    
+    // Check if already received (bonus_points >= 500 is a rough check;
+    // for exactness we check if bonus already includes verification amount)
+    if (data.breakdown.bonuses >= POINT_REWARDS.VERIFICATION_BONUS) {
+      return { success: false, error: 'Verification bonus already claimed', data };
+    }
+    
+    const updated = await awardPoints(cleanHandle, POINT_REWARDS.VERIFICATION_BONUS, 'Verification bonus');
+    return { success: true, data: updated };
+  } catch (error) {
+    console.error(`[Points] Error awarding verification bonus:`, error.message);
+    return { success: false, error: error.message };
   }
-
-  return {
-    success: true,
-    data: awardPoints(agentHandle, POINT_REWARDS.VERIFICATION_BONUS, 'Verification bonus')
-  };
 }
 
 /**
  * Award whitelist bonus
  */
-function awardWhitelistBonus(agentHandle) {
-  const data = getAgentPoints(agentHandle);
-
-  // Check if already received
-  const alreadyReceived = data.history.some(h => h.reason === 'Whitelist bonus');
-  if (alreadyReceived) {
-    return { success: false, error: 'Whitelist bonus already claimed', data };
+async function awardWhitelistBonus(agentHandle) {
+  const cleanHandle = agentHandle.replace('@', '').toLowerCase();
+  
+  try {
+    const data = await getAgentPoints(cleanHandle);
+    
+    // Check if already received
+    if (data.breakdown.bonuses >= POINT_REWARDS.WHITELIST_BONUS) {
+      return { success: false, error: 'Whitelist bonus already claimed', data };
+    }
+    
+    const updated = await awardPoints(cleanHandle, POINT_REWARDS.WHITELIST_BONUS, 'Whitelist bonus');
+    return { success: true, data: updated };
+  } catch (error) {
+    console.error(`[Points] Error awarding whitelist bonus:`, error.message);
+    return { success: false, error: error.message };
   }
-
-  return {
-    success: true,
-    data: awardPoints(agentHandle, POINT_REWARDS.WHITELIST_BONUS, 'Whitelist bonus')
-  };
 }
 
 /**
- * Get points leaderboard
+ * Get points leaderboard (DB-backed)
  */
-function getPointsLeaderboard(limit = 20) {
-  const allAgents = Array.from(agentPoints.values());
-  return allAgents
-    .sort((a, b) => b.totalPoints - a.totalPoints)
-    .slice(0, limit)
-    .map((agent, index) => ({
+async function getPointsLeaderboard(limit = 20) {
+  try {
+    const leaderboard = await Points.getLeaderboard(limit);
+    return leaderboard.map((entry, index) => ({
       rank: index + 1,
-      handle: agent.handle,
-      totalPoints: agent.totalPoints,
-      breakdown: agent.breakdown
+      handle: entry.agentHandle,
+      totalPoints: entry.totalPoints,
+      breakdown: entry.breakdown
     }));
+  } catch (error) {
+    console.error('[Points] Error getting leaderboard:', error.message);
+    return [];
+  }
 }
 
 // ==========================================
@@ -286,10 +370,10 @@ function getPointsLeaderboard(limit = 20) {
 /**
  * Get participation options for an agent
  */
-function getParticipationOptions(agentHandle, verificationStatus) {
+async function getParticipationOptions(agentHandle, verificationStatus) {
   const options = [];
   const cleanHandle = agentHandle.replace('@', '').toLowerCase();
-  const points = getAgentPoints(cleanHandle);
+  const points = await getAgentPoints(cleanHandle);
 
   // Free market creation for verified agents
   if (verificationStatus && verificationStatus.confidence >= 50) {
@@ -412,6 +496,8 @@ module.exports = {
   awardPoints,
   awardMarketCreationPoints,
   awardVolumePoints,
+  awardWagerPoints,
+  awardReferralPoints,
   awardVerificationBonus,
   awardWhitelistBonus,
   getPointsLeaderboard,

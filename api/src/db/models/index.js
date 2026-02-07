@@ -7,7 +7,7 @@
 const Market = require('./Market');
 const Bet = require('./Bet');
 const Agent = require('./Agent');
-const { Royalty, Points } = require('./Royalty');
+const { Royalty, Points, Referral } = require('./Royalty');
 const { Resolution, ProcessedTweet, OddsHistory, Position } = require('./Resolution');
 
 module.exports = {
@@ -16,6 +16,7 @@ module.exports = {
   Agent,
   Royalty,
   Points,
+  Referral,
   Resolution,
   ProcessedTweet,
   OddsHistory,
