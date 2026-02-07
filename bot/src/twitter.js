@@ -117,8 +117,8 @@ class TwitterService {
       }
 
       const params = {
-        'tweet.fields': 'created_at,author_id,conversation_id,in_reply_to_user_id',
-        'expansions': 'author_id',
+        'tweet.fields': 'created_at,author_id,conversation_id,in_reply_to_user_id,referenced_tweets',
+        'expansions': 'author_id,referenced_tweets.id',
         'max_results': 20
       };
 

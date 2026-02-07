@@ -8,7 +8,7 @@
 class BetParser {
   constructor() {
     // Keywords that indicate a bet request
-    this.betKeywords = ['bet:', 'create bet', 'new bet', 'prediction:', 'market:'];
+    this.betKeywords = ['bet:', 'create bet', 'new bet', 'prediction:', 'market:', 'create market', 'new market'];
 
     // Bot command keywords - now includes 'bet on' for placing bets and 'status' for market updates
     this.commandKeywords = ['balance', 'withdraw', 'royalties', 'help', 'stats', 'status', 'update', 'bet on', 'wager'];
@@ -43,12 +43,38 @@ class BetParser {
 
   /**
    * Check if a tweet is a bet creation request
+   * Supports both structured formats (bet: "question") and natural language questions
+   * directed at the bot (e.g. "@AgentBetsBot Will X happen by Y?")
    */
   isBetRequest(text) {
     const lowerText = text.toLowerCase();
     // Make sure it's not a command
     if (this.isCommand(text)) return false;
-    return this.betKeywords.some(keyword => lowerText.includes(keyword));
+
+    // Check for explicit bet keywords
+    if (this.betKeywords.some(keyword => lowerText.includes(keyword))) {
+      return true;
+    }
+
+    // Check for natural language question patterns directed at the bot
+    // These match the same patterns that parseBet() can extract questions from
+    const naturalQuestionPatterns = [
+      /@\w+\s+Will\s+.+\?/i,
+      /@\w+\s+Who\s+.+\?/i,
+      /@\w+\s+What\s+.+\?/i,
+      /@\w+\s+Can\s+.+\?/i,
+      /@\w+\s+Does\s+.+\?/i,
+      /@\w+\s+Is\s+.+\?/i,
+      /@\w+\s+Are\s+.+\?/i,
+      /@\w+\s+How\s+many\s+.+\?/i,
+      /@\w+\s+[""].+[""]/,    // Quoted question directed at bot
+    ];
+
+    if (naturalQuestionPatterns.some(pattern => pattern.test(text))) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -223,11 +249,15 @@ class BetParser {
       const questionMatch = text.match(/[""]([^""]+)[""]/) ||
                            text.match(/bet:\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
                            text.match(/prediction:\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
+                           text.match(/(?:create|new)\s+(?:bet|market)\s*:?\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
                            text.match(/@\w+\s+(Will\s+.+\?)/i) ||
                            text.match(/@\w+\s+(Who\s+.+\?)/i) ||
                            text.match(/@\w+\s+(What\s+.+\?)/i) ||
                            text.match(/@\w+\s+(Can\s+.+\?)/i) ||
-                           text.match(/@\w+\s+(Does\s+.+\?)/i);
+                           text.match(/@\w+\s+(Does\s+.+\?)/i) ||
+                           text.match(/@\w+\s+(Is\s+.+\?)/i) ||
+                           text.match(/@\w+\s+(Are\s+.+\?)/i) ||
+                           text.match(/@\w+\s+(How\s+many\s+.+\?)/i);
 
       if (questionMatch) {
         result.question = questionMatch[1].trim();
@@ -236,33 +266,29 @@ class BetParser {
       }
 
       // Extract end date
-      const dateMatch = text.match(/ends?:\s*(\d{4}-\d{2}-\d{2})/i) ||
-                       text.match(/by\s+(\w+\s+\d{1,2},?\s*\d{4})/i) ||
-                       text.match(/until\s+(\d{4}-\d{2}-\d{2})/i);
-
-      if (dateMatch) {
-        const parsedDate = new Date(dateMatch[1]);
-        if (isNaN(parsedDate.getTime())) {
-          return { valid: false, error: 'Invalid date format. Use YYYY-MM-DD' };
-        }
-        
-        // Validate date is in the future (at least 10 minutes)
-        const now = new Date();
-        const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
-        
-        if (parsedDate <= now) {
-          return { valid: false, error: 'End date must be in the future. Cannot create markets that have already ended.' };
-        }
-        
-        if (parsedDate < tenMinutesFromNow) {
-          return { valid: false, error: 'End date must be at least 10 minutes in the future.' };
-        }
-        
-        result.endDate = parsedDate.toISOString();
+      const dateParseResult = this.parseEndDate(text);
+      
+      if (dateParseResult.error) {
+        return { valid: false, error: dateParseResult.error };
+      }
+      
+      if (dateParseResult.needsClarification) {
+        // Date is mentioned but too vague to parse precisely
+        result.endDate = null;
+        result.needsDateClarification = true;
+        result.detectedDatePhrase = dateParseResult.detectedPhrase;
+        result.suggestedDate = dateParseResult.suggestedDate;
+        result.suggestedDateLabel = dateParseResult.suggestedLabel;
+      } else if (dateParseResult.date) {
+        result.endDate = dateParseResult.date;
+        result.needsDateClarification = false;
       } else {
-        // Default to 7 days from now in UTC (minimum 10 minutes is guaranteed)
-        const defaultEnd = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-        result.endDate = defaultEnd.toISOString();
+        // No date mentioned at all — must ask
+        result.endDate = null;
+        result.needsDateClarification = true;
+        result.detectedDatePhrase = null;
+        result.suggestedDate = null;
+        result.suggestedDateLabel = null;
       }
 
       // Extract resolution source
@@ -413,6 +439,176 @@ class BetParser {
     }
 
     return result;
+  }
+
+  /**
+   * Parse end date from tweet text
+   * Returns: { date, error, needsClarification, detectedPhrase, suggestedDate }
+   * 
+   * Handles three cases:
+   * 1. Exact date provided (e.g. "ends: 2026-03-01", "by March 1, 2026") → returns date
+   * 2. Vague/relative date (e.g. "end of February", "by next month") → asks for clarification
+   * 3. No date at all → asks for clarification
+   */
+  parseEndDate(text) {
+    // 1. Try explicit/structured date formats first
+    const explicitPatterns = [
+      { regex: /ends?:\s*(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)/i, label: 'ends:' },
+      { regex: /until\s+(\d{4}-\d{2}-\d{2})/i, label: 'until' },
+      { regex: /by\s+(\w+\s+\d{1,2},?\s*\d{4})/i, label: 'by date' },
+      { regex: /(\d{4}-\d{2}-\d{2})/i, label: 'ISO date' },
+      // Standalone "Month Day, Year" (e.g. "February 28, 2026" or "Feb 28 2026")
+      { regex: /\b((?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2},?\s*\d{4})\b/i, label: 'month day year' },
+    ];
+
+    for (const { regex } of explicitPatterns) {
+      const match = text.match(regex);
+      if (match) {
+        const parsedDate = new Date(match[1]);
+        if (!isNaN(parsedDate.getTime())) {
+          const now = new Date();
+          if (parsedDate <= now) {
+            return { error: 'End date must be in the future. Cannot create markets that have already ended.' };
+          }
+          if (parsedDate < new Date(now.getTime() + 10 * 60 * 1000)) {
+            return { error: 'End date must be at least 10 minutes in the future.' };
+          }
+          return { date: parsedDate.toISOString() };
+        }
+      }
+    }
+
+    // 2. Detect vague/relative date references that we can't precisely parse
+    // These need clarification from the agent
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth(); // 0-indexed
+
+    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+                        'july', 'august', 'september', 'october', 'november', 'december'];
+    const monthAbbrevs = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                          'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+    // "end of [Month]" / "end of [Month] [Year]"
+    const endOfMonthMatch = text.match(/(?:end\s+of|by\s+end\s+of|by\s+the\s+end\s+of)\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?/i) ||
+                            text.match(/(?:end\s+of|by\s+end\s+of|by\s+the\s+end\s+of)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:\s+(\d{4}))?/i);
+
+    if (endOfMonthMatch) {
+      const monthStr = endOfMonthMatch[1].toLowerCase();
+      const yearStr = endOfMonthMatch[2];
+      let monthIdx = monthNames.indexOf(monthStr);
+      if (monthIdx === -1) monthIdx = monthAbbrevs.indexOf(monthStr);
+      const year = yearStr ? parseInt(yearStr) : (monthIdx >= currentMonth ? currentYear : currentYear + 1);
+
+      // Last day of that month, 23:59:59 UTC
+      const lastDay = new Date(Date.UTC(year, monthIdx + 1, 0, 23, 59, 59));
+      const monthLabel = monthNames[monthIdx].charAt(0).toUpperCase() + monthNames[monthIdx].slice(1);
+
+      return {
+        needsClarification: true,
+        detectedPhrase: endOfMonthMatch[0],
+        suggestedDate: lastDay.toISOString(),
+        suggestedLabel: `${monthLabel} ${lastDay.getUTCDate()}, ${year} (11:59 PM UTC)`
+      };
+    }
+
+    // "by [Month]" / "in [Month]" without a specific day
+    const byMonthMatch = text.match(/(?:by|in|before)\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?(?!\s+\d)/i) ||
+                          text.match(/(?:by|in|before)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:\s+(\d{4}))?(?!\s+\d)/i);
+
+    if (byMonthMatch) {
+      const monthStr = byMonthMatch[1].toLowerCase();
+      const yearStr = byMonthMatch[2];
+      let monthIdx = monthNames.indexOf(monthStr);
+      if (monthIdx === -1) monthIdx = monthAbbrevs.indexOf(monthStr);
+      const year = yearStr ? parseInt(yearStr) : (monthIdx >= currentMonth ? currentYear : currentYear + 1);
+
+      // Last day of that month
+      const lastDay = new Date(Date.UTC(year, monthIdx + 1, 0, 23, 59, 59));
+      const monthLabel = monthNames[monthIdx].charAt(0).toUpperCase() + monthNames[monthIdx].slice(1);
+
+      return {
+        needsClarification: true,
+        detectedPhrase: byMonthMatch[0],
+        suggestedDate: lastDay.toISOString(),
+        suggestedLabel: `${monthLabel} ${lastDay.getUTCDate()}, ${year} (11:59 PM UTC)`
+      };
+    }
+
+    // "next week" / "next month" / "this week"
+    const relativeMatch = text.match(/\b(next\s+week|next\s+month|this\s+week|this\s+month|tomorrow|tonight)\b/i);
+    if (relativeMatch) {
+      const phrase = relativeMatch[1].toLowerCase();
+      let suggested;
+      let label;
+      if (phrase === 'tomorrow' || phrase === 'tonight') {
+        suggested = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 23, 59, 59));
+        label = `${suggested.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' })} (11:59 PM UTC)`;
+      } else if (phrase === 'this week') {
+        const daysUntilSunday = 7 - now.getUTCDay();
+        suggested = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilSunday, 23, 59, 59));
+        label = `${suggested.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' })} (11:59 PM UTC)`;
+      } else if (phrase === 'next week') {
+        const daysUntilNextSunday = 14 - now.getUTCDay();
+        suggested = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilNextSunday, 23, 59, 59));
+        label = `${suggested.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' })} (11:59 PM UTC)`;
+      } else if (phrase === 'this month') {
+        suggested = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59));
+        label = `${suggested.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' })} (11:59 PM UTC)`;
+      } else if (phrase === 'next month') {
+        suggested = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 2, 0, 23, 59, 59));
+        label = `${suggested.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' })} (11:59 PM UTC)`;
+      }
+      return {
+        needsClarification: true,
+        detectedPhrase: relativeMatch[0],
+        suggestedDate: suggested?.toISOString() || null,
+        suggestedLabel: label || null
+      };
+    }
+
+    // 3. No date reference found at all
+    return { needsClarification: true, detectedPhrase: null, suggestedDate: null, suggestedLabel: null };
+  }
+
+  /**
+   * Parse a confirmation reply for a pending market creation
+   * The agent should reply with either:
+   *   - "confirm" / "yes" / "looks good" → use the suggested date
+   *   - A specific date like "2026-02-28" or "Feb 28, 2026" → use that date
+   *   - "cancel" / "no" / "nevermind" → cancel the market creation
+   */
+  parseConfirmationReply(text) {
+    const lower = text.toLowerCase().replace(/@\w+\s*/g, '').trim();
+
+    // Check for cancellation
+    if (/\b(cancel|nevermind|never\s*mind|nah|nope|forget\s*it|stop)\b/i.test(lower)) {
+      return { action: 'cancel' };
+    }
+
+    // Check for explicit date in the reply
+    const dateResult = this.parseEndDate(text);
+    if (dateResult.date) {
+      return { action: 'confirm', endDate: dateResult.date };
+    }
+
+    // Check for confirmation of the suggested date
+    if (/\b(confirm|yes|yeah|yep|yup|ok|okay|sure|looks?\s*good|correct|go\s*ahead|do\s*it|lgtm|approved?|that\s*works?)\b/i.test(lower)) {
+      return { action: 'confirm_suggested' };
+    }
+
+    // If they provided a date that needs clarification again, pass it through
+    if (dateResult.needsClarification && dateResult.suggestedDate) {
+      return { 
+        action: 'needs_clarification', 
+        detectedPhrase: dateResult.detectedPhrase,
+        suggestedDate: dateResult.suggestedDate,
+        suggestedLabel: dateResult.suggestedLabel
+      };
+    }
+
+    // Could not understand the reply
+    return { action: 'unknown' };
   }
 
   extractDateFromText(text) {

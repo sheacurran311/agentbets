@@ -50,6 +50,12 @@ let dbConnected = false;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const PENDING_RESOLUTIONS_FILE = path.join(DATA_DIR, 'pending-resolutions.json');
 const PROCESSED_TWEETS_FILE = path.join(DATA_DIR, 'processed-tweets.json');
+const PENDING_CONFIRMATIONS_FILE = path.join(DATA_DIR, 'pending-confirmations.json');
+
+// Pending market creation confirmations (awaiting date clarification from agents)
+// Key: tweetId (the bot's clarification reply tweet ID)
+// Value: { authorHandle, authorId, originalTweetId, betParams, suggestedDate, suggestedLabel, createdAt }
+let pendingConfirmations = new Map();
 
 /**
  * Validate required environment variables
@@ -275,6 +281,43 @@ function saveProcessedTweets() {
   }
 }
 
+/**
+ * Save pending confirmations to disk
+ */
+function savePendingConfirmations() {
+  try {
+    ensureDataDir();
+    const data = Object.fromEntries(pendingConfirmations);
+    fs.writeFileSync(PENDING_CONFIRMATIONS_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('[Persistence] Error saving pending confirmations to disk:', error.message);
+  }
+}
+
+/**
+ * Load pending confirmations from disk
+ */
+function loadPendingConfirmations() {
+  try {
+    if (fs.existsSync(PENDING_CONFIRMATIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PENDING_CONFIRMATIONS_FILE, 'utf8'));
+      const map = new Map(Object.entries(data));
+      // Expire confirmations older than 24 hours
+      const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+      for (const [key, val] of map) {
+        if (new Date(val.createdAt).getTime() < oneDayAgo) {
+          map.delete(key);
+        }
+      }
+      console.log(`[Persistence] Loaded ${map.size} pending confirmations from disk`);
+      return map;
+    }
+  } catch (error) {
+    console.error('[Persistence] Error loading pending confirmations from disk:', error.message);
+  }
+  return new Map();
+}
+
 // Initialize services
 const twitter = new TwitterService();
 const moltbook = new MoltbookService();
@@ -324,9 +367,11 @@ async function initializeStorage() {
   // Load persisted data
   processedTweets = await loadProcessedTweets();
   pendingResolutions = await loadPendingResolutions();
+  pendingConfirmations = loadPendingConfirmations();
   
   console.log(`[Bot] Loaded ${processedTweets.size} processed tweets`);
   console.log(`[Bot] Loaded ${pendingResolutions.size} pending resolutions`);
+  console.log(`[Bot] Loaded ${pendingConfirmations.size} pending market confirmations`);
 }
 
 /**
@@ -646,6 +691,113 @@ async function announceResolution(marketId, data, result) {
 }
 
 /**
+ * Extract the tweet ID that this tweet is replying to
+ * Uses referenced_tweets (preferred) or conversation_id as fallback
+ */
+function getReplyToTweetId(tweet) {
+  // Check referenced_tweets for a "replied_to" reference
+  if (tweet.referenced_tweets && Array.isArray(tweet.referenced_tweets)) {
+    const repliedTo = tweet.referenced_tweets.find(ref => ref.type === 'replied_to');
+    if (repliedTo) {
+      return repliedTo.id;
+    }
+  }
+  // Fallback: if in_reply_to_user_id is set, this is a reply (but we don't know to which tweet)
+  // conversation_id alone isn't enough since it's the root tweet of the thread
+  return null;
+}
+
+/**
+ * Handle a confirmation reply for a pending market creation
+ * Called when an agent replies to our "what date?" clarification tweet
+ */
+async function handleDateConfirmation(tweetId, authorHandle, authorId, text, botReplyId) {
+  const pending = pendingConfirmations.get(botReplyId);
+
+  if (!pending) {
+    console.log(`[Bot] No pending confirmation found for ${botReplyId}`);
+    return;
+  }
+
+  // Verify the same agent is replying
+  if (pending.authorHandle.toLowerCase() !== authorHandle.toLowerCase()) {
+    console.log(`[Bot] Confirmation reply from @${authorHandle} but market was requested by @${pending.authorHandle}, ignoring`);
+    return;
+  }
+
+  console.log(`[Bot] Processing date confirmation from @${authorHandle} for pending market`);
+
+  const confirmation = parser.parseConfirmationReply(text);
+
+  if (confirmation.action === 'cancel') {
+    console.log(`[Bot] @${authorHandle} cancelled market creation`);
+    pendingConfirmations.delete(botReplyId);
+    savePendingConfirmations();
+    await twitter.reply(tweetId, `@${authorHandle} Market creation cancelled.`);
+    return;
+  }
+
+  if (confirmation.action === 'confirm' && confirmation.endDate) {
+    // Agent provided a specific date
+    console.log(`[Bot] @${authorHandle} confirmed with specific date: ${confirmation.endDate}`);
+    pending.betParams.endDate = confirmation.endDate;
+    pending.betParams.needsDateClarification = false;
+    pendingConfirmations.delete(botReplyId);
+    savePendingConfirmations();
+    await createMarketFromParams(tweetId, authorHandle, pending.betParams);
+    return;
+  }
+
+  if (confirmation.action === 'confirm_suggested') {
+    // Agent confirmed the suggested date
+    if (pending.suggestedDate) {
+      console.log(`[Bot] @${authorHandle} confirmed suggested date: ${pending.suggestedDate}`);
+      pending.betParams.endDate = pending.suggestedDate;
+      pending.betParams.needsDateClarification = false;
+      pendingConfirmations.delete(botReplyId);
+      savePendingConfirmations();
+      await createMarketFromParams(tweetId, authorHandle, pending.betParams);
+      return;
+    } else {
+      // They said "confirm" but there was no suggested date
+      await twitter.reply(tweetId,
+        `@${authorHandle} I don't have a suggested date to confirm. Please reply with a specific date:\n\n` +
+        `• 2026-02-28\n` +
+        `• March 1, 2026`
+      );
+      return;
+    }
+  }
+
+  if (confirmation.action === 'needs_clarification') {
+    // They provided another vague date — suggest again
+    const clarificationReply = `@${authorHandle} Did you mean ${confirmation.suggestedLabel || new Date(confirmation.suggestedDate).toISOString().split('T')[0]}?\n\n` +
+      `Reply "confirm" to use that date, or provide a specific date like: 2026-02-28`;
+
+    const newReply = await twitter.reply(tweetId, clarificationReply);
+
+    if (newReply.success && newReply.id) {
+      // Move the pending confirmation to the new reply ID
+      pending.suggestedDate = confirmation.suggestedDate;
+      pending.suggestedLabel = confirmation.suggestedLabel;
+      pendingConfirmations.delete(botReplyId);
+      pendingConfirmations.set(newReply.id, pending);
+      savePendingConfirmations();
+    }
+    return;
+  }
+
+  // Could not understand the reply
+  console.log(`[Bot] Could not parse confirmation reply from @${authorHandle}: "${text}"`);
+  await twitter.reply(tweetId,
+    `@${authorHandle} I didn't understand that. Please reply with:\n\n` +
+    `• "confirm" to use the suggested date\n` +
+    `• A specific date like: 2026-02-28\n` +
+    `• "cancel" to cancel`
+  );
+}
+
+/**
  * Process a mention tweet
  */
 async function processMention(tweet) {
@@ -668,6 +820,13 @@ async function processMention(tweet) {
     const authorHandle = authorInfo.username;
 
     console.log(`[Bot] Author: @${authorHandle}`);
+
+    // Check if this is a reply to a pending date confirmation request
+    const replyToId = getReplyToTweetId(tweet);
+    if (replyToId && pendingConfirmations.has(replyToId)) {
+      await handleDateConfirmation(tweetId, authorHandle, authorId, text, replyToId);
+      return;
+    }
 
     // SECURITY: Scan for phishing before any processing
     const phishScan = phishingDetector.scanTweet(text);
@@ -752,6 +911,62 @@ async function processMention(tweet) {
 
     console.log(`[Bot] Parsed bet:`, betParams);
 
+    // DATE CLARIFICATION: If the date is vague or missing, ask the agent to confirm
+    if (betParams.needsDateClarification) {
+      console.log(`[Bot] Date needs clarification from @${authorHandle}`);
+      
+      let clarificationReply;
+      
+      if (betParams.detectedDatePhrase && betParams.suggestedDate) {
+        // We detected a vague date phrase and can suggest a specific date
+        clarificationReply = `@${authorHandle} I found your market question:\n\n` +
+          `"${betParams.question}"\n\n` +
+          `You said "${betParams.detectedDatePhrase}" — did you mean ${betParams.suggestedDateLabel || new Date(betParams.suggestedDate).toISOString().split('T')[0]}?\n\n` +
+          `Reply "confirm" to use that date, or provide a specific date like: 2026-02-28`;
+      } else {
+        // No date detected at all
+        clarificationReply = `@${authorHandle} I found your market question:\n\n` +
+          `"${betParams.question}"\n\n` +
+          `When should this market end? Reply with a date, e.g.:\n` +
+          `• 2026-02-28\n` +
+          `• March 1, 2026`;
+      }
+
+      const clarificationResult = await twitter.reply(tweetId, clarificationReply);
+      
+      if (clarificationResult.success && clarificationResult.id) {
+        // Store the pending confirmation keyed by our reply tweet ID
+        pendingConfirmations.set(clarificationResult.id, {
+          authorHandle,
+          authorId,
+          originalTweetId: tweetId,
+          betParams,
+          suggestedDate: betParams.suggestedDate || null,
+          suggestedLabel: betParams.suggestedDateLabel || null,
+          createdAt: new Date().toISOString()
+        });
+        savePendingConfirmations();
+        console.log(`[Bot] Awaiting date confirmation from @${authorHandle} (reply to ${clarificationResult.id})`);
+      } else {
+        console.error(`[Bot] Failed to send clarification reply to @${authorHandle}`);
+      }
+      return;
+    }
+
+    // Hand off to shared market creation logic
+    await createMarketFromParams(tweetId, authorHandle, betParams);
+
+  } catch (error) {
+    console.error(`[Bot] Error processing tweet:`, error);
+  }
+}
+
+/**
+ * Create a market from validated bet parameters
+ * Shared by both direct bet creation and date confirmation flows
+ */
+async function createMarketFromParams(tweetId, authorHandle, betParams) {
+  try {
     // SECURITY: Scan the parsed question for phishing content
     const questionScan = phishingDetector.scanQuestion(betParams.question);
     if (questionScan.isPhishing) {
@@ -908,9 +1123,11 @@ async function processMention(tweet) {
     }
 
     console.log(`[Bot] Successfully created and announced market`);
-
   } catch (error) {
-    console.error(`[Bot] Error processing tweet:`, error);
+    console.error(`[Bot] Error creating market:`, error);
+    await twitter.reply(tweetId,
+      `@${authorHandle} Sorry, something went wrong creating your market. Please try again.`
+    );
   }
 }
 
