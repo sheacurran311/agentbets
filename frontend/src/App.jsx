@@ -1209,8 +1209,25 @@ function App() {
       if (!oddsHistoryCache[selectedMarket.id]) {
         fetchOddsHistory(selectedMarket.id)
       }
+      // Sync on-chain data so pools/volume/bets are always current
+      if (selectedMarket.betPda) {
+        fetch(`${API_BASE}/onchain/sync/${selectedMarket.id}`, { method: 'POST' })
+          .then(res => res.json())
+          .then(data => {
+            if (data.success && data.changed) {
+              // Refresh market list with synced data
+              fetchMarkets()
+              refreshOddsHistory(selectedMarket.id)
+              // Update the selected market in place so the modal shows fresh data
+              if (data.market) {
+                setSelectedMarket(prev => prev ? { ...prev, ...data.market } : prev)
+              }
+            }
+          })
+          .catch(() => {}) // Ignore sync failures silently
+      }
     }
-  }, [selectedMarket, fetchOddsHistory, oddsHistoryCache])
+  }, [selectedMarket?.id])
 
   // Update countdown every second when date picker is open
   useEffect(() => {

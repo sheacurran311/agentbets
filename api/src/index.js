@@ -341,6 +341,87 @@ async function recordOddsHistory(marketId, market) {
   }
 }
 
+/**
+ * Sync a market's local data from on-chain PDA.
+ * Reads wagers, pools, and odds directly from the Solana program
+ * and updates the local database to match.
+ */
+async function syncMarketFromChain(marketId) {
+  try {
+    const market = await markets.get(marketId);
+    if (!market || !market.betPda) return { success: false, error: 'Market not found or not on-chain' };
+
+    const onChain = await pollFunService.getMarketData(market.betPda);
+    if (!onChain.success) return { success: false, error: onChain.error };
+
+    // On-chain values are in USDC (already divided by 1e6 in getMarketData),
+    // but local storage uses micro USDC, so multiply back
+    const yesPoolMicro = Math.round(onChain.yesPool * 1e6);
+    const noPoolMicro = Math.round(onChain.noPool * 1e6);
+    const totalVolumeMicro = yesPoolMicro + noPoolMicro;
+
+    const changed = (
+      market.yesPool !== yesPoolMicro ||
+      market.noPool !== noPoolMicro ||
+      market.totalBets !== (onChain.wagers?.length || 0)
+    );
+
+    if (changed) {
+      market.yesPool = yesPoolMicro;
+      market.noPool = noPoolMicro;
+      market.totalVolume = totalVolumeMicro;
+      market.totalBets = onChain.wagers?.length || 0;
+      market.yesOdds = onChain.yesOdds;
+      market.noOdds = onChain.noOdds;
+
+      await markets.set(marketId, market);
+      await recordOddsHistory(marketId, market);
+
+      console.log(`[Sync] Market ${marketId} synced from chain: ${onChain.totalPool.toFixed(2)} USDC pool, ${market.totalBets} bets`);
+    }
+
+    return { success: true, changed, market };
+  } catch (error) {
+    console.warn(`[Sync] Failed to sync market ${marketId}:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Sync all on-chain markets from their PDAs.
+ * Called on server startup to backfill any wagers placed outside the API.
+ */
+async function syncAllMarketsFromChain() {
+  try {
+    const allMarkets = await markets.findAll({ limit: 200 });
+    const onChainMarkets = allMarkets.filter(m => m.betPda);
+
+    if (onChainMarkets.length === 0) {
+      console.log('[Sync] No on-chain markets to sync');
+      return;
+    }
+
+    console.log(`[Sync] Syncing ${onChainMarkets.length} on-chain markets from Solana...`);
+
+    let synced = 0;
+    let changed = 0;
+
+    for (const m of onChainMarkets) {
+      const result = await syncMarketFromChain(m.id);
+      if (result.success) {
+        synced++;
+        if (result.changed) changed++;
+      }
+      // Small delay to avoid RPC rate limits
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    console.log(`[Sync] Complete: ${synced}/${onChainMarkets.length} synced, ${changed} updated`);
+  } catch (error) {
+    console.error('[Sync] Failed to sync markets from chain:', error.message);
+  }
+}
+
 // Expose database models and compatibility layer to routers via app.locals
 app.locals.db = db;
 app.locals.dbCompat = dbCompat;
@@ -2594,6 +2675,22 @@ app.post('/api/relay', async (req, res) => {
 // ═══════════════════════════════════════════════════════════
 
 /**
+ * Sync a market's local data from on-chain PDA
+ * POST /api/onchain/sync/:marketId
+ */
+app.post('/api/onchain/sync/:marketId', async (req, res) => {
+  try {
+    const result = await syncMarketFromChain(req.params.marketId);
+    if (!result.success) {
+      return res.status(404).json({ error: result.error });
+    }
+    res.json({ success: true, changed: result.changed, market: result.market });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * Get on-chain market data
  * GET /api/onchain/markets/:betPda
  */
@@ -4238,6 +4335,15 @@ async function startServer() {
       }
     } else {
       console.log('[Gasless] Relay disabled (set GASLESS_ENABLED=true to enable)');
+    }
+
+    // Sync on-chain markets from Solana PDAs on startup
+    // This backfills any wagers placed outside the API (e.g., before recording was added)
+    if (pollFunService.creatorKeypair) {
+      // Run sync in background so it doesn't delay server startup
+      syncAllMarketsFromChain().catch(err => {
+        console.warn('[Sync] Background sync failed:', err.message);
+      });
     }
 
     // Start server and store reference
