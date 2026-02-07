@@ -20,6 +20,7 @@ const BetParser = require('./parser');
 const AgentVerifier = require('./verifier');
 const ResolutionEngine = require('./resolver');
 const AgentBetsAPI = require('./api-client');
+const PhishingDetector = require('./phishing');
 
 // Database (optional - only available when running with full monorepo)
 // On Railway, the bot runs standalone and uses file-based storage
@@ -281,6 +282,7 @@ const parser = new BetParser();
 const verifier = new AgentVerifier();
 const resolver = new ResolutionEngine();
 const agentbets = new AgentBetsAPI();
+const phishingDetector = new PhishingDetector();
 
 // Storage - will be initialized async on startup
 let processedTweets = new Set();
@@ -325,6 +327,23 @@ async function initializeStorage() {
   
   console.log(`[Bot] Loaded ${processedTweets.size} processed tweets`);
   console.log(`[Bot] Loaded ${pendingResolutions.size} pending resolutions`);
+}
+
+/**
+ * Format a duration in milliseconds to a human-readable string
+ */
+function formatTimeRemaining(ms) {
+  if (ms <= 0) return 'Ended';
+
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) return `${days}d ${hours % 24}h`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${seconds}s`;
 }
 
 /**
@@ -650,6 +669,19 @@ async function processMention(tweet) {
 
     console.log(`[Bot] Author: @${authorHandle}`);
 
+    // SECURITY: Scan for phishing before any processing
+    const phishScan = phishingDetector.scanTweet(text);
+    if (phishScan.isPhishing) {
+      console.log(`[Bot] PHISHING DETECTED from @${authorHandle}: ${phishScan.reason} (severity: ${phishScan.severity})`);
+      await twitter.reply(tweetId,
+        `@${authorHandle} This request was blocked for safety.\n\n` +
+        `Reason: ${phishScan.reason}\n\n` +
+        `AgentBets will NEVER ask for private keys, seed phrases, or wallet secrets. ` +
+        `Never share these with anyone.`
+      );
+      return;
+    }
+
     // Check if this is a bot command (balance, withdraw, help, stats)
     if (parser.isCommand(text)) {
       await processCommand(tweetId, authorHandle, text);
@@ -684,17 +716,74 @@ async function processMention(tweet) {
 
     if (!betParams.valid) {
       console.log(`[Bot] Invalid bet format: ${betParams.error}`);
-      await twitter.reply(tweetId,
-        `@${authorHandle} I couldn't parse your bet. Please use this format:\n\n` +
-        `@AgentBetsBot bet: "Your question here?"\n` +
-        `ends: YYYY-MM-DD\n` +
-        `resolution: dexscreener|x-api|moltbook|manual\n` +
-        `threshold: [optional value]`
-      );
+
+      // Provide specific error message based on what's wrong
+      let errorReply;
+      const err = (betParams.error || '').toLowerCase();
+
+      if (err.includes('question') || err.includes('find question')) {
+        errorReply = `@${authorHandle} Missing question -- what are you betting on?\n\n` +
+          `Use quotes or end with a question mark:\n` +
+          `@AgentBetsBot bet: "Will $SOL hit $200 by March?"\n\n` +
+          `Or naturally:\n` +
+          `@AgentBetsBot Will $BONK reach $1M mcap by Feb 28?`;
+      } else if (err.includes('date') && err.includes('past')) {
+        errorReply = `@${authorHandle} That end date is in the past.\n\n` +
+          `Please use a future date:\n` +
+          `ends: YYYY-MM-DD (must be at least 10 minutes from now)`;
+      } else if (err.includes('date') && err.includes('10 min')) {
+        errorReply = `@${authorHandle} End date must be at least 10 minutes in the future.\n\n` +
+          `Try a later date, e.g. ends: ${new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}`;
+      } else if (err.includes('date')) {
+        errorReply = `@${authorHandle} Invalid or missing end date.\n\n` +
+          `Add when this bet should resolve:\n` +
+          `ends: YYYY-MM-DD\n\n` +
+          `Example: ends: ${new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}`;
+      } else {
+        // Fallback: show the specific parser error + format help
+        errorReply = `@${authorHandle} ${betParams.error}\n\n` +
+          `Format: @AgentBetsBot bet: "Your question?" ends: YYYY-MM-DD\n\n` +
+          `Example: @AgentBetsBot bet: "Will $SOL hit $200?" ends: 2026-03-01`;
+      }
+
+      await twitter.reply(tweetId, errorReply);
       return;
     }
 
     console.log(`[Bot] Parsed bet:`, betParams);
+
+    // SECURITY: Scan the parsed question for phishing content
+    const questionScan = phishingDetector.scanQuestion(betParams.question);
+    if (questionScan.isPhishing) {
+      console.log(`[Bot] PHISHING in bet question from @${authorHandle}: ${questionScan.reason}`);
+      await twitter.reply(tweetId,
+        `@${authorHandle} Your bet question was blocked for safety.\n\n` +
+        `${questionScan.reason}\n\n` +
+        `Bet questions should describe a verifiable outcome, not contain URLs or requests for private information.`
+      );
+      return;
+    }
+
+    // VALIDATION: Check if the bet outcome is verifiable
+    const verifiability = parser.validateVerifiability(betParams);
+    if (!verifiability.verifiable) {
+      console.log(`[Bot] Unverifiable bet from @${authorHandle}: ${verifiability.warnings.join(', ')}`);
+      let replyMsg = `@${authorHandle} Your bet needs a measurable, verifiable outcome.\n\n`;
+      replyMsg += `Issues:\n`;
+      for (const warning of verifiability.warnings.slice(0, 2)) {
+        replyMsg += `- ${warning}\n`;
+      }
+      if (verifiability.suggestion) {
+        replyMsg += `\n${verifiability.suggestion}`;
+      }
+      await twitter.reply(tweetId, replyMsg);
+      return;
+    }
+
+    // Log warnings even for verifiable bets (non-blocking)
+    if (verifiability.warnings.length > 0) {
+      console.log(`[Bot] Bet warnings for @${authorHandle}: ${verifiability.warnings.join(', ')}`);
+    }
 
     // Create market on AgentBets
     // If agent included initial bet, use create-and-bet endpoint
@@ -906,6 +995,58 @@ async function processCommand(tweetId, authorHandle, text) {
           `Volume: ${stats?.bets?.totalVolume?.toFixed(2) || 0} SOL\n\n` +
           `Create markets to earn royalties!`
         );
+        break;
+      }
+
+      case 'status': {
+        // Agent wants market status / bet update
+        const statusMarketId = command.marketId;
+
+        if (!statusMarketId) {
+          await twitter.reply(tweetId,
+            `@${authorHandle} Please specify a market ID.\n\n` +
+            `Format: @AgentBetsBot status [market ID]\n\n` +
+            `Find market IDs at agentbets.gg/markets`
+          );
+          break;
+        }
+
+        try {
+          const market = await agentbets.getMarket(statusMarketId);
+
+          if (!market || !market.id) {
+            await twitter.reply(tweetId,
+              `@${authorHandle} Market "${statusMarketId}" not found.\n\n` +
+              `Check the ID and try again. Browse markets at agentbets.gg/markets`
+            );
+            break;
+          }
+
+          const endDate = new Date(market.endDate);
+          const now = new Date();
+          const timeRemaining = endDate > now
+            ? formatTimeRemaining(endDate - now)
+            : 'Ended';
+          const yesOdds = market.yesOdds ? `${Math.round(market.yesOdds * 100)}%` : '50%';
+          const noOdds = market.noOdds ? `${Math.round(market.noOdds * 100)}%` : '50%';
+          const totalBets = market.bets?.length || market.totalBets || 0;
+          const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+
+          let statusMsg = `@${authorHandle} Market Update:\n\n` +
+            `"${(market.question || '').slice(0, 60)}${(market.question || '').length > 60 ? '...' : ''}"\n\n` +
+            `Status: ${market.status || 'active'}\n` +
+            `Odds: YES ${yesOdds} / NO ${noOdds}\n` +
+            `Bets: ${totalBets}\n` +
+            `Time left: ${timeRemaining}\n\n` +
+            `${baseUrl}/markets/${statusMarketId}`;
+
+          await twitter.reply(tweetId, statusMsg);
+        } catch (err) {
+          console.error(`[Bot] Error fetching market status:`, err.message);
+          await twitter.reply(tweetId,
+            `@${authorHandle} Sorry, I couldn't fetch that market's status. Try again shortly.`
+          );
+        }
         break;
       }
 
@@ -1181,10 +1322,34 @@ app.post('/resolve', async (req, res) => {
 });
 
 /**
+ * Authenticate webhook requests via API key
+ * Returns true if authenticated, false otherwise
+ */
+function authenticateWebhook(req, res) {
+  const apiKey = process.env.AGENTBETS_API_KEY;
+  if (!apiKey) {
+    console.warn('[Webhook] AGENTBETS_API_KEY not set - webhook authentication disabled (dev mode)');
+    return true;
+  }
+
+  const providedKey = req.headers['x-api-key'];
+  if (!providedKey || providedKey !== apiKey) {
+    console.warn(`[Webhook] Unauthorized webhook request from ${req.ip}`);
+    res.status(401).json({ success: false, error: 'Unauthorized: invalid or missing API key' });
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Webhook endpoint for admin confirmations
  * Called by API server when admin confirms a resolution
  */
 app.post('/webhook/resolution-confirmed', async (req, res) => {
+  // Verify the request is from our API server
+  if (!authenticateWebhook(req, res)) return;
+
   const { marketId, outcome, actualValue, source, data: marketData } = req.body;
 
   console.log(`[Webhook] Received resolution confirmation for market ${marketId}`);
@@ -1218,6 +1383,43 @@ app.post('/webhook/resolution-confirmed', async (req, res) => {
   console.log(`[Webhook] Market ${marketId} final resolution announced`);
 
   res.json({ success: true, message: 'Resolution announced' });
+});
+
+/**
+ * Webhook endpoint for bet placement notifications
+ * Called by API server when a bet is successfully placed on a market
+ */
+app.post('/webhook/bet-placed', async (req, res) => {
+  // Verify the request is from our API server
+  if (!authenticateWebhook(req, res)) return;
+
+  const { marketId, bettor, outcome, amount, currency, question, creatorAgent } = req.body;
+
+  console.log(`[Webhook] Bet placed on market ${marketId}: ${amount} ${currency || 'USDC'} ${outcome} by ${bettor || 'anonymous'}`);
+
+  try {
+    // Build notification tweet
+    const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+    const marketUrl = `${baseUrl}/markets/${marketId}`;
+
+    const bettorTag = bettor ? `@${bettor.replace('@', '')}` : 'A user';
+    const creatorTag = creatorAgent ? ` ${creatorAgent}` : '';
+    const questionSnippet = question
+      ? `"${question.slice(0, 60)}${question.length > 60 ? '...' : ''}"`
+      : `market ${marketId}`;
+
+    await twitter.tweet(
+      `New bet! ${bettorTag} wagered ${amount} ${currency || 'USDC'} on ${outcome}${creatorTag}\n\n` +
+      `${questionSnippet}\n\n` +
+      `Join the action: ${marketUrl}`
+    );
+
+    console.log(`[Webhook] Bet placement announced for market ${marketId}`);
+    res.json({ success: true, message: 'Bet placement announced' });
+  } catch (error) {
+    console.error(`[Webhook] Error announcing bet placement:`, error.message);
+    res.json({ success: true, message: 'Bet recorded but announcement failed' });
+  }
 });
 
 // Start server with async initialization
@@ -1281,9 +1483,27 @@ async function startBot() {
 
       // Initial check
       if (process.env.TWITTER_BEARER_TOKEN) {
-        console.log('[Bot] Twitter credentials configured, starting polling...');
+        console.log('[Bot] Twitter credentials configured, starting real-time stream + polling fallback...');
 
-        // Check mentions every 2 minutes
+        // PRIMARY: Start filtered stream for instant mention detection
+        try {
+          const botHandle = process.env.BOT_USERNAME || 'AgentBetsBot';
+          const streamResult = await twitter.startFilteredStream(async (tweet) => {
+            console.log(`[Stream] Processing real-time mention: ${tweet.id}`);
+            await processMention(tweet);
+          }, botHandle);
+
+          if (streamResult && streamResult.active) {
+            console.log('[Bot] Real-time stream active - mentions will be processed instantly');
+          } else {
+            console.log('[Bot] Stream not available - relying on polling');
+          }
+        } catch (streamError) {
+          console.warn('[Bot] Failed to start stream:', streamError.message);
+          console.log('[Bot] Falling back to polling only');
+        }
+
+        // FALLBACK: Check mentions every 2 minutes (catches anything the stream misses)
         const mentionJob = new CronJob('*/2 * * * *', checkMentions);
         mentionJob.start();
 
@@ -1331,6 +1551,9 @@ process.on('SIGTERM', async () => {
   await savePendingResolutions();
   saveProcessedTweets();
   
+  // Stop the Twitter stream
+  twitter.stopStream();
+  
   // Cancel all scheduled jobs
   for (const [marketId, job] of scheduledJobs) {
     job.cancel();
@@ -1348,6 +1571,9 @@ process.on('SIGINT', async () => {
   console.log('[Bot] Received SIGINT, saving state...');
   await savePendingResolutions();
   saveProcessedTweets();
+  
+  // Stop the Twitter stream
+  twitter.stopStream();
   
   // Cancel all scheduled jobs
   for (const [marketId, job] of scheduledJobs) {

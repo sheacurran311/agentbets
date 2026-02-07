@@ -1523,7 +1523,7 @@ app.put('/api/markets/:id/resolve', async (req, res) => {
  */
 app.post('/api/bets', betLimiter, async (req, res) => {
   try {
-    const { marketId, outcome, amount, wallet, txSignature, agentHandle } = req.body;
+    const { marketId, outcome, amount, wallet, txSignature, agentHandle, source } = req.body;
 
     if (!marketId || !outcome || !amount || !wallet) {
       return res.status(400).json({
@@ -1546,6 +1546,12 @@ app.post('/api/bets', betLimiter, async (req, res) => {
 
     if (!['YES', 'NO'].includes(outcome)) {
       return res.status(400).json({ error: 'Outcome must be YES or NO' });
+    }
+
+    // Enforce $1 minimum bet (50-wager cap per market makes sub-dollar bets uneconomical)
+    const betAmountParsed = parseFloat(amount);
+    if (isNaN(betAmountParsed) || betAmountParsed < 1) {
+      return res.status(400).json({ error: 'Minimum bet amount is 1 USDC' });
     }
 
     // Verify transaction on-chain if signature provided
@@ -1594,9 +1600,12 @@ app.post('/api/bets', betLimiter, async (req, res) => {
       wallet,
       agentHandle: agentHandle || null,
       txSignature: txSignature || null,
+      betPda: market.betPda || null,
+      onChain: market.onChain || false,
       placedAt: new Date().toISOString(),
       status: 'active', // active, won, lost, claimed
-      currency: 'USDC'
+      currency: 'USDC',
+      source: source || (market.onChain ? 'api-onchain' : 'api')
     };
 
     await bets.set(betId, bet);
@@ -1648,6 +1657,27 @@ app.post('/api/bets', betLimiter, async (req, res) => {
       pointsAwarded: pointsAwarded ? pointsAwarded.totalPoints : null,
       message: `Bet placed! ${amount} USDC on ${outcome}`
     });
+
+    // Notify bot of bet placement (non-blocking)
+    if (process.env.BOT_WEBHOOK_URL) {
+      axios.post(`${process.env.BOT_WEBHOOK_URL}/webhook/bet-placed`, {
+        marketId: market.id,
+        bettor: agentHandle || wallet?.slice(0, 8),
+        outcome,
+        amount,
+        currency: 'USDC',
+        question: market.question,
+        creatorAgent: market.creatorAgent
+      }, {
+        headers: {
+          'X-API-Key': process.env.AGENTBETS_API_KEY || '',
+          'Content-Type': 'application/json'
+        },
+        timeout: 5000
+      }).catch(err => {
+        console.warn('[Webhook] Failed to notify bot of bet placement:', err.message);
+      });
+    }
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -2456,6 +2486,12 @@ app.post('/api/onchain/wager', async (req, res) => {
 
     if (!['YES', 'NO'].includes(outcome)) {
       return res.status(400).json({ error: 'Outcome must be YES or NO' });
+    }
+
+    // Enforce $1 minimum bet (50-wager cap per market makes sub-dollar bets uneconomical)
+    const betAmountParsed = parseFloat(amount);
+    if (isNaN(betAmountParsed) || betAmountParsed < 1) {
+      return res.status(400).json({ error: 'Minimum bet amount is 1 USDC' });
     }
 
     // Check 50-wager limit (Poll.fun on-chain max)
@@ -3428,7 +3464,7 @@ app.get('/api/agent-info', (req, res) => {
     },
     supported_tokens: ['SOL', 'USDC'],
     networks: {
-      payments: 'Base Sepolia (testnet) / Base (mainnet)',
+      payments: process.env.SOLANA_NETWORK === 'devnet' ? 'Solana Devnet (USDC)' : 'Solana Mainnet (USDC)',
       markets: 'Solana'
     }
   });
@@ -3910,7 +3946,7 @@ app.get('/api', (req, res) => {
 app.post('/api/agent/bet/:marketId',
   agentLimiter,
   requireApiKey,
-  x402.x402BetGate({ minAmount: 0.01, maxAmount: 10000 }),
+  x402.x402BetGate({ minAmount: 1, maxAmount: 10000 }),
   async (req, res) => {
     try {
       const { marketId } = req.params;
@@ -4087,6 +4123,11 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
     const paymentHeader = x402.getPaymentHeader(req);
 
     if (initialBet && initialBet > 0) {
+      // Enforce $1 minimum bet (50-wager cap per market makes sub-dollar bets uneconomical)
+      if (initialBet < 1) {
+        return res.status(400).json({ error: 'Minimum bet amount is 1 USDC' });
+      }
+
       if (!paymentHeader) {
         // No payment - return 402 with requirements
         const marketId = 'pending-' + Date.now(); // Temporary ID
@@ -4246,11 +4287,12 @@ app.get('/api/agent/bet/:marketId/price', async (req, res) => {
   const betOutcome = (outcome || 'YES').toUpperCase();
 
   // Build payment requirements without sending 402
+  const solanaNetwork = process.env.SOLANA_NETWORK === 'devnet' ? 'solana:devnet' : 'solana:mainnet';
   const requirements = x402.buildBetPaymentRequirements({
     amountUSDC,
     marketId,
     outcome: betOutcome,
-    network: 'eip155:84532' // Testnet
+    network: solanaNetwork
   });
 
   res.json({
@@ -4269,8 +4311,8 @@ app.get('/api/agent/bet/:marketId/price', async (req, res) => {
     },
     x402: {
       payTo: x402.getPayToAddress(),
-      network: 'eip155:84532',
-      networkName: 'Base Sepolia (testnet)',
+      network: solanaNetwork,
+      networkName: process.env.SOLANA_NETWORK === 'devnet' ? 'Solana Devnet' : 'Solana Mainnet',
       currency: 'USDC',
       amount: amountUSDC,
       paymentHeader: requirements

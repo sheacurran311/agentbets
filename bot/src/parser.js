@@ -10,8 +10,8 @@ class BetParser {
     // Keywords that indicate a bet request
     this.betKeywords = ['bet:', 'create bet', 'new bet', 'prediction:', 'market:'];
 
-    // Bot command keywords - now includes 'bet on' for placing bets
-    this.commandKeywords = ['balance', 'withdraw', 'royalties', 'help', 'stats', 'bet on', 'wager'];
+    // Bot command keywords - now includes 'bet on' for placing bets and 'status' for market updates
+    this.commandKeywords = ['balance', 'withdraw', 'royalties', 'help', 'stats', 'status', 'update', 'bet on', 'wager'];
 
     // Resolution source mappings
     this.resolutionSources = {
@@ -94,6 +94,17 @@ class BetParser {
       return { command: 'stats' };
     }
 
+    // Market status / bet update command
+    if (lowerText.includes('status') || lowerText.includes('update')) {
+      // Extract market ID from text
+      const marketIdMatch = text.match(/(?:status|update)\s+(?:(?:market|bet|on)\s+)?([a-zA-Z0-9_-]{6,32})/i) ||
+                            text.match(/(?:market|bet)\s+([a-zA-Z0-9_-]{6,32})\s+(?:status|update)/i);
+      return {
+        command: 'status',
+        marketId: marketIdMatch ? marketIdMatch[1] : null
+      };
+    }
+
     // NEW: Bet placement command
     if (lowerText.includes('bet on') || lowerText.includes('wager on') ||
         /\d+\s*(usdc|sol)\s+(yes|no)\s+on/i.test(lowerText)) {
@@ -137,10 +148,18 @@ class BetParser {
     };
 
     // Extract amount and currency
-    const amountMatch = text.match(/(\d+(?:\.\d+)?)\s*(usdc|sol)/i);
+    const amountMatch = text.match(/(\d+(?:\.\d+)?)\s*(usdc|sol|eth|btc|bonk|usdt)/i);
     if (amountMatch) {
       result.amount = parseFloat(amountMatch[1]);
-      result.currency = amountMatch[2].toUpperCase();
+      const requestedCurrency = amountMatch[2].toUpperCase();
+
+      // Only USDC is accepted for bets
+      if (requestedCurrency !== 'USDC') {
+        result.error = `AgentBets markets use USDC only. "${requestedCurrency}" is not accepted.\n\nUse: "bet 10 USDC YES on market [ID]"`;
+        return result;
+      }
+
+      result.currency = 'USDC';
     }
 
     // Extract outcome (YES/NO)
@@ -287,12 +306,22 @@ class BetParser {
 
       // NEW: Extract initial bet amount (for create + bet in one tweet)
       // Formats: "betting 10 USDC YES", "wager: 5 USDC NO", "10 USDC on YES"
-      const betAmountMatch = text.match(/(?:betting|wager|stake|put)\s*:?\s*(\d+(?:\.\d+)?)\s*(usdc|sol)/i) ||
-                             text.match(/(\d+(?:\.\d+)?)\s*(usdc|sol)\s+(?:on\s+)?(yes|no)/i);
+      const betAmountMatch = text.match(/(?:betting|wager|stake|put)\s*:?\s*(\d+(?:\.\d+)?)\s*(usdc|sol|eth|btc|bonk|usdt)/i) ||
+                             text.match(/(\d+(?:\.\d+)?)\s*(usdc|sol|eth|btc|bonk|usdt)\s+(?:on\s+)?(yes|no)/i);
 
       if (betAmountMatch) {
+        const requestedCurrency = betAmountMatch[2].toUpperCase();
+
+        // Only USDC is accepted for bets
+        if (requestedCurrency !== 'USDC') {
+          return {
+            valid: false,
+            error: `AgentBets markets use USDC only. "${requestedCurrency}" is not accepted for bets. Use USDC instead.`
+          };
+        }
+
         result.initialBet = parseFloat(betAmountMatch[1]);
-        result.initialCurrency = betAmountMatch[2].toUpperCase();
+        result.initialCurrency = 'USDC';
 
         // Get outcome if present
         const outcomeMatch = text.match(/\b(yes|no)\b/i);
@@ -442,6 +471,116 @@ class BetParser {
   extractToken(text) {
     const match = text.match(/\$([A-Z]+)/);
     return match ? match[1] : null;
+  }
+
+  /**
+   * Validate that a bet has a verifiable outcome
+   * Returns { verifiable, warnings[], suggestion }
+   */
+  validateVerifiability(betParams) {
+    const result = {
+      verifiable: true,
+      warnings: [],
+      suggestion: null
+    };
+
+    if (!betParams || !betParams.question) {
+      return { verifiable: false, warnings: ['No question provided'], suggestion: null };
+    }
+
+    const question = betParams.question;
+    const lower = question.toLowerCase();
+
+    // Subjective / opinion keywords that indicate unverifiable outcomes
+    const subjectivePatterns = [
+      { pattern: /\b(best|worst|greatest|most important|least important)\b/i, label: 'subjective comparison' },
+      { pattern: /\b(should|could|might|would|may)\s+(we|they|it|he|she)\b/i, label: 'speculative language' },
+      { pattern: /\b(beautiful|ugly|amazing|terrible|awesome|awful|good|bad)\b/i, label: 'opinion-based adjective' },
+      { pattern: /\b(deserve|fair|unfair|right|wrong|ethical|moral)\b/i, label: 'value judgment' },
+    ];
+
+    // Vague / unmeasurable outcome patterns
+    const vaguePatterns = [
+      { pattern: /\b(go mainstream|take over|dominate|revolutionize|change the world)\b/i, label: 'vague outcome' },
+      { pattern: /\b(full autonomy|fully autonomous|sentient|conscious)\b/i, label: 'unmeasurable concept' },
+      { pattern: /\b(moon|pump|dump|rug)\b/i, label: 'slang without threshold', needsThreshold: true },
+      { pattern: /\b(succeed|fail|win)\b(?!.*\b(hackathon|contest|competition|game|match)\b)/i, label: 'vague success/failure' },
+    ];
+
+    // Check for subjective questions
+    for (const { pattern, label } of subjectivePatterns) {
+      if (pattern.test(question)) {
+        result.warnings.push(`Question contains ${label}: not objectively verifiable`);
+      }
+    }
+
+    // Check for vague outcomes
+    for (const { pattern, label, needsThreshold } of vaguePatterns) {
+      if (pattern.test(question)) {
+        if (needsThreshold && !betParams.threshold) {
+          result.warnings.push(`"${label}" needs a specific number/threshold to be verifiable`);
+        } else if (!needsThreshold) {
+          result.warnings.push(`Question contains ${label}: hard to verify objectively`);
+        }
+      }
+    }
+
+    // If resolution is manual AND there are warnings, it's unverifiable
+    if (betParams.resolution === 'manual' && result.warnings.length > 0) {
+      result.verifiable = false;
+      result.suggestion = this.generateVerifiabilitySuggestion(question, betParams);
+    }
+
+    // Check: quantitative bets (token/price) without a threshold
+    if (['dexscreener', 'coingecko', 'x-api', 'moltbook'].includes(betParams.resolution)) {
+      if (!betParams.threshold && !this.hasImplicitThreshold(question)) {
+        result.warnings.push(`Quantitative bet missing a threshold/target number`);
+        result.verifiable = false;
+        result.suggestion = this.generateThresholdSuggestion(question, betParams);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Check if the question has an implicit numeric threshold embedded in it
+   */
+  hasImplicitThreshold(question) {
+    // Patterns like "hit $1M", "reach 10K", "above 100", "$200 price"
+    return /\$[\d,.]+[KkMmBb]?|\d{2,}[KkMmBb]\b|\b\d+(?:,\d{3})+\b/.test(question);
+  }
+
+  /**
+   * Generate a suggestion for making the question verifiable
+   */
+  generateVerifiabilitySuggestion(question, betParams) {
+    const lower = question.toLowerCase();
+
+    if (/\$[A-Z]+/i.test(question)) {
+      const token = question.match(/\$([A-Z]+)/i)?.[1] || 'TOKEN';
+      return `Try: "Will $${token} hit $X mcap by [date]?" with a specific number`;
+    }
+
+    if (/@\w+/.test(question)) {
+      const handle = question.match(/@(\w+)/)?.[1] || 'handle';
+      return `Try: "Will @${handle} reach X followers by [date]?" with a specific number`;
+    }
+
+    return `Make your bet measurable. Use a specific number/threshold that can be verified by an API (e.g., price, followers, mcap)`;
+  }
+
+  /**
+   * Generate a suggestion for adding a threshold
+   */
+  generateThresholdSuggestion(question, betParams) {
+    if (betParams.targetToken) {
+      return `Add a target: "Will $${betParams.targetToken} hit $[amount] by [date]?"`;
+    }
+    if (betParams.targetHandle) {
+      return `Add a target: "Will @${betParams.targetHandle} reach [number] followers by [date]?"`;
+    }
+    return `Add a measurable threshold (e.g., "$1M mcap", "10K followers", "$200 price")`;
   }
 }
 

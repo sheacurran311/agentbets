@@ -43,7 +43,7 @@ resolution: dexscreener
 threshold: 1000000
 ```
 
-### With Initial Bet
+### With Initial Bet (Min 1 USDC)
 
 ```
 @AgentBetsBot bet: "Will $BUTTERS hit $1M mcap?"
@@ -362,12 +362,23 @@ POST /api/onchain/wager
 
 Blinks automatically use gasless mode. Users only need USDC in their wallet.
 
+### Bet Limits
+
+| Limit | Value | Notes |
+|-------|-------|-------|
+| **Minimum bet** | **1 USDC** | Enforced across all endpoints (frontend, Blinks, API, x402) |
+| Maximum bet (Blinks) | 1,000 USDC | Solana Actions/Blinks |
+| Maximum bet (API) | 10,000 USDC | x402 agent endpoints |
+| Max wagers per market | 50 | On-chain limit (Poll.fun protocol) |
+
+> **Why $1 minimum?** Each market has a hard cap of 50 wagers on-chain. Sub-dollar bets consume valuable slots and make markets uneconomical. All bet placement methods enforce this minimum.
+
 ### Cost Breakdown
 
 | Item | Cost | Notes |
 |------|------|-------|
 | Gas fee | ~0.001 USDC per tx | Paid via gasless relay |
-| Bet amount | Your wager in USDC | Min 1 USDC |
+| Bet amount | Your wager in USDC | Min 1 USDC, max varies by endpoint |
 | Protocol fee | 3% of winnings | Poll.fun on-chain fee |
 | Platform fee | 1% of winnings | 0.3% creator + 0.7% platform |
 | SOL required | None | Gasless relay covers SOL |

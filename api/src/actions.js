@@ -65,7 +65,7 @@ router.get('/bet/:marketId', async (req, res) => {
 
   try {
     const { marketId } = req.params;
-    const market = req.app.locals.markets?.get(marketId);
+    const market = await req.app.locals.markets?.get(marketId);
 
     if (!market) {
       return res.status(404).json({
@@ -78,7 +78,7 @@ router.get('/bet/:marketId', async (req, res) => {
         type: 'completed',
         icon: AGENTBETS_ICON,
         title: 'Market Closed',
-        description: `This market has been resolved: ${market.resolution}`,
+        description: `This market has been resolved: ${market.resolution || 'N/A'}`,
         label: 'Closed',
         disabled: true
       });
@@ -216,7 +216,7 @@ router.post('/bet/:marketId/place', async (req, res) => {
       });
     }
 
-    const market = req.app.locals.markets?.get(marketId);
+    const market = await req.app.locals.markets?.get(marketId);
     if (!market) {
       return res.status(404).json({
         error: { message: 'Market not found' }
@@ -388,7 +388,7 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
       });
     }
 
-    const market = req.app.locals.markets?.get(marketId);
+    const market = await req.app.locals.markets?.get(marketId);
     if (!market) {
       return res.status(404).json({
         error: { message: 'Market not found' }
@@ -424,7 +424,7 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
         onChain: true
       };
 
-      bets.set(betId, bet);
+      await bets.set(betId, bet);
 
       // Update local market pools (will be synced with on-chain data)
       if (outcome === 'YES') {
@@ -442,7 +442,7 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
         market.noOdds = (market.noPool || 0) / totalPool;
       }
 
-      req.app.locals.markets.set(marketId, market);
+      await req.app.locals.markets.set(marketId, market);
 
       // Record odds history so charts update with Blink bets
       const oddsHistory = req.app.locals.oddsHistory;
@@ -462,7 +462,7 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
 
       // Update positions
       const positionKey = `${account}-${marketId}-${outcome}`;
-      const existingPosition = positions.get(positionKey) || {
+      const existingPosition = (await positions.get(positionKey)) || {
         wallet: account,
         marketId,
         outcome,
@@ -471,7 +471,7 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
       };
       existingPosition.totalBet += amountUsdc;
       existingPosition.bets.push(betId);
-      positions.set(positionKey, existingPosition);
+      await positions.set(positionKey, existingPosition);
     }
 
     // Fetch updated on-chain data for display
@@ -517,7 +517,8 @@ router.get('/markets', async (req, res) => {
     const markets = req.app.locals.markets;
     
     // Prioritize on-chain markets, then sort by volume
-    const activeMarkets = Array.from(markets?.values() || [])
+    const allMarkets = (await markets?.values()) || [];
+    const activeMarkets = Array.from(allMarkets)
       .filter(m => m.status === 'active')
       .sort((a, b) => {
         // On-chain markets first
@@ -789,7 +790,7 @@ router.post('/create/submit', async (req, res) => {
       source: 'blink' // Track that this came from a Blink
     };
 
-    markets.set(marketId, market);
+    await markets.set(marketId, market);
 
     // Record for royalty tracking
     royalties.recordMarketCreation(creatorAgent, marketId);

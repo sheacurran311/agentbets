@@ -1443,8 +1443,8 @@ function App() {
       return
     }
 
-    if (!betAmount || parseFloat(betAmount) <= 0) {
-      alert('Please enter a valid bet amount')
+    if (!betAmount || parseFloat(betAmount) < 1) {
+      alert('Minimum bet is $1 USDC')
       return
     }
 
@@ -1518,9 +1518,7 @@ function App() {
         setTxStatus({ type: 'success', message: 'Bet confirmed on-chain!' })
 
         // Record bet in API so market data (volume, pools, odds) updates.
-        // Don't send txSignature — the RPC often hasn't indexed the tx yet,
-        // which causes verifyBetTransaction to fail with "Transaction not found".
-        // We already confirmed on-chain via polling, so verification is redundant.
+        // Transaction is confirmed on-chain, so include the signature.
         try {
           const recordRes = await fetch(`${API_BASE}/bets`, {
             method: 'POST',
@@ -1529,7 +1527,9 @@ function App() {
               marketId: selectedMarket.id,
               outcome,
               amount, // raw USDC — backend converts to micro internally
-              wallet: publicKey.toString()
+              wallet: publicKey.toString(),
+              txSignature: signature,
+              source: 'frontend'
             })
           })
           if (!recordRes.ok) {
@@ -1600,9 +1600,7 @@ function App() {
         setTxStatus({ type: 'success', message: 'Bet confirmed on-chain!' })
 
         // Record bet in API so market data (volume, pools, odds) updates.
-        // Don't send txSignature — the RPC often hasn't indexed the tx yet,
-        // which causes verifyBetTransaction to fail with "Transaction not found".
-        // We already confirmed on-chain via polling, so verification is redundant.
+        // Transaction is confirmed on-chain, so include the signature.
         try {
           const recordRes = await fetch(`${API_BASE}/bets`, {
             method: 'POST',
@@ -1611,7 +1609,9 @@ function App() {
               marketId: selectedMarket.id,
               outcome,
               amount, // raw USDC — backend converts to micro internally
-              wallet: publicKey.toString()
+              wallet: publicKey.toString(),
+              txSignature: signature,
+              source: 'frontend'
             })
           })
           if (!recordRes.ok) {

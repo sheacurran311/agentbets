@@ -328,14 +328,14 @@ async function verifyPaymentOnChain(signature, options = {}) {
  *   );
  * 
  * Options:
- *   - minAmount: Minimum bet amount in USDC (default: 0.01)
+ *   - minAmount: Minimum bet amount in USDC (default: 1)
  *   - maxAmount: Maximum bet amount in USDC (default: 10000)
  *   - verifyOnChain: Whether to verify payment on-chain (default: true for production)
  *   - skipVerification: Skip verification for testing (default: false)
  */
 function x402BetGate(options = {}) {
   const { 
-    minAmount = 0.01, 
+    minAmount = 1, 
     maxAmount = 10000,
     verifyOnChain = process.env.NODE_ENV === 'production',
     skipVerification = process.env.SKIP_X402_VERIFICATION === 'true'

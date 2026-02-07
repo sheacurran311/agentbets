@@ -488,6 +488,184 @@ class TwitterService {
     }
   }
 
+  // ==========================================
+  // FILTERED STREAM METHODS
+  // Real-time mention detection via Twitter API v2
+  // ==========================================
+
+  /**
+   * Start a filtered stream for real-time mention detection
+   * @param {Function} onTweet - Callback for each incoming tweet
+   * @param {string} botUsername - The bot's username (without @) for stream rules
+   * @returns {Object} Stream object (or null if not supported)
+   */
+  async startFilteredStream(onTweet, botUsername = 'AgentBetsBot') {
+    if (!this.readClient) {
+      console.log('[Twitter/Stream] Read client not configured, cannot start stream');
+      return null;
+    }
+
+    // Track reconnection state
+    this.streamReconnectAttempts = 0;
+    this.maxReconnectAttempts = 10;
+    this.streamActive = false;
+
+    try {
+      // Set up stream rules - match mentions of our bot
+      await this.setupStreamRules(botUsername);
+
+      // Start the stream
+      await this.connectStream(onTweet);
+
+      return { active: true };
+    } catch (error) {
+      console.error('[Twitter/Stream] Failed to start filtered stream:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Set up filtered stream rules to match @AgentBetsBot mentions
+   */
+  async setupStreamRules(botUsername) {
+    try {
+      // Get existing rules
+      const existingRules = await this.readClient.v2.streamRules();
+      const currentRules = existingRules.data || [];
+
+      console.log(`[Twitter/Stream] Current rules: ${currentRules.length}`);
+
+      // Delete existing rules if any
+      if (currentRules.length > 0) {
+        const ruleIds = currentRules.map(r => r.id);
+        await this.readClient.v2.updateStreamRules({
+          delete: { ids: ruleIds }
+        });
+        console.log(`[Twitter/Stream] Deleted ${ruleIds.length} existing rules`);
+      }
+
+      // Add our rule - match mentions of the bot
+      const addResult = await this.readClient.v2.updateStreamRules({
+        add: [
+          { value: `@${botUsername}`, tag: 'bot-mention' }
+        ]
+      });
+
+      console.log(`[Twitter/Stream] Added stream rule: @${botUsername}`);
+
+      if (addResult.errors && addResult.errors.length > 0) {
+        console.error('[Twitter/Stream] Rule errors:', addResult.errors);
+      }
+    } catch (error) {
+      console.error('[Twitter/Stream] Error setting up rules:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Connect to the filtered stream with auto-reconnect
+   */
+  async connectStream(onTweet) {
+    try {
+      console.log('[Twitter/Stream] Connecting to filtered stream...');
+
+      const stream = await this.readClient.v2.searchStream({
+        'tweet.fields': 'created_at,author_id,conversation_id,in_reply_to_user_id',
+        'expansions': 'author_id',
+        autoConnect: true
+      });
+
+      this.stream = stream;
+      this.streamActive = true;
+      this.streamReconnectAttempts = 0;
+
+      console.log('[Twitter/Stream] Connected! Listening for mentions in real-time...');
+
+      // Handle incoming tweets
+      stream.on('data', (event) => {
+        const tweet = event.data;
+        if (tweet) {
+          console.log(`[Twitter/Stream] Real-time mention received: ${tweet.id}`);
+          onTweet(tweet);
+        }
+      });
+
+      // Handle stream errors
+      stream.on('error', (error) => {
+        console.error('[Twitter/Stream] Stream error:', error.message);
+        this.streamActive = false;
+        this.handleStreamReconnect(onTweet);
+      });
+
+      // Handle stream close/end
+      stream.on('connection error', (error) => {
+        console.error('[Twitter/Stream] Connection error:', error.message);
+        this.streamActive = false;
+        this.handleStreamReconnect(onTweet);
+      });
+
+      // Keepalive handling - Twitter sends empty lines as keepalives
+      stream.on('data heartbeat', () => {
+        // Reset reconnect counter on successful heartbeat
+        this.streamReconnectAttempts = 0;
+      });
+
+    } catch (error) {
+      console.error('[Twitter/Stream] Connection failed:', error.message);
+      this.streamActive = false;
+      this.handleStreamReconnect(onTweet);
+    }
+  }
+
+  /**
+   * Handle stream reconnection with exponential backoff
+   */
+  handleStreamReconnect(onTweet) {
+    if (this.streamReconnectAttempts >= this.maxReconnectAttempts) {
+      console.error(`[Twitter/Stream] Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stream disabled.`);
+      console.log('[Twitter/Stream] Polling fallback will continue to check mentions.');
+      return;
+    }
+
+    this.streamReconnectAttempts++;
+    // Exponential backoff: 5s, 10s, 20s, 40s, 80s... capped at 5 minutes
+    const delay = Math.min(5000 * Math.pow(2, this.streamReconnectAttempts - 1), 300000);
+
+    console.log(`[Twitter/Stream] Reconnecting in ${delay / 1000}s (attempt ${this.streamReconnectAttempts}/${this.maxReconnectAttempts})...`);
+
+    setTimeout(async () => {
+      try {
+        await this.connectStream(onTweet);
+      } catch (error) {
+        console.error('[Twitter/Stream] Reconnection failed:', error.message);
+        this.handleStreamReconnect(onTweet);
+      }
+    }, delay);
+  }
+
+  /**
+   * Stop the filtered stream
+   */
+  stopStream() {
+    if (this.stream) {
+      try {
+        this.stream.close();
+        console.log('[Twitter/Stream] Stream closed');
+      } catch (error) {
+        console.log('[Twitter/Stream] Error closing stream:', error.message);
+      }
+      this.stream = null;
+      this.streamActive = false;
+    }
+  }
+
+  /**
+   * Check if the stream is currently active
+   */
+  isStreamActive() {
+    return this.streamActive === true;
+  }
+
   /**
    * Get user profile using inference.sh CLI
    * @param {string} username Username to look up
