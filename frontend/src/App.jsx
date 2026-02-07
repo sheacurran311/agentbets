@@ -876,7 +876,7 @@ function App() {
   const [stats, setStats] = useState(null)
   const [leaderboard, setLeaderboard] = useState([])
   const [pointsLeaderboard, setPointsLeaderboard] = useState([])
-  const [leaderboardTab, setLeaderboardTab] = useState('predictors') // 'predictors' | 'points'
+  const [leaderboardTab, setLeaderboardTab] = useState('points') // 'points' | 'predictors'
   const [selectedMarket, setSelectedMarket] = useState(null)
   const [betAmount, setBetAmount] = useState('')
   const [walletBalance, setWalletBalance] = useState(null)
@@ -980,10 +980,9 @@ function App() {
     const baseUrl = 'https://agentbets.gg'
     const actionUrl = `solana-action:${baseUrl}/api/actions/bet/${market.id}`
     const blinkShareUrl = `https://dial.to/?action=${encodeURIComponent(actionUrl)}`
-    const appLink = `${baseUrl}/app?market=${market.id}`
     const yesPercent = Math.round(market.yesOdds * 100)
     const noPercent = Math.round(market.noOdds * 100)
-    const tweetText = `"${market.question}"\n\nYES ${yesPercent}% | NO ${noPercent}%\n\nBet directly on @agentbetsgg\n${appLink}`
+    const tweetText = `"${market.question}"\n\nYES ${yesPercent}% | NO ${noPercent}%\n\nBet directly on @agentbetsgg`
     const intentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(tweetText)}&url=${encodeURIComponent(blinkShareUrl)}`
     window.open(intentUrl, '_blank', 'noopener,noreferrer')
   }
@@ -2354,22 +2353,6 @@ function App() {
                 width: 'fit-content'
               }}>
                 <button
-                  onClick={() => setLeaderboardTab('predictors')}
-                  style={{
-                    padding: '10px 20px',
-                    borderRadius: '10px',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontSize: '14px',
-                    fontWeight: '600',
-                    transition: 'all 0.2s',
-                    background: leaderboardTab === 'predictors' ? COLORS.primary : 'transparent',
-                    color: leaderboardTab === 'predictors' ? COLORS.bgDark : COLORS.textMuted
-                  }}
-                >
-                  {Icons.crown} Predictors
-                </button>
-                <button
                   onClick={() => { setLeaderboardTab('points'); fetchPointsLeaderboard(); }}
                   style={{
                     padding: '10px 20px',
@@ -2384,6 +2367,22 @@ function App() {
                   }}
                 >
                   {Icons.fire} Points
+                </button>
+                <button
+                  onClick={() => setLeaderboardTab('predictors')}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: '10px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    transition: 'all 0.2s',
+                    background: leaderboardTab === 'predictors' ? COLORS.primary : 'transparent',
+                    color: leaderboardTab === 'predictors' ? COLORS.bgDark : COLORS.textMuted
+                  }}
+                >
+                  {Icons.crown} Predictors
                 </button>
               </div>
 
