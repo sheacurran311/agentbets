@@ -22,8 +22,7 @@ const ResolutionEngine = require('./resolver');
 const AgentBetsAPI = require('./api-client');
 const PhishingDetector = require('./phishing');
 
-// Database (optional - only available when running with full monorepo)
-// On Railway, the bot runs standalone and uses file-based storage
+// Database (works both in monorepo and standalone on Railway)
 let db = null;
 let Resolution = null;
 let ProcessedTweet = null;
@@ -34,9 +33,17 @@ try {
   const models = require('../../api/src/db/models');
   Resolution = models.Resolution;
   ProcessedTweet = models.ProcessedTweet;
-  console.log('[Bot] Shared database modules loaded');
+  console.log('[Bot] Shared database modules loaded (monorepo mode)');
 } catch (err) {
-  console.log('[Bot] Running standalone - using file-based storage (this is normal on Railway)');
+  // Running standalone (Railway) - use local database module
+  try {
+    const standaloneDb = require('./db');
+    db = standaloneDb;
+    ProcessedTweet = standaloneDb.ProcessedTweet;
+    console.log('[Bot] Standalone database module loaded (Railway mode)');
+  } catch (dbErr) {
+    console.log('[Bot] No database module available - using file-based storage');
+  }
 }
 
 const app = express();
