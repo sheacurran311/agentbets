@@ -462,9 +462,45 @@ class BetParser {
    * 3. No date at all → asks for clarification
    */
   parseEndDate(text) {
+    // Helper: parse a US-format date string like "2/28/26" or "02/28/2026" with optional time
+    const parseUSDate = (dateStr, timeStr) => {
+      const parts = dateStr.split('/');
+      if (parts.length !== 3) return null;
+      let [month, day, year] = parts.map(Number);
+      if (year < 100) year += 2000; // 26 → 2026
+      if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+      let hours = 23, minutes = 59, seconds = 59; // Default to end of day
+      if (timeStr) {
+        const timeMatch = timeStr.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        if (timeMatch) {
+          hours = parseInt(timeMatch[1]);
+          minutes = parseInt(timeMatch[2]);
+          seconds = 0;
+          const ampm = timeMatch[3].toLowerCase();
+          if (ampm === 'pm' && hours !== 12) hours += 12;
+          if (ampm === 'am' && hours === 12) hours = 0;
+        }
+      }
+      return new Date(Date.UTC(year, month - 1, day, hours, minutes, seconds));
+    };
+
+    // Helper: validate a parsed date is in the future
+    const validateDate = (parsedDate) => {
+      if (!parsedDate || isNaN(parsedDate.getTime())) return null;
+      const now = new Date();
+      if (parsedDate <= now) {
+        return { error: 'End date must be in the future. Cannot create markets that have already ended.' };
+      }
+      if (parsedDate < new Date(now.getTime() + 10 * 60 * 1000)) {
+        return { error: 'End date must be at least 10 minutes in the future.' };
+      }
+      return { date: parsedDate.toISOString() };
+    };
+
     // 1. Try explicit/structured date formats first
     const explicitPatterns = [
-      { regex: /ends?:\s*(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)/i, label: 'ends:' },
+      { regex: /ends?:\s*(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:Z)?)?)/i, label: 'ends:' },
       { regex: /until\s+(\d{4}-\d{2}-\d{2})/i, label: 'until' },
       { regex: /by\s+(\w+\s+\d{1,2},?\s*\d{4})/i, label: 'by date' },
       { regex: /(\d{4}-\d{2}-\d{2})/i, label: 'ISO date' },
@@ -477,19 +513,38 @@ class BetParser {
       if (match) {
         const parsedDate = new Date(match[1]);
         if (!isNaN(parsedDate.getTime())) {
-          const now = new Date();
-          if (parsedDate <= now) {
-            return { error: 'End date must be in the future. Cannot create markets that have already ended.' };
-          }
-          if (parsedDate < new Date(now.getTime() + 10 * 60 * 1000)) {
-            return { error: 'End date must be at least 10 minutes in the future.' };
-          }
-          return { date: parsedDate.toISOString() };
+          const result = validateDate(parsedDate);
+          if (result) return result;
         }
       }
     }
 
-    // 2. Detect vague/relative date references that we can't precisely parse
+    // 2. US date formats: M/D/YY, MM/DD/YY, M/D/YYYY, MM/DD/YYYY
+    // With optional time: "2/28/26 11:59 pm UTC" or "02/28/2026 11:59pm"
+    const usDateTimeMatch = text.match(/\b(\d{1,2}\/\d{1,2}\/\d{2,4})\s+(\d{1,2}:\d{2}\s*(?:am|pm))\s*(?:UTC|utc)?\b/i) ||
+                            text.match(/\b(\d{1,2}\/\d{1,2}\/\d{2,4})\b/);
+    if (usDateTimeMatch) {
+      const dateStr = usDateTimeMatch[1];
+      const timeStr = usDateTimeMatch[2] || null;
+      const parsed = parseUSDate(dateStr, timeStr);
+      if (parsed) {
+        const result = validateDate(parsed);
+        if (result) return result;
+      }
+    }
+
+    // 3. "Month Day, 2-digit year" (e.g. "Feb 28, 26" or "February 28 26")
+    const shortYearMatch = text.match(/\b((?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2},?\s*)(\d{2})\b/i);
+    if (shortYearMatch && shortYearMatch[2].length === 2) {
+      const fullDate = shortYearMatch[1] + '20' + shortYearMatch[2];
+      const parsed = new Date(fullDate);
+      if (!isNaN(parsed.getTime())) {
+        const result = validateDate(parsed);
+        if (result) return result;
+      }
+    }
+
+    // 4. Detect vague/relative date references that we can't precisely parse
     // These need clarification from the agent
     const now = new Date();
     const currentYear = now.getFullYear();
@@ -578,7 +633,7 @@ class BetParser {
       };
     }
 
-    // 3. No date reference found at all
+    // 5. No date reference found at all
     return { needsClarification: true, detectedPhrase: null, suggestedDate: null, suggestedLabel: null };
   }
 

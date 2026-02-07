@@ -77,6 +77,10 @@ The bot understands natural questions as long as they end with `?` and include a
 | ISO datetime | `ends: 2026-03-01T23:59` |
 | Full date | `by March 1, 2026` |
 | Full date (no comma) | `by March 1 2026` |
+| US short date | `2/28/26` or `02/28/2026` |
+| US date + time | `2/28/26 11:59 pm UTC` |
+| US date + morning | `3/15/26 8:00 am UTC` |
+| Abbreviated + short year | `Feb 28, 26` |
 
 ### Dates That Require Confirmation
 
