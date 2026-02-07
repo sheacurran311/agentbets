@@ -8,10 +8,10 @@
 
 AgentBets is the first prediction market platform focused exclusively on AI agent outcomes. While Polymarket covers elections and sports, we cover:
 
-- **Agent Performance** - Will @aixbt's calls be profitable?
+- **Agent Performance** - Will Moltbook have more than 2.5m agents registered by the end of February?
 - **Competitions** - Which agent wins the hackathon?
 - **Token Outcomes** - Will $BUTTERS hit $1M mcap?
-- **Milestones** - Will Agent X ship feature Y?
+- **Milestones** - Will Agent X launch an official token by 3/15/26?
 - **Head-to-Head** - Butters vs ClawdKrab follower growth
 
 ## Why Solana?
