@@ -249,7 +249,8 @@ const Icons2 = {
 
 // Market categories with modern icons
 const CATEGORIES = [
-  { id: 'all', label: 'All Markets', icon: Icons.grid },
+  { id: 'all', label: 'Active Markets', icon: Icons.grid },
+  { id: 'ended', label: 'Ended', icon: Icons.clock },
   { id: 'competition', label: 'Competitions', icon: Icons.trophy },
   { id: 'performance', label: 'Performance', icon: Icons.activity },
   { id: 'token', label: 'Token/Price', icon: Icons.dollarSign },
@@ -1094,12 +1095,26 @@ function App() {
     }
   }, [connected, fetchBalance])
 
+  // Helper: is a market ended/resolved/closed?
+  const isMarketEnded = useCallback((m) => {
+    if (['resolved', 'closed', 'settled', 'distributed'].includes(m.status)) return true
+    if (m.endDate && new Date(m.endDate) < new Date()) return true
+    return false
+  }, [])
+
   // Filter and sort markets
   useEffect(() => {
     let result = [...markets]
 
-    if (selectedCategory !== 'all') {
-      result = result.filter(m => m.category === selectedCategory)
+    // "all" shows only active (not ended) markets
+    // "ended" shows only ended/resolved/closed markets
+    // other categories filter by category within active markets
+    if (selectedCategory === 'all') {
+      result = result.filter(m => !isMarketEnded(m))
+    } else if (selectedCategory === 'ended') {
+      result = result.filter(m => isMarketEnded(m))
+    } else {
+      result = result.filter(m => m.category === selectedCategory && !isMarketEnded(m))
     }
 
     if (searchQuery) {
@@ -1126,7 +1141,7 @@ function App() {
     }
 
     setFilteredMarkets(result)
-  }, [markets, selectedCategory, sortBy, searchQuery])
+  }, [markets, selectedCategory, sortBy, searchQuery, isMarketEnded])
 
   const fetchMarkets = async () => {
     try {
@@ -1706,10 +1721,12 @@ function App() {
                 <div style={styles.pageHeaderLeft}>
                   <h1 style={styles.pageTitle}>
                     <span style={{fontFamily: 'Space Grotesk, sans-serif'}}>
-                      {selectedCategory === 'all' ? 'All Markets' : CATEGORIES.find(c => c.id === selectedCategory)?.label}
+                      {selectedCategory === 'all' ? 'Active Markets' : CATEGORIES.find(c => c.id === selectedCategory)?.label}
                     </span>
                   </h1>
-                  <span style={styles.marketCount}>{filteredMarkets.length} active</span>
+                  <span style={styles.marketCount}>
+                    {filteredMarkets.length} {selectedCategory === 'ended' ? 'ended' : 'active'}
+                  </span>
                 </div>
                 <button
                   style={styles.createMarketBtn}
@@ -1727,17 +1744,25 @@ function App() {
                     <span style={{fontSize: '64px', opacity: 0.4}}>&#128202;</span>
                   </div>
                   <h3 style={{fontFamily: 'Space Grotesk, sans-serif', fontSize: '24px', marginBottom: '12px'}}>No markets found</h3>
-                  <p style={{color: COLORS.textMuted, marginBottom: '24px'}}>Be the first to create a market in this category!</p>
+                  <p style={{color: COLORS.textMuted, marginBottom: '24px'}}>
+                    {selectedCategory === 'ended' ? 'No ended markets yet.' : 'Be the first to create a market in this category!'}
+                  </p>
                   <button style={styles.primaryBtn} onClick={() => setView('create')}>
                     Create Market
                   </button>
                 </div>
               ) : (
                 <div style={styles.marketGrid} className="market-grid">
-                  {filteredMarkets.map((market, index) => (
+                  {filteredMarkets.map((market, index) => {
+                    const ended = isMarketEnded(market)
+                    return (
                     <div
                       key={market.id}
-                      style={{...styles.marketCard, animationDelay: `${index * 50}ms`}}
+                      style={{
+                        ...styles.marketCard,
+                        animationDelay: `${index * 50}ms`,
+                        ...(ended ? { opacity: 0.5, filter: 'grayscale(60%)', pointerEvents: 'auto' } : {})
+                      }}
                       className="market-card glass-card"
                       onClick={() => setSelectedMarket(market)}
                       onMouseEnter={handleCardMouseEnter}
@@ -1868,7 +1893,9 @@ function App() {
 
                       {/* End date detail */}
                       <div style={styles.endDateRow}>
-                        <span style={{fontFamily: 'JetBrains Mono, monospace', fontSize: '10px', color: COLORS.textMuted}}>ENDS (UTC)</span>
+                        <span style={{fontFamily: 'JetBrains Mono, monospace', fontSize: '10px', color: COLORS.textMuted}}>
+                          {ended ? 'ENDED (UTC)' : 'ENDS (UTC)'}
+                        </span>
                         <span style={{marginLeft: '8px'}}>
                           {new Date(market.endDate).toLocaleString('en-US', {
                             timeZone: 'UTC',
@@ -1881,7 +1908,7 @@ function App() {
                         </span>
                       </div>
                     </div>
-                  ))}
+                  )})}
                 </div>
               )}
             </>
@@ -1982,7 +2009,7 @@ function App() {
                         value={newMarket.category}
                         onChange={(e) => setMarketField('category', e.target.value)}
                       >
-                        {CATEGORIES.filter(c => c.id !== 'all').map(cat => (
+                        {CATEGORIES.filter(c => c.id !== 'all' && c.id !== 'ended').map(cat => (
                           <option key={cat.id} value={cat.id}>{cat.label}</option>
                         ))}
                       </select>
