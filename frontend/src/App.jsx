@@ -1453,20 +1453,25 @@ function App() {
 
         setTxStatus({ type: 'success', message: 'Bet confirmed on-chain!' })
 
-        // Record bet in API so market data (volume, pools, odds) updates
+        // Record bet in API so market data (volume, pools, odds) updates.
+        // Don't send txSignature — the RPC often hasn't indexed the tx yet,
+        // which causes verifyBetTransaction to fail with "Transaction not found".
+        // We already confirmed on-chain via polling, so verification is redundant.
         try {
-          await fetch(`${API_BASE}/bets`, {
+          const recordRes = await fetch(`${API_BASE}/bets`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               marketId: selectedMarket.id,
               outcome,
-              amount: amount * 1e6,
-              wallet: publicKey.toString(),
-              txSignature: signature,
-              onChain: true
+              amount, // raw USDC — backend converts to micro internally
+              wallet: publicKey.toString()
             })
           })
+          if (!recordRes.ok) {
+            const errData = await recordRes.json().catch(() => ({}))
+            console.warn('Failed to record bet in API:', recordRes.status, errData.error || errData.message)
+          }
         } catch (recordErr) {
           console.warn('Failed to record bet in API:', recordErr.message)
         }
@@ -1530,20 +1535,25 @@ function App() {
 
         setTxStatus({ type: 'success', message: 'Bet confirmed on-chain!' })
 
-        // Record bet in API so market data (volume, pools, odds) updates
+        // Record bet in API so market data (volume, pools, odds) updates.
+        // Don't send txSignature — the RPC often hasn't indexed the tx yet,
+        // which causes verifyBetTransaction to fail with "Transaction not found".
+        // We already confirmed on-chain via polling, so verification is redundant.
         try {
-          await fetch(`${API_BASE}/bets`, {
+          const recordRes = await fetch(`${API_BASE}/bets`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               marketId: selectedMarket.id,
               outcome,
-              amount: amount * 1e6,
-              wallet: publicKey.toString(),
-              txSignature: signature,
-              onChain: true
+              amount, // raw USDC — backend converts to micro internally
+              wallet: publicKey.toString()
             })
           })
+          if (!recordRes.ok) {
+            const errData = await recordRes.json().catch(() => ({}))
+            console.warn('Failed to record bet in API:', recordRes.status, errData.error || errData.message)
+          }
         } catch (recordErr) {
           console.warn('Failed to record bet in API:', recordErr.message)
         }
