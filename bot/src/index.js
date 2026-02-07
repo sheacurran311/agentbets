@@ -1965,6 +1965,14 @@ async function startBot() {
       if (moltbook.enabled) {
         (async () => {
           try {
+            // Test connectivity first to catch URL/network issues early
+            const connected = await moltbook.testConnectivity();
+            if (!connected) {
+              console.error('[Moltbook] Connectivity test failed — skipping Moltbook initialization');
+              console.error('[Moltbook] Fix MOLTBOOK_API_URL and restart (should be https://www.moltbook.com/api/v1)');
+              return;
+            }
+
             const meResult = await moltbook.getMe();
             if (meResult.success) {
               console.log(`[Moltbook] Authenticated as: ${moltbook.botName}`);

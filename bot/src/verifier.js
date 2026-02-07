@@ -29,7 +29,7 @@ class AgentVerifier {
     ]);
 
     // Moltbook API endpoint
-    this.moltbookApi = process.env.MOLTBOOK_API_URL || 'https://api.moltbook.com/v1';
+    this.moltbookApi = process.env.MOLTBOOK_API_URL || 'https://www.moltbook.com/api/v1';
 
     // Keywords in bio that suggest agent
     this.agentBioKeywords = [

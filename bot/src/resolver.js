@@ -91,7 +91,7 @@ class ResolutionEngine {
     this.dexscreenerApi = 'https://api.dexscreener.com/latest';
     this.pythApi = 'https://hermes.pyth.network/api';
     this.coingeckoApi = 'https://api.coingecko.com/api/v3';
-    this.moltbookApi = process.env.MOLTBOOK_API_URL || 'https://api.moltbook.com/v1';
+    this.moltbookApi = process.env.MOLTBOOK_API_URL || 'https://www.moltbook.com/api/v1';
     this.solanaRpc = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
   }
 

@@ -4476,6 +4476,22 @@ async function startServer() {
     // AUTO: Initialize bot's Poll.fun user account on startup
     // This ensures the bot can create markets without "Account does not exist" errors
     if (pollFunService.creatorKeypair) {
+      // Check and log creator wallet SOL balance
+      try {
+        const { LAMPORTS_PER_SOL } = require('@solana/web3.js');
+        const balance = await pollFunService.connection.getBalance(pollFunService.creatorKeypair.publicKey);
+        const balanceSOL = (balance / LAMPORTS_PER_SOL).toFixed(4);
+        const marketsAffordable = Math.floor(balance / 50_000_000); // ~0.05 SOL per market
+        console.log(`[PollFun] Creator wallet: ${pollFunService.creatorKeypair.publicKey.toBase58()}`);
+        console.log(`[PollFun] Creator wallet balance: ${balanceSOL} SOL (~${marketsAffordable} markets possible)`);
+        if (balance < 50_000_000) {
+          console.warn(`[PollFun] LOW BALANCE WARNING: Creator wallet needs SOL to create markets (~0.05 SOL each)`);
+          console.warn(`[PollFun] Send SOL to: ${pollFunService.creatorKeypair.publicKey.toBase58()}`);
+        }
+      } catch (err) {
+        console.warn('[PollFun] Could not check creator wallet balance:', err.message);
+      }
+
       console.log('[PollFun] Ensuring bot creator user account exists on-chain...');
       try {
         const userResult = await pollFunService.ensureCreatorUserExists();

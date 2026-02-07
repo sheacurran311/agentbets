@@ -27,9 +27,54 @@ class MoltbookService {
     if (this.apiKey) {
       this.enabled = true;
       console.log('[Moltbook] API key configured, service enabled');
+      console.log(`[Moltbook] Base URL: ${this.baseUrl}`);
+
+      // Warn if base URL looks wrong (should be https://www.moltbook.com/api/v1)
+      if (!this.baseUrl.includes('moltbook.com')) {
+        console.warn(`[Moltbook] WARNING: Base URL does not point to moltbook.com — is MOLTBOOK_API_URL set correctly?`);
+        console.warn(`[Moltbook] Expected: https://www.moltbook.com/api/v1 — Got: ${this.baseUrl}`);
+      } else if (!this.baseUrl.startsWith('https://www.moltbook.com')) {
+        console.warn(`[Moltbook] WARNING: Base URL should use https://www.moltbook.com (with www) to avoid redirect issues`);
+      }
     } else {
       console.log('[Moltbook] No MOLTBOOK_BOT_API_KEY set - Moltbook integration disabled');
       console.log('[Moltbook] Set MOLTBOOK_BOT_API_KEY to enable Moltbook market announcements');
+    }
+  }
+
+  /**
+   * Test connectivity to Moltbook API (called once at startup)
+   * Helps diagnose network issues, wrong URLs, or DNS problems
+   */
+  async testConnectivity() {
+    if (!this.enabled) return false;
+
+    console.log(`[Moltbook] Testing connectivity to ${this.baseUrl}...`);
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch(`${this.baseUrl}/submolts`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        console.log(`[Moltbook] Connectivity OK (HTTP ${response.status})`);
+        return true;
+      } else {
+        console.warn(`[Moltbook] Connectivity issue: HTTP ${response.status} from ${this.baseUrl}/submolts`);
+        return false;
+      }
+    } catch (err) {
+      const causeDetail = err.cause ? ` (${err.cause.code || err.cause.message})` : '';
+      const errorMsg = err.name === 'AbortError' ? 'Request timed out' : `${err.message}${causeDetail}`;
+      console.error(`[Moltbook] Connectivity FAILED: ${errorMsg}`);
+      console.error(`[Moltbook] Check that MOLTBOOK_API_URL is correct (should be https://www.moltbook.com/api/v1)`);
+      console.error(`[Moltbook] Current MOLTBOOK_API_URL: ${process.env.MOLTBOOK_API_URL || '(not set, using default)'}`);
+      return false;
     }
   }
 
@@ -87,7 +132,9 @@ class MoltbookService {
         return { success: true, ...data };
       } catch (err) {
         clearTimeout(timeoutId);
-        lastError = err.name === 'AbortError' ? 'Request timed out' : err.message;
+        // Include err.cause for detailed network diagnostics (ENOTFOUND, ECONNREFUSED, etc.)
+        const causeDetail = err.cause ? ` (${err.cause.code || err.cause.message})` : '';
+        lastError = err.name === 'AbortError' ? 'Request timed out' : `${err.message}${causeDetail}`;
 
         // Retry on network errors (fetch failed, timeout, ECONNREFUSED, etc.)
         if (attempt < retries) {

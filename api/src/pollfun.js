@@ -174,6 +174,23 @@ class PollFunService {
     console.log('[PollFun] Creating market:', question);
 
     try {
+      // Check creator wallet balance before attempting market creation
+      // Each market costs ~0.039 SOL for rent (Bet PDA + Fee Pool PDA)
+      const MIN_BALANCE_LAMPORTS = 50_000_000; // 0.05 SOL (rent + tx fees buffer)
+      const balance = await this.connection.getBalance(creator.publicKey);
+      const balanceSOL = (balance / 1e9).toFixed(4);
+      console.log(`[PollFun] Creator wallet balance: ${balanceSOL} SOL (${balance} lamports)`);
+
+      if (balance < MIN_BALANCE_LAMPORTS) {
+        const needed = ((MIN_BALANCE_LAMPORTS - balance) / 1e9).toFixed(4);
+        console.error(`[PollFun] Insufficient SOL! Balance: ${balanceSOL} SOL, need at least 0.05 SOL per market`);
+        console.error(`[PollFun] Send at least ${needed} SOL to ${creator.publicKey.toBase58()}`);
+        return {
+          success: false,
+          error: `Insufficient SOL in creator wallet. Balance: ${balanceSOL} SOL, need ~0.05 SOL. Send SOL to ${creator.publicKey.toBase58()}`
+        };
+      }
+
       // AUTO: Ensure bot's program user account exists before creating market
       // This is required by Poll.fun SDK - without it, "Account does not exist" error occurs
       const userResult = await this.ensureCreatorUserExists();
