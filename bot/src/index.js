@@ -1485,23 +1485,25 @@ async function startBot() {
       if (process.env.TWITTER_BEARER_TOKEN) {
         console.log('[Bot] Twitter credentials configured, starting real-time stream + polling fallback...');
 
-        // PRIMARY: Start filtered stream for instant mention detection
-        try {
-          const botHandle = process.env.BOT_USERNAME || 'AgentBetsBot';
-          const streamResult = await twitter.startFilteredStream(async (tweet) => {
-            console.log(`[Stream] Processing real-time mention: ${tweet.id}`);
-            await processMention(tweet);
-          }, botHandle);
+        // PRIMARY: Start filtered stream for instant mention detection (async, fire-and-forget from listen callback)
+        (async () => {
+          try {
+            const botHandle = process.env.BOT_USERNAME || 'AgentBetsBot';
+            const streamResult = await twitter.startFilteredStream(async (tweet) => {
+              console.log(`[Stream] Processing real-time mention: ${tweet.id}`);
+              await processMention(tweet);
+            }, botHandle);
 
-          if (streamResult && streamResult.active) {
-            console.log('[Bot] Real-time stream active - mentions will be processed instantly');
-          } else {
-            console.log('[Bot] Stream not available - relying on polling');
+            if (streamResult && streamResult.active) {
+              console.log('[Bot] Real-time stream active - mentions will be processed instantly');
+            } else {
+              console.log('[Bot] Stream not available - relying on polling');
+            }
+          } catch (streamError) {
+            console.warn('[Bot] Failed to start stream:', streamError.message);
+            console.log('[Bot] Falling back to polling only');
           }
-        } catch (streamError) {
-          console.warn('[Bot] Failed to start stream:', streamError.message);
-          console.log('[Bot] Falling back to polling only');
-        }
+        })();
 
         // FALLBACK: Check mentions every 2 minutes (catches anything the stream misses)
         const mentionJob = new CronJob('*/2 * * * *', checkMentions);
