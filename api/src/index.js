@@ -50,6 +50,9 @@ app.set('trust proxy', 1);
 const sanitizeInput = (input) => {
   if (typeof input !== 'string') return input;
   return input
+    // Normalize newlines and excessive whitespace (Twitter wraps long tweets)
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s{2,}/g, ' ')
     // Remove any HTML tags
     .replace(/<[^>]*>/g, '')
     // Escape HTML entities
@@ -2348,6 +2351,32 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Question must be 256 characters or less' });
     }
 
+    // RATE LIMIT: Max 2 market creations per account per day
+    const MAX_MARKETS_PER_DAY = 2;
+    const creatorIdentifier = sanitizedCreatorAgent || sanitizedProposerWallet;
+    if (creatorIdentifier) {
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const allMarketsForCount = await markets.values();
+      const allMarketsListForCount = Array.isArray(allMarketsForCount) ? allMarketsForCount : [...allMarketsForCount];
+      const recentByCreator = allMarketsListForCount.filter(m => {
+        const matchesAgent = m.creatorAgent && m.creatorAgent.toLowerCase() === creatorIdentifier.toLowerCase();
+        const matchesWallet = m.creatorWallet && m.creatorWallet === creatorIdentifier;
+        const matchesProposer = m.proposerWallet && m.proposerWallet === creatorIdentifier;
+        return (matchesAgent || matchesWallet || matchesProposer) && m.createdAt > oneDayAgo;
+      });
+      if (recentByCreator.length >= MAX_MARKETS_PER_DAY) {
+        const oldestRecent = recentByCreator.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))[0];
+        const resetTime = new Date(new Date(oldestRecent.createdAt).getTime() + 24 * 60 * 60 * 1000);
+        console.warn(`[API] RATE LIMITED: ${creatorIdentifier} has created ${recentByCreator.length} markets in 24h (max ${MAX_MARKETS_PER_DAY})`);
+        return res.status(429).json({
+          error: `Rate limit: You can create a maximum of ${MAX_MARKETS_PER_DAY} markets per day. You've created ${recentByCreator.length} in the last 24 hours.`,
+          limit: MAX_MARKETS_PER_DAY,
+          used: recentByCreator.length,
+          resetsAt: resetTime.toISOString()
+        });
+      }
+    }
+
     // Validate end date is in the future (at least 10 minutes)
     const endDateTime = new Date(sanitizedEndDate);
     const now = new Date();
@@ -2368,6 +2397,30 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
     // Validate URL format if provided
     if (sanitizedVerificationUrl && !sanitizedVerificationUrl.match(/^https?:\/\//i)) {
       return res.status(400).json({ error: 'Invalid verification URL format' });
+    }
+
+    // DEDUPLICATION: Check if a market with the same question already exists locally
+    // This catches duplicates even if the PollFun-level dedup is bypassed (e.g., after restart)
+    const allExisting = await markets.values();
+    const existingList = Array.isArray(allExisting) ? allExisting : [...allExisting];
+    const normalizedNewQ = sanitizedQuestion.replace(/\s+/g, ' ').trim().toLowerCase();
+    const duplicateMarket = existingList.find(m => {
+      if (m.status !== 'active') return false;
+      const normalizedExisting = (m.question || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      return normalizedExisting === normalizedNewQ;
+    });
+    if (duplicateMarket) {
+      console.warn(`[API] DUPLICATE BLOCKED: Market "${sanitizedQuestion.slice(0, 60)}" already exists as ${duplicateMarket.id}`);
+      return res.status(409).json({
+        error: 'A market with this question already exists',
+        existingMarket: {
+          id: duplicateMarket.id,
+          betPda: duplicateMarket.betPda,
+          question: duplicateMarket.question,
+          endDate: duplicateMarket.endDate,
+          status: duplicateMarket.status
+        }
+      });
     }
 
     // SECURITY: Bot ALWAYS creates markets with its keypair
@@ -2734,6 +2787,128 @@ app.post('/api/onchain/sync/:marketId', async (req, res) => {
     }
     res.json({ success: true, changed: result.changed, market: result.market });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Recover an orphaned on-chain market that exists on Solana but not in local storage.
+ * This happens when a market creation transaction succeeds but confirmation times out.
+ * READ-ONLY Solana operation — no transactions, no cost.
+ *
+ * POST /api/onchain/recover
+ * Body: { txSignature, endDate, category, description, creatorAgent, threshold, resolutionSource }
+ */
+app.post('/api/onchain/recover', requireApiKey, async (req, res) => {
+  try {
+    const {
+      txSignature,
+      endDate,
+      category,
+      description,
+      creatorAgent,
+      threshold,
+      resolutionSource,
+      verificationUrl,
+      verificationMethod,
+      tags
+    } = req.body;
+
+    if (!txSignature) {
+      return res.status(400).json({ error: 'txSignature is required' });
+    }
+
+    // Check if this transaction is already registered
+    const allMarkets = await markets.values();
+    const existing = (Array.isArray(allMarkets) ? allMarkets : [...allMarkets])
+      .find(m => m.txSignature === txSignature);
+    if (existing) {
+      return res.status(409).json({
+        error: 'Market from this transaction is already registered',
+        market: existing
+      });
+    }
+
+    // Read the transaction from Solana (READ-ONLY, no cost)
+    console.log(`[Recovery] Checking transaction: ${txSignature}`);
+    const creatorAddress = pollFunService.creatorKeypair?.publicKey?.toBase58();
+    const recovered = await pollFunService.recoverMarketFromTx(txSignature, creatorAddress, creatorAgent);
+
+    if (!recovered.success) {
+      return res.status(404).json({
+        error: 'Could not recover market from transaction',
+        detail: recovered.error
+      });
+    }
+
+    // Register the market locally
+    const marketId = uuidv4();
+    const createdAt = new Date().toISOString();
+    const sanitizedQuestion = sanitizeInput(recovered.question || '');
+    const sanitizedEndDate = endDate ? sanitizeDate(endDate) : null;
+
+    const market = {
+      id: marketId,
+      betPda: recovered.betPda,
+      question: sanitizedQuestion,
+      description: sanitizeInput(description || `Recovered from tx ${txSignature.slice(0, 16)}...`),
+      category: sanitizeCategory(category || 'general'),
+      outcomes: ['YES', 'NO'],
+      resolutionSource: resolutionSource || 'pollfun',
+      endDate: sanitizedEndDate,
+      createdAt,
+      creatorWallet: recovered.creator,
+      proposerWallet: null,
+      creatorAgent: creatorAgent ? sanitizeInput(creatorAgent) : null,
+      status: 'active',
+      resolution: null,
+      resolvedAt: null,
+      verificationUrl: verificationUrl ? sanitizeInput(verificationUrl) : null,
+      verificationMethod: verificationMethod ? sanitizeInput(verificationMethod) : null,
+      threshold: threshold ? sanitizeInput(String(threshold)) : null,
+      tags: Array.isArray(tags) ? tags.map(t => sanitizeInput(String(t))).slice(0, 10) : ['recovered'],
+      yesPool: 0,
+      noPool: 0,
+      totalVolume: 0,
+      totalBets: 0,
+      yesOdds: 0.5,
+      noOdds: 0.5,
+      onChain: true,
+      txSignature,
+      currency: 'USDC',
+      recovered: true,
+      recoveredAt: createdAt,
+      securityNote: 'Recovered market. Bot is on-chain creator (isCreatorResolver).'
+    };
+
+    await markets.set(marketId, market);
+
+    // Track royalties if creator agent specified
+    if (creatorAgent) {
+      royalties.recordMarketCreation(sanitizeInput(creatorAgent), marketId);
+      try {
+        await agentFunding.awardMarketCreationPoints(sanitizeInput(creatorAgent), marketId);
+      } catch {
+        // agentFunding may not be loaded yet; non-critical
+      }
+    }
+
+    console.log(`[Recovery] Market registered: ${marketId} (PDA: ${recovered.betPda})`);
+
+    res.status(201).json({
+      success: true,
+      recovered: true,
+      market,
+      onChainData: {
+        betPda: recovered.betPda,
+        txSignature,
+        network: pollFunService.network,
+        creator: recovered.creator
+      },
+      message: `Orphaned market recovered and registered. ID: ${marketId}`
+    });
+  } catch (error) {
+    console.error('[Recovery] Error:', error);
     res.status(500).json({ error: error.message });
   }
 });

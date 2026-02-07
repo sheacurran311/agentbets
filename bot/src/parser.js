@@ -262,7 +262,8 @@ class BetParser {
                            text.match(/(?:create|new)\s+(?:bet|market)\s*:?\s*(.+?)(?:\n|ends:|resolution:|$)/i);
 
       if (questionMatch) {
-        result.question = questionMatch[1].trim();
+        // Normalize whitespace: Twitter wraps long tweets with newlines
+        result.question = questionMatch[1].replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
       } else {
         return { valid: false, error: 'Could not find question. Use quotes or "bet: your question" or ask a question ending in ?' };
       }

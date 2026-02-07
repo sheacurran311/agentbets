@@ -31,6 +31,10 @@ class PollFunService {
     this.creatorKeypair = null;
     this.sdk = null;
 
+    // DEDUPLICATION: Prevent concurrent market creation
+    this._creationLock = false; // Simple lock to serialize market creation
+    this._recentQuestions = new Map(); // question -> { timestamp, betPda } — dedup window
+
     if (process.env.SOLANA_PRIVATE_KEY) {
       try {
         const secretKey = bs58.decode(process.env.SOLANA_PRIVATE_KEY);
@@ -171,6 +175,38 @@ class PollFunService {
       return { success: false, error: 'Question must be 256 characters or less' };
     }
 
+    // DEDUPLICATION: Normalize question for comparison
+    const normalizedQ = question.replace(/\s+/g, ' ').trim().toLowerCase();
+
+    // Check if we recently created a market with the same (or very similar) question
+    const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10-minute dedup window
+    const now = Date.now();
+    // Clean up expired entries
+    for (const [q, data] of this._recentQuestions) {
+      if (now - data.timestamp > DEDUP_WINDOW_MS) {
+        this._recentQuestions.delete(q);
+      }
+    }
+    // Check for duplicate
+    const existing = this._recentQuestions.get(normalizedQ);
+    if (existing) {
+      console.warn(`[PollFun] DUPLICATE BLOCKED: Market with same question was created ${Math.round((now - existing.timestamp) / 1000)}s ago. PDA: ${existing.betPda}`);
+      return {
+        success: false,
+        error: `Duplicate market: A market with this question was already created ${Math.round((now - existing.timestamp) / 1000)} seconds ago (PDA: ${existing.betPda}). Wait 10 minutes before creating another market with the same question.`
+      };
+    }
+
+    // CONCURRENCY LOCK: Only one market creation at a time
+    if (this._creationLock) {
+      console.warn('[PollFun] CONCURRENT CREATION BLOCKED: Another market is currently being created');
+      return {
+        success: false,
+        error: 'Another market is currently being created. Please wait a moment and try again.'
+      };
+    }
+    this._creationLock = true;
+
     console.log('[PollFun] Creating market:', question);
 
     try {
@@ -217,9 +253,14 @@ class PollFunService {
         console.log('[PollFun] Proposed by:', proposerAgent);
       }
 
+      const betPda = result.bet.toBase58();
+      // Record in dedup map so the same question can't be created again within the window
+      this._recentQuestions.set(normalizedQ, { timestamp: Date.now(), betPda });
+      this._creationLock = false;
+
       return {
         success: true,
-        betPda: result.bet.toBase58(),
+        betPda,
         feePool: result.feePool.toBase58(),
         txSignature: result.tx,
         creator: creator.publicKey.toBase58(), // Bot's address
@@ -231,8 +272,155 @@ class PollFunService {
       };
     } catch (error) {
       console.error('[PollFun] Failed to create market:', error);
+
+      // TIMEOUT RECOVERY: If the error message contains a transaction signature,
+      // the transaction was submitted but confirmation timed out.
+      // Check if it actually succeeded on-chain before declaring failure.
+      const txSigMatch = error.message?.match(/Check signature (\w{80,90})/);
+      if (txSigMatch || (error.message?.includes('was not confirmed') && error.message?.includes('seconds'))) {
+        const txSignature = txSigMatch?.[1] || error.message.match(/([1-9A-HJ-NP-Za-km-z]{87,88})/)?.[1];
+        if (txSignature) {
+          console.log(`[PollFun] Transaction timed out but may have succeeded. Checking signature: ${txSignature}`);
+          try {
+            const recovered = await this.recoverMarketFromTx(txSignature, creator.publicKey.toBase58(), proposerAgent);
+            if (recovered.success) {
+              console.log(`[PollFun] RECOVERED! Market exists on-chain despite timeout. PDA: ${recovered.betPda}`);
+              // Record in dedup map even for recovered markets
+              this._recentQuestions.set(normalizedQ, { timestamp: Date.now(), betPda: recovered.betPda });
+              this._creationLock = false;
+              return recovered;
+            }
+          } catch (recoveryErr) {
+            console.error('[PollFun] Recovery check failed:', recoveryErr.message);
+          }
+        }
+      }
+
+      this._creationLock = false;
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Attempt to recover market data from a transaction that may have succeeded
+   * despite a confirmation timeout. This is a READ-ONLY operation.
+   *
+   * @param {string} txSignature Transaction signature to check
+   * @param {string} creatorAddress Bot's wallet address (for validation)
+   * @param {string} proposerAgent Optional agent who proposed the market
+   * @returns {Object} Market data if recovered, or { success: false }
+   */
+  async recoverMarketFromTx(txSignature, creatorAddress, proposerAgent) {
+    // Wait a few seconds for the transaction to finalize
+    console.log('[PollFun] Waiting 5 seconds before checking transaction...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Retry up to 3 times with increasing delay
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const tx = await this.connection.getTransaction(txSignature, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0
+        });
+
+        if (!tx) {
+          console.log(`[PollFun] Transaction not found yet (attempt ${attempt + 1}/3)`);
+          if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            continue;
+          }
+          return { success: false, error: 'Transaction not found on-chain' };
+        }
+
+        // Check if the transaction actually succeeded
+        if (tx.meta?.err) {
+          console.log('[PollFun] Transaction exists but FAILED on-chain:', JSON.stringify(tx.meta.err));
+          return { success: false, error: `Transaction failed on-chain: ${JSON.stringify(tx.meta.err)}` };
+        }
+
+        // Transaction succeeded! Extract the bet PDA from account keys.
+        // In InitializeBetV2, the bet PDA is typically account index 1
+        // (index 0 is the creator/signer)
+        const accountKeys = tx.transaction?.message?.accountKeys ||
+                           tx.transaction?.message?.staticAccountKeys || [];
+        const accounts = accountKeys.map(k => typeof k === 'string' ? k : k.toBase58?.() || String(k));
+
+        if (accounts.length < 5) {
+          return { success: false, error: 'Transaction has too few accounts to be a market creation' };
+        }
+
+        // The bet PDA is at index 1, fee pool at index 3 or 4
+        // Validate by checking on-chain data
+        const candidatePda = accounts[1];
+
+        try {
+          const marketData = await this.getMarketData(candidatePda);
+          if (marketData.success) {
+            console.log(`[PollFun] Verified market on-chain! PDA: ${candidatePda}, Question: "${marketData.question?.slice(0, 50)}..."`);
+            return {
+              success: true,
+              recovered: true,
+              betPda: candidatePda,
+              feePool: null, // Not critical for local storage
+              txSignature,
+              creator: creatorAddress,
+              proposerAgent: proposerAgent || null,
+              question: marketData.question,
+              expectedUserCount: marketData.expectedUserCount || 50,
+              isCreatorResolver: marketData.isCreatorResolver || true,
+              note: 'Market recovered from timed-out transaction.'
+            };
+          }
+        } catch {
+          // candidatePda wasn't the bet PDA, try other accounts
+        }
+
+        // Fallback: try other non-system-program accounts
+        const systemPrograms = new Set([
+          '11111111111111111111111111111111',
+          'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+          'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+          'SysvarRent111111111111111111111111111111111',
+          'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+          'po11oacBudCHcbqXWhmuuQmRnzKmkjwmkvwzHZvAX9u'
+        ]);
+
+        for (let i = 2; i < Math.min(accounts.length, 8); i++) {
+          if (systemPrograms.has(accounts[i])) continue;
+          if (accounts[i] === creatorAddress) continue;
+          try {
+            const marketData = await this.getMarketData(accounts[i]);
+            if (marketData.success) {
+              console.log(`[PollFun] Verified market on-chain at index ${i}! PDA: ${accounts[i]}`);
+              return {
+                success: true,
+                recovered: true,
+                betPda: accounts[i],
+                feePool: null,
+                txSignature,
+                creator: creatorAddress,
+                proposerAgent: proposerAgent || null,
+                question: marketData.question,
+                expectedUserCount: marketData.expectedUserCount || 50,
+                isCreatorResolver: marketData.isCreatorResolver || true,
+                note: 'Market recovered from timed-out transaction.'
+              };
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        return { success: false, error: 'Transaction succeeded but could not identify bet PDA' };
+      } catch (err) {
+        console.error(`[PollFun] Error checking transaction (attempt ${attempt + 1}/3):`, err.message);
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+      }
+    }
+
+    return { success: false, error: 'Could not verify transaction after 3 attempts' };
   }
 
   /**

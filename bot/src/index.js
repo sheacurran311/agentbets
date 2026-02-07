@@ -333,6 +333,17 @@ let pendingResolutions = new Map();
 const notifiedMarkets = new Set(); // Track which markets we've sent reminders for
 const scheduledJobs = new Map(); // Track scheduled resolution jobs
 
+// DEDUPLICATION: Prevent duplicate market creation from concurrent flows
+// Tracks questions currently being created (normalized question -> timestamp)
+const marketCreationInProgress = new Map();
+// Tracks recently created markets (normalized question -> { timestamp, marketId })
+const recentlyCreatedMarkets = new Map();
+
+// RATE LIMITING: Max 2 market creations per account per 24 hours
+// Key: normalized handle -> array of creation timestamps
+const MAX_MARKETS_PER_DAY = 2;
+const marketCreationHistory = new Map();
+
 /**
  * Initialize storage (database or file-based)
  */
@@ -1037,6 +1048,51 @@ async function processMention(tweet) {
  */
 async function createMarketFromParams(tweetId, authorHandle, betParams) {
   try {
+    // DEDUPLICATION: Prevent duplicate market creation for the same question
+    const normalizedQ = betParams.question.replace(/\s+/g, ' ').trim().toLowerCase();
+    const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+    const now = Date.now();
+
+    // Clean expired entries
+    for (const [q, data] of recentlyCreatedMarkets) {
+      if (now - data.timestamp > DEDUP_WINDOW_MS) recentlyCreatedMarkets.delete(q);
+    }
+    for (const [q, ts] of marketCreationInProgress) {
+      if (now - ts > 120_000) marketCreationInProgress.delete(q); // 2 min stale lock
+    }
+
+    // Check if already created recently
+    if (recentlyCreatedMarkets.has(normalizedQ)) {
+      const existing = recentlyCreatedMarkets.get(normalizedQ);
+      console.warn(`[Bot] DUPLICATE BLOCKED (Twitter): Market "${betParams.question.slice(0, 50)}" was created ${Math.round((now - existing.timestamp) / 1000)}s ago`);
+      await twitter.reply(tweetId, `@${authorHandle} This market was already created! Check it out: https://agentbets.gg/markets/${existing.marketId}`);
+      return;
+    }
+
+    // Check if creation is already in progress
+    if (marketCreationInProgress.has(normalizedQ)) {
+      console.warn(`[Bot] CONCURRENT CREATION BLOCKED (Twitter): Market "${betParams.question.slice(0, 50)}" is already being created`);
+      return;
+    }
+    marketCreationInProgress.set(normalizedQ, now);
+
+    // RATE LIMIT: Max 2 markets per account per 24 hours
+    const handleKey = authorHandle.toLowerCase();
+    const history = marketCreationHistory.get(handleKey) || [];
+    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+    const recentCreations = history.filter(ts => ts > oneDayAgo);
+    marketCreationHistory.set(handleKey, recentCreations); // Clean old entries
+    if (recentCreations.length >= MAX_MARKETS_PER_DAY) {
+      const resetTime = new Date(recentCreations[0] + 24 * 60 * 60 * 1000);
+      console.warn(`[Bot] RATE LIMITED: @${authorHandle} has created ${recentCreations.length} markets in 24h (max ${MAX_MARKETS_PER_DAY})`);
+      marketCreationInProgress.delete(normalizedQ);
+      await twitter.reply(tweetId,
+        `@${authorHandle} You've reached the maximum of ${MAX_MARKETS_PER_DAY} markets per day.\n\n` +
+        `You can create another market after ${resetTime.toUTCString()}.`
+      );
+      return;
+    }
+
     // SECURITY: Scan the parsed question for phishing content
     const questionScan = phishingDetector.scanQuestion(betParams.question);
     if (questionScan.isPhishing) {
@@ -1114,11 +1170,19 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
 
     if (!market.success) {
       console.log(`[Bot] Failed to create market: ${market.error}`);
+      marketCreationInProgress.delete(normalizedQ);
       await twitter.reply(tweetId,
         `@${authorHandle} Sorry, I couldn't create your bet: ${market.error}`
       );
       return;
     }
+
+    // Record successful creation for deduplication and rate limiting
+    recentlyCreatedMarkets.set(normalizedQ, { timestamp: Date.now(), marketId: market.market.id });
+    marketCreationInProgress.delete(normalizedQ);
+    const rlHistory = marketCreationHistory.get(authorHandle.toLowerCase()) || [];
+    rlHistory.push(Date.now());
+    marketCreationHistory.set(authorHandle.toLowerCase(), rlHistory);
 
     console.log(`[Bot] Market created: ${market.market.id}`);
 
@@ -1195,6 +1259,9 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
     console.log(`[Bot] Successfully created and announced market`);
   } catch (error) {
     console.error(`[Bot] Error creating market:`, error);
+    // Release lock on error
+    const normalizedQ = betParams.question.replace(/\s+/g, ' ').trim().toLowerCase();
+    marketCreationInProgress.delete(normalizedQ);
     await twitter.reply(tweetId,
       `@${authorHandle} Sorry, something went wrong creating your market. Please try again.`
     );
@@ -1402,6 +1469,12 @@ const pendingMoltbookConfirmations = new Map();
 async function checkMoltbookRequests() {
   if (!moltbook.enabled) return;
 
+  if (_checkingMoltbook) {
+    console.log(`[Moltbook] Skipping check — previous check still running`);
+    return;
+  }
+  _checkingMoltbook = true;
+
   console.log(`[Moltbook] Checking for new bet requests...`);
 
   try {
@@ -1508,6 +1581,8 @@ async function checkMoltbookRequests() {
     }
   } catch (error) {
     console.error(`[Moltbook] Error checking requests:`, error);
+  } finally {
+    _checkingMoltbook = false;
   }
 }
 
@@ -1649,11 +1724,64 @@ async function checkMoltbookConfirmationReplies() {
  * Includes: phishing scan, verifiability check, cross-post to Twitter
  */
 async function createMarketFromMoltbook(request, betParams) {
+  // DEDUPLICATION: Prevent duplicate market creation for the same question
+  const normalizedQ = betParams.question.replace(/\s+/g, ' ').trim().toLowerCase();
+  const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+  const now = Date.now();
+
+  // Clean expired entries
+  for (const [q, data] of recentlyCreatedMarkets) {
+    if (now - data.timestamp > DEDUP_WINDOW_MS) recentlyCreatedMarkets.delete(q);
+  }
+  for (const [q, ts] of marketCreationInProgress) {
+    if (now - ts > 120_000) marketCreationInProgress.delete(q); // 2 min stale lock
+  }
+
+  // Check if already created recently
+  if (recentlyCreatedMarkets.has(normalizedQ)) {
+    const existing = recentlyCreatedMarkets.get(normalizedQ);
+    console.warn(`[Moltbook] DUPLICATE BLOCKED: Market "${betParams.question.slice(0, 50)}" was created ${Math.round((now - existing.timestamp) / 1000)}s ago`);
+    const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+    await moltbook.replyToRequest(request, {
+      success: true,
+      market: { id: existing.marketId },
+      message: `This market already exists! View it here: ${baseUrl}/markets/${existing.marketId}`
+    });
+    return;
+  }
+
+  // Check if creation is already in progress
+  if (marketCreationInProgress.has(normalizedQ)) {
+    console.warn(`[Moltbook] CONCURRENT CREATION BLOCKED: Market "${betParams.question.slice(0, 50)}" is already being created`);
+    return;
+  }
+  marketCreationInProgress.set(normalizedQ, now);
+
+  // RATE LIMIT: Max 2 markets per account per 24 hours
+  const handleKey = (request.author || '').toLowerCase();
+  if (handleKey) {
+    const history = marketCreationHistory.get(handleKey) || [];
+    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+    const recentCreations = history.filter(ts => ts > oneDayAgo);
+    marketCreationHistory.set(handleKey, recentCreations);
+    if (recentCreations.length >= MAX_MARKETS_PER_DAY) {
+      const resetTime = new Date(recentCreations[0] + 24 * 60 * 60 * 1000);
+      console.warn(`[Moltbook] RATE LIMITED: ${request.author} has created ${recentCreations.length} markets in 24h (max ${MAX_MARKETS_PER_DAY})`);
+      marketCreationInProgress.delete(normalizedQ);
+      await moltbook.replyToRequest(request, {
+        success: false,
+        error: `You've reached the maximum of ${MAX_MARKETS_PER_DAY} markets per day. You can create another market after ${resetTime.toUTCString()}.`
+      });
+      return;
+    }
+  }
+
   try {
     // SECURITY: Scan the parsed question for phishing content
     const questionScan = phishingDetector.scanQuestion(betParams.question);
     if (questionScan.isPhishing) {
       console.log(`[Moltbook] PHISHING in bet question from ${request.author}: ${questionScan.reason}`);
+      marketCreationInProgress.delete(normalizedQ);
       await moltbook.replyToRequest(request, {
         success: false,
         error: `Your bet question was blocked for safety. ${questionScan.reason}`
@@ -1676,6 +1804,12 @@ async function createMarketFromMoltbook(request, betParams) {
 
     if (market.success) {
       console.log(`[Moltbook] Market created: ${market.market.id} by ${request.author}`);
+
+      // Record for deduplication and rate limiting
+      recentlyCreatedMarkets.set(normalizedQ, { timestamp: Date.now(), marketId: market.market.id });
+      const rlHistoryMb = marketCreationHistory.get(handleKey) || [];
+      rlHistoryMb.push(Date.now());
+      marketCreationHistory.set(handleKey, rlHistoryMb);
 
       // Track for auto-resolution
       const marketData = {
@@ -1709,18 +1843,31 @@ async function createMarketFromMoltbook(request, betParams) {
       }
     }
 
+    marketCreationInProgress.delete(normalizedQ);
+
     // Reply on Moltbook with market details
     await moltbook.replyToRequest(request, market);
 
   } catch (err) {
     console.error(`[Moltbook] Error creating market from ${request.author}:`, err.message);
+    marketCreationInProgress.delete(normalizedQ);
   }
 }
+
+// Reentrancy guards for cron jobs
+let _checkingMentions = false;
+let _checkingMoltbook = false;
 
 /**
  * Check for new mentions
  */
 async function checkMentions() {
+  if (_checkingMentions) {
+    console.log(`[Bot] Skipping mention check — previous check still running`);
+    return;
+  }
+  _checkingMentions = true;
+
   console.log(`[Bot] Checking for new mentions...`);
 
   try {
@@ -1738,6 +1885,8 @@ async function checkMentions() {
     }
   } catch (error) {
     console.error(`[Bot] Error checking mentions:`, error);
+  } finally {
+    _checkingMentions = false;
   }
 }
 
