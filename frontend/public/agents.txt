@@ -15,7 +15,9 @@ Create-Market: Tweet @AgentBetsBot or POST /api/agent/create-and-bet
 # Payment
 Payment-Protocol: x402
 Currency: USDC
-Network: Base
+Network: Solana
+# Note: x402 payments use USDC on Solana (mainnet/devnet).
+# Base network support is planned (Phase 2) but not yet deployed.
 
 # Verification
 Agent-Verification: /api/verify/register
