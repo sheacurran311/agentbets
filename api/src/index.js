@@ -108,6 +108,21 @@ app.use(helmet({
         "https://api.mainnet-beta.solana.com",
         "wss://api.mainnet.solana.com",
         "wss://api.mainnet-beta.solana.com",
+        // Dedicated RPC providers
+        "https://*.helius-rpc.com",
+        "https://*.helius.dev",
+        "wss://*.helius-rpc.com",
+        "https://*.quiknode.pro",
+        "wss://*.quiknode.pro",
+        "https://*.alchemy.com",
+        "wss://*.alchemy.com",
+        "https://*.triton.one",
+        "wss://*.triton.one",
+        "https://*.rpcpool.com",
+        "wss://*.rpcpool.com",
+        // Dynamically include configured RPC URL
+        ...(process.env.SOLANA_RPC_URL ? [process.env.SOLANA_RPC_URL, process.env.SOLANA_RPC_URL.replace('https://', 'wss://')] : []),
+        // Wallet adapters
         "https://*.solflare.com",
         "https://*.phantom.app",
         "https://*.coinbase.com",
