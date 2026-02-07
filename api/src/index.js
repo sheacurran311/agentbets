@@ -3756,6 +3756,9 @@ app.post('/api/agent/bet/:marketId',
       market.totalVolume = (market.totalVolume || 0) + lamportsEquiv;
       market.totalBets = (market.totalBets || 0) + 1;
 
+      // Record odds history so charts update with agent/bot bets
+      await recordOddsHistory(marketId, market);
+
       // Update positions
       const positionKey = `${bet.wallet}:${marketId}`;
       const existingPosition = positions.get(positionKey) || {
@@ -3950,6 +3953,9 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
 
       market.totalVolume = lamportsEquiv;
       market.totalBets = 1;
+
+      // Record odds history for initial bet
+      await recordOddsHistory(marketId, market);
 
       betResult = {
         id: betId,

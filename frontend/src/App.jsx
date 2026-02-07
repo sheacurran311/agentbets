@@ -874,6 +874,7 @@ function App() {
   const [betAmount, setBetAmount] = useState('')
   const [walletBalance, setWalletBalance] = useState(null)
   const [txStatus, setTxStatus] = useState(null)
+  const [betConfirmation, setBetConfirmation] = useState(null)
   const [gaslessConfig, setGaslessConfig] = useState(null)
   const [selectedCategory, setSelectedCategory] = useState('all')
   const [sortBy, setSortBy] = useState('volume')
@@ -1187,6 +1188,19 @@ function App() {
     }
   }, [oddsHistoryCache])
 
+  // Force-refresh odds history for a market (bypasses cache, used after placing bets)
+  const refreshOddsHistory = useCallback(async (marketId) => {
+    try {
+      const res = await fetch(`${API_BASE}/markets/${marketId}/history?limit=10`)
+      const data = await res.json()
+      const history = data.history || []
+      setOddsHistoryCache(prev => ({ ...prev, [marketId]: history }))
+      return history
+    } catch {
+      return []
+    }
+  }, [])
+
   // Fetch odds history and refresh balance when a market is selected (for modal)
   useEffect(() => {
     if (selectedMarket) {
@@ -1437,7 +1451,39 @@ function App() {
         // infinite signatureSubscribe retry loops
         await pollTransactionConfirmation(signature)
 
-        setTxStatus({ type: 'success', message: `Bet placed! No SOL needed. ${signature.slice(0, 8)}...` })
+        setTxStatus({ type: 'success', message: 'Bet confirmed on-chain!' })
+
+        // Record bet in API so market data (volume, pools, odds) updates
+        try {
+          await fetch(`${API_BASE}/bets`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              marketId: selectedMarket.id,
+              outcome,
+              amount: amount * 1e6,
+              wallet: publicKey.toString(),
+              txSignature: signature,
+              onChain: true
+            })
+          })
+        } catch (recordErr) {
+          console.warn('Failed to record bet in API:', recordErr.message)
+        }
+
+        // Show confirmation screen and refresh data immediately
+        setBetConfirmation({
+          signature,
+          amount,
+          outcome,
+          marketQuestion: selectedMarket.question,
+          gasless: true
+        })
+        fetchMarkets()
+        fetchStats()
+        fetchBalance()
+        refreshOddsHistory(selectedMarket.id)
+        return // Don't fall through to the traditional path
       } else {
         // TRADITIONAL: Build transaction from instructions
         const transaction = new Transaction()
@@ -1482,17 +1528,39 @@ function App() {
         // infinite signatureSubscribe retry loops
         await pollTransactionConfirmation(signature)
 
-        setTxStatus({ type: 'success', message: `On-chain bet placed! ${signature.slice(0, 8)}...` })
-      }
+        setTxStatus({ type: 'success', message: 'Bet confirmed on-chain!' })
 
-      setTimeout(() => {
-        setSelectedMarket(null)
-        setBetAmount('')
-        setTxStatus(null)
+        // Record bet in API so market data (volume, pools, odds) updates
+        try {
+          await fetch(`${API_BASE}/bets`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              marketId: selectedMarket.id,
+              outcome,
+              amount: amount * 1e6,
+              wallet: publicKey.toString(),
+              txSignature: signature,
+              onChain: true
+            })
+          })
+        } catch (recordErr) {
+          console.warn('Failed to record bet in API:', recordErr.message)
+        }
+
+        // Show confirmation screen and refresh data immediately
+        setBetConfirmation({
+          signature,
+          amount,
+          outcome,
+          marketQuestion: selectedMarket.question,
+          gasless: false
+        })
         fetchMarkets()
         fetchStats()
         fetchBalance()
-      }, 2000)
+        refreshOddsHistory(selectedMarket.id)
+      }
 
     } catch (err) {
       console.error('Transaction failed:', err)
@@ -2336,16 +2404,186 @@ function App() {
 
       {/* Bet Modal */}
       {selectedMarket && (
-        <div style={styles.modalOverlay} onClick={() => { setSelectedMarket(null); setTxStatus(null); }}>
+        <div style={styles.modalOverlay} onClick={() => { setSelectedMarket(null); setTxStatus(null); setBetConfirmation(null); }}>
           <div style={{
             ...styles.modal,
             ...(isMarketEnded(selectedMarket) ? { opacity: 0.5, filter: 'grayscale(60%)' } : {})
           }} className="bet-modal" onClick={(e) => e.stopPropagation()}>
+
+            {/* Bet Confirmation Screen */}
+            {betConfirmation ? (
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '40px 20px',
+                textAlign: 'center',
+                minHeight: '350px'
+              }}>
+                {/* Green checkmark */}
+                <div style={{
+                  width: '72px',
+                  height: '72px',
+                  borderRadius: '50%',
+                  background: `${COLORS.success}20`,
+                  border: `3px solid ${COLORS.success}`,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginBottom: '24px',
+                  animation: 'fadeIn 0.3s ease'
+                }}>
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke={COLORS.success} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12"/>
+                  </svg>
+                </div>
+
+                <h2 style={{
+                  fontSize: '24px',
+                  fontWeight: '700',
+                  color: COLORS.success,
+                  marginBottom: '8px'
+                }}>Bet Confirmed!</h2>
+
+                <p style={{
+                  fontSize: '14px',
+                  color: COLORS.textMuted,
+                  marginBottom: '24px',
+                  maxWidth: '400px',
+                  lineHeight: '1.5'
+                }}>
+                  Your wager has been confirmed on the Solana blockchain.
+                </p>
+
+                {/* Bet details card */}
+                <div style={{
+                  background: `${COLORS.bgCard}`,
+                  border: `1px solid ${COLORS.borderLight}`,
+                  borderRadius: '16px',
+                  padding: '20px 28px',
+                  marginBottom: '24px',
+                  width: '100%',
+                  maxWidth: '400px'
+                }}>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '12px'
+                  }}>
+                    <span style={{ color: COLORS.textMuted, fontSize: '13px' }}>Amount</span>
+                    <span style={{ color: COLORS.primary, fontWeight: '700', fontSize: '16px', fontFamily: 'JetBrains Mono, monospace' }}>
+                      {betConfirmation.amount} USDC
+                    </span>
+                  </div>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '12px'
+                  }}>
+                    <span style={{ color: COLORS.textMuted, fontSize: '13px' }}>Side</span>
+                    <span style={{
+                      fontWeight: '700',
+                      fontSize: '14px',
+                      color: betConfirmation.outcome === 'YES' ? COLORS.success : COLORS.error,
+                      background: betConfirmation.outcome === 'YES' ? `${COLORS.success}15` : `${COLORS.error}15`,
+                      padding: '4px 12px',
+                      borderRadius: '8px'
+                    }}>
+                      {betConfirmation.outcome}
+                    </span>
+                  </div>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '12px'
+                  }}>
+                    <span style={{ color: COLORS.textMuted, fontSize: '13px' }}>Gas</span>
+                    <span style={{ color: COLORS.textSecondary, fontSize: '13px' }}>
+                      {betConfirmation.gasless ? 'Gasless (USDC fee)' : 'SOL'}
+                    </span>
+                  </div>
+                  <div style={{
+                    borderTop: `1px solid ${COLORS.borderLight}`,
+                    paddingTop: '12px',
+                    marginTop: '4px'
+                  }}>
+                    <p style={{
+                      color: COLORS.textSecondary,
+                      fontSize: '12px',
+                      lineHeight: '1.5',
+                      margin: 0
+                    }}>
+                      {betConfirmation.marketQuestion}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Solscan link */}
+                <a
+                  href={`https://solscan.io/tx/${betConfirmation.signature}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    color: COLORS.secondary,
+                    fontSize: '13px',
+                    textDecoration: 'none',
+                    marginBottom: '28px',
+                    padding: '8px 16px',
+                    borderRadius: '8px',
+                    background: `${COLORS.secondary}10`,
+                    border: `1px solid ${COLORS.secondary}25`,
+                    transition: 'background 0.2s'
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = `${COLORS.secondary}20`}
+                  onMouseLeave={(e) => e.currentTarget.style.background = `${COLORS.secondary}10`}
+                >
+                  View on Solscan
+                  <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '11px', opacity: 0.7 }}>
+                    {betConfirmation.signature.slice(0, 8)}...{betConfirmation.signature.slice(-6)}
+                  </span>
+                  {Icons2.externalLink}
+                </a>
+
+                {/* Done button */}
+                <button
+                  onClick={() => {
+                    setSelectedMarket(null)
+                    setBetConfirmation(null)
+                    setTxStatus(null)
+                    setBetAmount('')
+                  }}
+                  style={{
+                    background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.secondary})`,
+                    color: '#000',
+                    border: 'none',
+                    borderRadius: '12px',
+                    padding: '14px 48px',
+                    fontSize: '16px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    transition: 'transform 0.2s, box-shadow 0.2s',
+                    boxShadow: `0 4px 15px ${COLORS.primary}40`
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.transform = 'scale(1.03)'; e.currentTarget.style.boxShadow = `0 6px 20px ${COLORS.primary}60` }}
+                  onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.boxShadow = `0 4px 15px ${COLORS.primary}40` }}
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
+            <>
             <div style={styles.modalHeader}>
               <h2 style={{fontSize: '20px', fontWeight: '600', color: COLORS.textPrimary}}>
                 {isMarketEnded(selectedMarket) ? 'Market Ended' : 'Place Your Bet'}
               </h2>
-              <button style={styles.closeBtn} onClick={() => { setSelectedMarket(null); setTxStatus(null); }}>
+              <button style={styles.closeBtn} onClick={() => { setSelectedMarket(null); setTxStatus(null); setBetConfirmation(null); }}>
                 {Icons.x}
               </button>
             </div>
@@ -2753,6 +2991,8 @@ function App() {
                 </div>
               </div>
             </div>
+            </>
+            )}
           </div>
         </div>
       )}

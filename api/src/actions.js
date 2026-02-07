@@ -444,6 +444,22 @@ router.post('/bet/:marketId/confirm', async (req, res) => {
 
       req.app.locals.markets.set(marketId, market);
 
+      // Record odds history so charts update with Blink bets
+      const oddsHistory = req.app.locals.oddsHistory;
+      if (oddsHistory) {
+        try {
+          await oddsHistory.record(marketId, {
+            yesOdds: market.yesOdds,
+            noOdds: market.noOdds,
+            yesPool: market.yesPool,
+            noPool: market.noPool,
+            totalVolume: market.totalVolume
+          });
+        } catch (histErr) {
+          console.warn('[Actions] Failed to record odds history:', histErr.message);
+        }
+      }
+
       // Update positions
       const positionKey = `${account}-${marketId}-${outcome}`;
       const existingPosition = positions.get(positionKey) || {
