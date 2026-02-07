@@ -573,28 +573,32 @@ class BetParser {
 
   /**
    * Parse a confirmation reply for a pending market creation
-   * The agent should reply with either:
+   * The agent can:
    *   - "confirm" / "yes" / "looks good" → use the suggested date
    *   - A specific date like "2026-02-28" or "Feb 28, 2026" → use that date
    *   - "cancel" / "no" / "nevermind" → cancel the market creation
+   *   - Include a bet in the same reply: "Yes, bet $5 on YES" or "confirm, betting 10 USDC NO"
    */
   parseConfirmationReply(text) {
     const lower = text.toLowerCase().replace(/@\w+\s*/g, '').trim();
 
-    // Check for cancellation
+    // Check for cancellation first
     if (/\b(cancel|nevermind|never\s*mind|nah|nope|forget\s*it|stop)\b/i.test(lower)) {
       return { action: 'cancel' };
     }
 
+    // Extract any bet intent from the reply (can be combined with confirm/date)
+    const betIntent = this.extractBetIntent(text);
+
     // Check for explicit date in the reply
     const dateResult = this.parseEndDate(text);
     if (dateResult.date) {
-      return { action: 'confirm', endDate: dateResult.date };
+      return { action: 'confirm', endDate: dateResult.date, bet: betIntent };
     }
 
     // Check for confirmation of the suggested date
     if (/\b(confirm|yes|yeah|yep|yup|ok|okay|sure|looks?\s*good|correct|go\s*ahead|do\s*it|lgtm|approved?|that\s*works?)\b/i.test(lower)) {
-      return { action: 'confirm_suggested' };
+      return { action: 'confirm_suggested', bet: betIntent };
     }
 
     // If they provided a date that needs clarification again, pass it through
@@ -603,12 +607,57 @@ class BetParser {
         action: 'needs_clarification', 
         detectedPhrase: dateResult.detectedPhrase,
         suggestedDate: dateResult.suggestedDate,
-        suggestedLabel: dateResult.suggestedLabel
+        suggestedLabel: dateResult.suggestedLabel,
+        bet: betIntent
       };
     }
 
     // Could not understand the reply
-    return { action: 'unknown' };
+    return { action: 'unknown', bet: betIntent };
+  }
+
+  /**
+   * Extract bet intent from a confirmation reply or any text
+   * Matches patterns like:
+   *   "bet $1 on YES", "betting 10 USDC NO", "put 5 on yes",
+   *   "$1 YES", "$5 on NO", "bet 1 yes", "please bet $1 on YES"
+   * Returns { amount, outcome, currency } or null if no bet detected
+   */
+  extractBetIntent(text) {
+    const lower = text.toLowerCase();
+
+    // Pattern 1: "bet/betting/wager/put $X on YES/NO" or "bet $X YES/NO"
+    const betMatch = text.match(/(?:bet|betting|wager|put|stake)\s*\$?\s*(\d+(?:\.\d+)?)\s*(?:usdc\s+)?(?:on\s+)?(yes|no)/i) ||
+                     text.match(/(?:bet|betting|wager|put|stake)\s*(\d+(?:\.\d+)?)\s*(?:usdc\s+)?(?:on\s+)?(yes|no)/i);
+    if (betMatch) {
+      return {
+        amount: parseFloat(betMatch[1]),
+        outcome: betMatch[2].toUpperCase(),
+        currency: 'USDC'
+      };
+    }
+
+    // Pattern 2: "$X on YES/NO" or "$X YES/NO"
+    const dollarMatch = text.match(/\$(\d+(?:\.\d+)?)\s*(?:usdc\s+)?(?:on\s+)?(yes|no)/i);
+    if (dollarMatch) {
+      return {
+        amount: parseFloat(dollarMatch[1]),
+        outcome: dollarMatch[2].toUpperCase(),
+        currency: 'USDC'
+      };
+    }
+
+    // Pattern 3: "X USDC on YES/NO" or "X USDC YES/NO"
+    const usdcMatch = text.match(/(\d+(?:\.\d+)?)\s*usdc\s+(?:on\s+)?(yes|no)/i);
+    if (usdcMatch) {
+      return {
+        amount: parseFloat(usdcMatch[1]),
+        outcome: usdcMatch[2].toUpperCase(),
+        currency: 'USDC'
+      };
+    }
+
+    return null;
   }
 
   extractDateFromText(text) {

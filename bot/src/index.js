@@ -702,8 +702,60 @@ function getReplyToTweetId(tweet) {
       return repliedTo.id;
     }
   }
-  // Fallback: if in_reply_to_user_id is set, this is a reply (but we don't know to which tweet)
-  // conversation_id alone isn't enough since it's the root tweet of the thread
+  return null;
+}
+
+/**
+ * Find a pending confirmation that matches this tweet
+ * Tries multiple matching strategies:
+ * 1. Direct match: tweet is replying to our bot's clarification tweet ID
+ * 2. Conversation match: tweet is in the same conversation thread as a pending confirmation
+ * 3. Author match: same author has a recent pending confirmation (fallback for lost thread context)
+ */
+function findPendingConfirmation(tweet, authorHandle) {
+  // Strategy 1: Direct reply to our bot's clarification tweet
+  const replyToId = getReplyToTweetId(tweet);
+  if (replyToId && pendingConfirmations.has(replyToId)) {
+    console.log(`[Bot] Confirmation match: direct reply to bot tweet ${replyToId}`);
+    return { botReplyId: replyToId, pending: pendingConfirmations.get(replyToId) };
+  }
+
+  // Strategy 2: Check if tweet is replying to any tweet in a pending confirmation thread
+  // The agent might reply to the original tweet or to the bot's reply
+  if (replyToId) {
+    for (const [botReplyId, pending] of pendingConfirmations) {
+      if (pending.originalTweetId === replyToId) {
+        console.log(`[Bot] Confirmation match: reply to original tweet ${replyToId} (pending via ${botReplyId})`);
+        return { botReplyId, pending };
+      }
+    }
+  }
+
+  // Strategy 3: Conversation ID match — tweet is in the same thread
+  if (tweet.conversation_id) {
+    for (const [botReplyId, pending] of pendingConfirmations) {
+      // The conversation_id is the root tweet of the thread (the agent's original market request)
+      if (pending.originalTweetId === tweet.conversation_id &&
+          pending.authorHandle.toLowerCase() === authorHandle.toLowerCase()) {
+        console.log(`[Bot] Confirmation match: same conversation ${tweet.conversation_id} from @${authorHandle}`);
+        return { botReplyId, pending };
+      }
+    }
+  }
+
+  // Strategy 4: Same author has a pending confirmation (most lenient fallback)
+  // Only matches if there's exactly one pending confirmation from this author
+  const authorPending = [];
+  for (const [botReplyId, pending] of pendingConfirmations) {
+    if (pending.authorHandle.toLowerCase() === authorHandle.toLowerCase()) {
+      authorPending.push({ botReplyId, pending });
+    }
+  }
+  if (authorPending.length === 1) {
+    console.log(`[Bot] Confirmation match: only pending confirmation from @${authorHandle}`);
+    return authorPending[0];
+  }
+
   return null;
 }
 
@@ -742,6 +794,13 @@ async function handleDateConfirmation(tweetId, authorHandle, authorId, text, bot
     console.log(`[Bot] @${authorHandle} confirmed with specific date: ${confirmation.endDate}`);
     pending.betParams.endDate = confirmation.endDate;
     pending.betParams.needsDateClarification = false;
+    // Apply bet intent if agent included one in their confirmation reply
+    if (confirmation.bet) {
+      console.log(`[Bot] @${authorHandle} also wants to bet: ${confirmation.bet.amount} ${confirmation.bet.currency} ${confirmation.bet.outcome}`);
+      pending.betParams.initialBet = confirmation.bet.amount;
+      pending.betParams.initialOutcome = confirmation.bet.outcome;
+      pending.betParams.initialCurrency = confirmation.bet.currency;
+    }
     pendingConfirmations.delete(botReplyId);
     savePendingConfirmations();
     await createMarketFromParams(tweetId, authorHandle, pending.betParams);
@@ -754,6 +813,13 @@ async function handleDateConfirmation(tweetId, authorHandle, authorId, text, bot
       console.log(`[Bot] @${authorHandle} confirmed suggested date: ${pending.suggestedDate}`);
       pending.betParams.endDate = pending.suggestedDate;
       pending.betParams.needsDateClarification = false;
+      // Apply bet intent if agent included one in their confirmation reply
+      if (confirmation.bet) {
+        console.log(`[Bot] @${authorHandle} also wants to bet: ${confirmation.bet.amount} ${confirmation.bet.currency} ${confirmation.bet.outcome}`);
+        pending.betParams.initialBet = confirmation.bet.amount;
+        pending.betParams.initialOutcome = confirmation.bet.outcome;
+        pending.betParams.initialCurrency = confirmation.bet.currency;
+      }
       pendingConfirmations.delete(botReplyId);
       savePendingConfirmations();
       await createMarketFromParams(tweetId, authorHandle, pending.betParams);
@@ -823,8 +889,12 @@ async function processMention(tweet) {
 
     // Check if this is a reply to a pending date confirmation request
     const replyToId = getReplyToTweetId(tweet);
-    if (replyToId && pendingConfirmations.has(replyToId)) {
-      await handleDateConfirmation(tweetId, authorHandle, authorId, text, replyToId);
+    if (pendingConfirmations.size > 0) {
+      console.log(`[Bot] Pending confirmations: ${pendingConfirmations.size}, reply_to: ${replyToId || 'none'}, conversation_id: ${tweet.conversation_id || 'none'}`);
+    }
+    const confirmMatch = findPendingConfirmation(tweet, authorHandle);
+    if (confirmMatch) {
+      await handleDateConfirmation(tweetId, authorHandle, authorId, text, confirmMatch.botReplyId);
       return;
     }
 
