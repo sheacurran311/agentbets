@@ -2384,10 +2384,11 @@ app.post('/api/onchain/wager', async (req, res) => {
     const useGasless = gasless && gaslessService.enabled && gaslessService.feePayerKeypair;
     const userPubkey = new PublicKey(wallet);
 
-    // In gasless mode, API wallet pays SOL rent for account init
-    const initPayerOverride = useGasless
+    // In gasless mode, API wallet pays SOL rent (feePayerOverride),
+    // but the USER is always the owner/identity (payerOverride).
+    const feePayerOverride = useGasless
       ? gaslessService.feePayerKeypair.publicKey
-      : userPubkey;
+      : undefined;
 
     // AUTO: Check if user has a Poll.fun account, include init instruction if not
     let userInitIx = null;
@@ -2398,7 +2399,8 @@ app.post('/api/onchain/wager', async (req, res) => {
       if (!userData.success) {
         console.log(`[API] User ${wallet.slice(0, 8)}... needs Poll.fun account, including init instruction`);
         userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
-          payerOverride: initPayerOverride
+          payerOverride: userPubkey,          // owner = the real user
+          feePayerOverride: feePayerOverride  // SOL payer = API wallet in gasless mode
         });
         userInitInstructionSerialized = {
           programId: userInitIx.programId?.toBase58(),
@@ -2414,7 +2416,8 @@ app.post('/api/onchain/wager', async (req, res) => {
       console.log(`[API] User account check failed, including init instruction: ${err.message}`);
       try {
         userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
-          payerOverride: initPayerOverride
+          payerOverride: userPubkey,          // owner = the real user
+          feePayerOverride: feePayerOverride  // SOL payer = API wallet in gasless mode
         });
         userInitInstructionSerialized = {
           programId: userInitIx.programId?.toBase58(),

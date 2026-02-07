@@ -233,22 +233,20 @@ class PollFunService {
   async buildWagerInstruction(params) {
     const { betPda, side, amount, userPubkey, feePayerPubkey } = params;
 
-    console.log(`[PollFun] Building wager instruction: ${amount} USDC on ${side}`);
+    console.log(`[PollFun] Building wager instruction: ${amount} USDC on ${side} for user ${userPubkey.slice(0, 8)}...`);
 
     try {
       // Map YES/NO to Poll.fun Outcome enum
       const outcome = side === 'YES' ? Outcome.For : Outcome.Against;
 
-      // payerOverride determines who pays SOL rent for on-chain accounts.
-      // In gasless mode, the API wallet pays; otherwise the user pays.
-      const payer = feePayerPubkey ? new PublicKey(feePayerPubkey) : new PublicKey(userPubkey);
-
-      // Get the instruction (not signed transaction)
+      // payerOverride = the USER (owner, identity, USDC source — always the bettor)
+      // feePayerOverride = who pays SOL gas (API wallet in gasless mode, otherwise user)
       const ix = await this.sdk.instructions.placeWagerV2({
         bet: new PublicKey(betPda),
         amount, // SDK handles USDC decimals
         side: outcome,
-        payerOverride: payer
+        payerOverride: new PublicKey(userPubkey),
+        feePayerOverride: feePayerPubkey ? new PublicKey(feePayerPubkey) : undefined
       });
 
       return {

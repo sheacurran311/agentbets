@@ -358,21 +358,24 @@ class GaslessRelayService {
   }
 
   /**
-   * Validates that no instructions (other than the fee transfer) reference
-   * the fee payer's accounts as writable
+   * Validates that no instructions (other than the fee transfer) drain
+   * the fee payer's USDC token account.
+   * 
+   * The fee payer's SOL account IS allowed to be writable in other instructions
+   * because it needs to pay rent for creating on-chain accounts (e.g., user init,
+   * wager pool authority). Only the USDC ATA is protected.
    */
   _validateInstructionsSafety(instructions) {
-    const feePayerPk = this.feePayerKeypair.publicKey;
     const feePayerAtaPk = this.feePayerAta;
 
     // Skip first instruction (fee transfer — expected to reference our ATA)
     for (let i = 1; i < instructions.length; i++) {
       const ix = instructions[i];
       for (const key of ix.keys) {
-        // Block any writable access to fee payer's main account or ATA
-        if (key.isWritable && (key.pubkey.equals(feePayerPk) || key.pubkey.equals(feePayerAtaPk))) {
+        // Block writable access to fee payer's USDC ATA (prevents draining)
+        if (key.isWritable && key.pubkey.equals(feePayerAtaPk)) {
           throw new Error(
-            `Security: Instruction ${i} attempts writable access to fee payer account (${key.pubkey.toBase58()})`
+            `Security: Instruction ${i} attempts writable access to fee payer USDC account (${key.pubkey.toBase58()})`
           );
         }
       }

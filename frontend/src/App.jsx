@@ -1275,6 +1275,55 @@ function App() {
     }
   }
 
+  // Decode Solana on-chain errors into human-readable messages
+  const decodeSolanaError = useCallback((err) => {
+    if (!err) return 'Unknown error'
+    const errStr = typeof err === 'string' ? err : JSON.stringify(err)
+
+    // Poll.fun program custom errors (code 6000+)
+    const pollFunErrors = {
+      6000: 'Invalid USDC mint',
+      6001: 'Invalid update authority',
+      6002: 'Invalid withdraw authority',
+      6003: 'Question is empty',
+      6004: 'Expected user count is zero',
+      6005: 'Minimum vote count is zero',
+      6006: 'Minimum vote count > expected user count',
+      6007: 'Expected user count > 5',
+      6008: 'Minimum vote count > 5',
+      6009: 'You have already placed a wager on this bet',
+      6010: 'Insufficient USDC balance',
+      6011: 'Invalid amount',
+      6012: 'Market is not accepting wagers (not in Pending status)',
+      6013: 'Resolved outcome is already set',
+      6014: 'Invalid side',
+      6015: 'User has not placed a wager',
+      6016: 'User has already voted',
+      6017: 'Must initiate a vote first',
+      6018: 'Market must be resolved before settling',
+      6019: 'Invalid outcome — must be For or Against'
+    }
+
+    // Check for InstructionError with Custom code
+    const customMatch = errStr.match(/"Custom":(\d+)/)
+    if (customMatch) {
+      const code = parseInt(customMatch[1])
+      if (pollFunErrors[code]) return pollFunErrors[code]
+      // SPL Token errors
+      if (code === 0) return 'Account not rent-exempt (insufficient SOL for fees)'
+      if (code === 1) return 'Insufficient token balance'
+      if (code === 4) return 'Owner mismatch on token account'
+      return `On-chain error (code ${code})`
+    }
+
+    // Common error patterns
+    if (errStr.includes('InsufficientFundsForRent')) return 'Insufficient SOL for account rent'
+    if (errStr.includes('AccountNotFound')) return 'Account not found on-chain'
+    if (errStr.includes('User rejected')) return 'Transaction rejected by wallet'
+
+    return errStr
+  }, [])
+
   // Poll-based transaction confirmation to avoid WebSocket signatureSubscribe errors.
   // connection.confirmTransaction() uses WebSocket subscriptions internally, which can
   // enter an infinite retry loop when the RPC's WebSocket endpoint fails or rate-limits.
@@ -1289,7 +1338,7 @@ function App() {
 
         if (status) {
           if (status.err) {
-            throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`)
+            throw new Error(decodeSolanaError(status.err))
           }
           // 'confirmed' or 'finalized' means success
           if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
@@ -1447,7 +1496,8 @@ function App() {
 
     } catch (err) {
       console.error('Transaction failed:', err)
-      setTxStatus({ type: 'error', message: err.message || 'Transaction failed' })
+      const friendlyMsg = decodeSolanaError(err.message || err)
+      setTxStatus({ type: 'error', message: friendlyMsg })
     }
   }
 
