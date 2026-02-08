@@ -155,8 +155,7 @@ function validateEnvironment() {
     console.error('[Config] For local dev: Copy .env.example to .env and fill in values\n');
   }
 
-  // #region agent log
-  // CRITICAL: Check if AGENTBETS_URL or AGENTBETS_API_URL contains dev/replit URLs
+  // Safety: Check if AGENTBETS_URL or AGENTBETS_API_URL contains dev/replit URLs
   const urlToCheck = process.env.AGENTBETS_URL || '';
   const apiUrlToCheck = process.env.AGENTBETS_API_URL || '';
   if (urlToCheck.includes('replit') || urlToCheck.includes('localhost') || urlToCheck.includes('127.0.0.1')) {
@@ -171,7 +170,6 @@ function validateEnvironment() {
     console.error(`[Config] CRITICAL WARNING: AGENTBETS_API_URL contains a Replit dev URL: ${apiUrlToCheck}`);
     console.error(`[Config] This may leak dev URLs into tweets if any code derives URLs from AGENTBETS_API_URL`);
   }
-  // #endregion
 
   return !hasErrors;
 }
@@ -501,6 +499,13 @@ async function initializeStorage() {
     marketThreads.set(k, v);
   }
   
+  // Restore lastMentionId so we don't re-fetch old mentions after restart
+  const savedMentionId = loadLastMentionId();
+  if (savedMentionId) {
+    twitter.lastMentionId = savedMentionId;
+    console.log(`[Bot] Restored lastMentionId: ${savedMentionId}`);
+  }
+
   console.log(`[Bot] Loaded ${processedTweets.size} processed tweets`);
   console.log(`[Bot] Loaded ${pendingResolutions.size} pending resolutions`);
   console.log(`[Bot] Loaded ${marketThreads.size} market threads`);
@@ -1423,9 +1428,10 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
     // Reply with success - include Blink URL for direct betting
     // IMPORTANT: Use AGENTBETS_URL (public frontend URL), NOT AGENTBETS_API_URL
     const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-    // #region agent log
-    console.log(`[DEBUG-URL] createMarketFromParams baseUrl="${baseUrl}" | AGENTBETS_URL="${process.env.AGENTBETS_URL}" | AGENTBETS_API_URL="${process.env.AGENTBETS_API_URL}" | Contains replit: ${baseUrl.includes('replit')}`);
-    // #endregion
+    // Safety: warn if baseUrl is accidentally a dev URL
+    if (baseUrl.includes('replit') || baseUrl.includes('localhost')) {
+      console.error(`[Bot] CRITICAL: baseUrl for market links is a dev URL: ${baseUrl}`);
+    }
     const marketUrl = `${baseUrl}/markets/${market.market.id}`;
     const actionUrl = `${baseUrl}/api/actions/bet/${market.market.id}`;
     const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
@@ -2271,9 +2277,31 @@ async function checkMentions() {
 
     console.log(`[Bot] Found ${mentions.length} mentions`);
 
-    for (const tweet of mentions) {
+    // STARTUP GRACE PERIOD: On the first check after restart, skip mentions
+    // older than STARTUP_GRACE_PERIOD_MS to avoid re-processing old tweets
+    let filteredMentions = mentions;
+    if (isFirstMentionCheck) {
+      isFirstMentionCheck = false;
+      const cutoff = new Date(BOT_STARTUP_TIME.getTime() - STARTUP_GRACE_PERIOD_MS);
+      filteredMentions = mentions.filter(tweet => {
+        const tweetDate = new Date(tweet.created_at);
+        if (tweetDate < cutoff) {
+          console.log(`[Bot] Startup grace: skipping old mention ${tweet.id} (created ${tweet.created_at})`);
+          return false;
+        }
+        return true;
+      });
+      if (filteredMentions.length < mentions.length) {
+        console.log(`[Bot] Startup grace: filtered ${mentions.length - filteredMentions.length} old mentions, processing ${filteredMentions.length}`);
+      }
+    }
+
+    for (const tweet of filteredMentions) {
       await processMention(tweet);
     }
+
+    // Persist lastMentionId after processing so restarts pick up where we left off
+    await saveLastMentionId();
   } catch (error) {
     console.error(`[Bot] Error checking mentions:`, error);
   } finally {
@@ -2474,17 +2502,11 @@ app.post('/webhook/bet-placed', async (req, res) => {
 // Start server with async initialization
 async function startBot() {
   try {
-    // #region agent log
-    console.log(`[DEBUG-STARTUP] ===== BOT ENVIRONMENT AUDIT =====`);
-    console.log(`[DEBUG-STARTUP] AGENTBETS_URL="${process.env.AGENTBETS_URL || 'NOT SET'}"`);
-    console.log(`[DEBUG-STARTUP] AGENTBETS_API_URL="${process.env.AGENTBETS_API_URL || 'NOT SET'}"`);
-    console.log(`[DEBUG-STARTUP] AGENTBETS_URL contains replit: ${(process.env.AGENTBETS_URL || '').includes('replit')}`);
-    console.log(`[DEBUG-STARTUP] AGENTBETS_API_URL contains replit: ${(process.env.AGENTBETS_API_URL || '').includes('replit')}`);
-    console.log(`[DEBUG-STARTUP] NODE_ENV="${process.env.NODE_ENV || 'NOT SET'}"`);
-    console.log(`[DEBUG-STARTUP] BOT_PORT="${process.env.BOT_PORT || 'NOT SET'}"`);
-    console.log(`[DEBUG-STARTUP] PID=${process.pid} | Platform=${process.platform} | CWD=${process.cwd()}`);
-    console.log(`[DEBUG-STARTUP] ================================`);
-    // #endregion
+    // Environment audit on startup -- helps diagnose URL and config issues
+    console.log(`[Config] AGENTBETS_URL=${process.env.AGENTBETS_URL || 'NOT SET (defaults to https://agentbets.gg)'}`);
+    console.log(`[Config] AGENTBETS_API_URL=${process.env.AGENTBETS_API_URL || 'NOT SET'}`);
+    console.log(`[Config] NODE_ENV=${process.env.NODE_ENV || 'NOT SET'}`);
+    console.log(`[Config] PID=${process.pid}`);
 
     // Initialize storage (database or file-based)
     await initializeStorage();

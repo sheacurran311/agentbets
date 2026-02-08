@@ -202,9 +202,10 @@ class TwitterService {
    * Falls back to alternative method on failure
    */
   async tweet(text) {
-    // #region agent log
-    console.log(`[DEBUG-TWEET] tweet() called. Text preview: "${text?.slice(0, 120)}..." | Contains replit.dev: ${text?.includes('replit.dev')} | Contains kirk: ${text?.includes('kirk')} | AGENTBETS_URL=${process.env.AGENTBETS_URL} | Stack: ${new Error().stack.split('\n').slice(1, 4).join(' <- ')}`);
-    // #endregion
+    // Safety check: warn if tweet text contains dev/replit URLs
+    if (text?.includes('replit.dev') || text?.includes('localhost')) {
+      console.error(`[Twitter] WARNING: tweet() text contains dev URL! Preview: "${text?.slice(0, 150)}"`);
+    }
     // If configured to use inference.sh as primary
     if (this.useInfsh) {
       const infshResult = await this.tweetViaInfsh(text);
@@ -250,9 +251,10 @@ class TwitterService {
    * Reply to a tweet
    */
   async reply(tweetId, text) {
-    // #region agent log
-    console.log(`[DEBUG-REPLY] reply() called for tweet ${tweetId}. Text preview: "${text?.slice(0, 120)}..." | Contains replit.dev: ${text?.includes('replit.dev')} | Contains kirk: ${text?.includes('kirk')} | AGENTBETS_URL=${process.env.AGENTBETS_URL} | Stack: ${new Error().stack.split('\n').slice(1, 4).join(' <- ')}`);
-    // #endregion
+    // Safety check: warn if reply text contains dev/replit URLs
+    if (text?.includes('replit.dev') || text?.includes('localhost')) {
+      console.error(`[Twitter] WARNING: reply() text contains dev URL! Tweet ${tweetId}, preview: "${text?.slice(0, 150)}"`);
+    }
     if (!this.writeClient) {
       console.log('[Twitter] Write client not configured, would reply to', tweetId, ':', text);
       return { success: false, reason: 'Write client not configured' };

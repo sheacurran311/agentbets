@@ -35,11 +35,23 @@ test('Structured bet request is detected', () => {
   assert(p.isBetRequest('@AgentBetsBot bet: "Will $SOL hit $200?"'), 'Should detect structured bet');
 });
 
-test('Natural language question is NOT detected as bet request (no keyword)', () => {
-  // isBetRequest requires one of the keywords: bet:, create bet, new bet, prediction:, market:
+test('Natural language bet question IS detected as bet request', () => {
+  // Natural language questions with "Will X?" pattern are valid bet requests
   const result = p.isBetRequest('@AgentBetsBot Will $SOL hit $200 by March?');
-  // This is expected to be false since there's no keyword
-  assert(!result, 'Natural language without keyword should not be isBetRequest');
+  assert(result, 'Natural language bet question should be detected as isBetRequest');
+});
+
+test('Short conversational mention is NOT a bet request', () => {
+  // Simple tags or greetings should not trigger bet processing
+  assert(!p.isBetRequest('@AgentBetsBot What is this?'), 'Short question should not be bet request');
+  assert(!p.isBetRequest('@AgentBetsBot hey'), 'Greeting should not be bet request');
+  assert(!p.isBetRequest('@AgentBetsBot'), 'Plain mention should not be bet request');
+});
+
+test('Conversational phrases are NOT bet requests', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Are you online right now and working?'), 'Conversational question should not be bet request');
+  assert(!p.isBetRequest('@AgentBetsBot Can you help me understand this?'), 'Help request should not be bet request');
+  assert(!p.isBetRequest('@AgentBetsBot What do you think about the market?'), 'Opinion request should not be bet request');
 });
 
 test('"balance" is a command, not a bet', () => {

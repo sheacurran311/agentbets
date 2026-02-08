@@ -51,23 +51,52 @@ class BetParser {
     // Make sure it's not a command
     if (this.isCommand(text)) return false;
 
-    // Check for explicit bet keywords
+    // Check for explicit bet keywords (these are always valid regardless of length)
     if (this.betKeywords.some(keyword => lowerText.includes(keyword))) {
       return true;
+    }
+
+    // Strip @mentions to get the actual content for analysis
+    const textWithoutMentions = text.replace(/@\w+/g, '').trim();
+
+    // Minimum content length -- avoid matching short conversational mentions
+    // like "@AgentBetsBot What?" or "@AgentBetsBot Is this working?"
+    if (textWithoutMentions.length < 20) {
+      return false;
+    }
+
+    // Reject common conversational phrases that aren't bet requests
+    const conversationalPatterns = [
+      /what do you think/i,
+      /what is (this|that|your|the)/i,
+      /what are you/i,
+      /what happened/i,
+      /is (this|that|it) (working|live|real|correct|right|good|ok)/i,
+      /are you (online|working|live|real|there|ok|a bot)/i,
+      /can you (help|explain|tell|show|do)/i,
+      /how are you/i,
+      /who are you/i,
+      /who (made|built|created) (you|this)/i,
+      /does (this|that|it) (work|exist)/i,
+      /is anyone/i,
+      /what's (up|new|going|happening)/i,
+    ];
+    if (conversationalPatterns.some(pattern => pattern.test(textWithoutMentions))) {
+      return false;
     }
 
     // Check for natural language question patterns
     // These match with or without @handle prefix (supports both Twitter and Moltbook)
     const naturalQuestionPatterns = [
       /(?:@\w+\s+)?Will\s+.+\?/i,
-      /(?:@\w+\s+)?Who\s+.+\?/i,
-      /(?:@\w+\s+)?What\s+.+\?/i,
-      /(?:@\w+\s+)?Can\s+.+\?/i,
-      /(?:@\w+\s+)?Does\s+.+\?/i,
-      /(?:@\w+\s+)?Is\s+.+\?/i,
-      /(?:@\w+\s+)?Are\s+.+\?/i,
+      /(?:@\w+\s+)?Who\s+will\s+.+\?/i,
+      /(?:@\w+\s+)?What\s+will\s+.+\?/i,
+      /(?:@\w+\s+)?Can\s+\S+\s+.+\?/i,      // Require at least a subject after "Can"
+      /(?:@\w+\s+)?Does\s+\S+\s+.+\?/i,      // Require at least a subject after "Does"
+      /(?:@\w+\s+)?Is\s+\S+\s+.{10,}\?/i,    // "Is X ...?" with substantial content
+      /(?:@\w+\s+)?Are\s+\S+\s+.{10,}\?/i,   // "Are X ...?" with substantial content
       /(?:@\w+\s+)?How\s+many\s+.+\?/i,
-      /(?:@\w+\s+)?["\u201C\u201D].+["\u201C\u201D]/,    // Quoted question (with or without @mention, straight or smart quotes)
+      /(?:@\w+\s+)?["\u201C\u201D].{15,}["\u201C\u201D]/,    // Quoted question with at least 15 chars inside quotes
     ];
 
     if (naturalQuestionPatterns.some(pattern => pattern.test(text))) {
