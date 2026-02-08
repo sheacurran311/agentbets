@@ -1030,7 +1030,17 @@ async function processMention(tweet) {
       return;
     }
 
-    // SECURITY: Scan for phishing before any processing
+    // FIRST: Check if this is a command or bet request before any other processing
+    // This prevents the bot from responding to casual mentions, tags, or conversations
+    const isCommand = parser.isCommand(text);
+    const isBetRequest = parser.isBetRequest(text);
+
+    if (!isCommand && !isBetRequest) {
+      console.log(`[Bot] Not a command or bet request from @${authorHandle}, ignoring`);
+      return;
+    }
+
+    // SECURITY: Now scan for phishing (only on actionable requests — commands or bets)
     const phishScan = phishingDetector.scanTweet(text);
     if (phishScan.isPhishing) {
       console.log(`[Bot] PHISHING DETECTED from @${authorHandle}: ${phishScan.reason} (severity: ${phishScan.severity})`);
@@ -1043,18 +1053,13 @@ async function processMention(tweet) {
       return;
     }
 
-    // Check if this is a bot command (balance, withdraw, help, stats, bet)
-    if (parser.isCommand(text)) {
+    // Handle bot commands (balance, withdraw, help, stats, bet)
+    if (isCommand) {
       await processCommand(tweetId, authorHandle, text, tweet);
       return;
     }
 
-    // Check if this is a bet creation request
-    if (!parser.isBetRequest(text)) {
-      console.log(`[Bot] Not a bet request, skipping`);
-      return;
-    }
-
+    // From here on, this is a bet creation request
     // Verify the author is a verified agent
     const verification = await verifier.verifyAgent(authorHandle, authorId);
 
