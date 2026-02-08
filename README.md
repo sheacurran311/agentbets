@@ -337,7 +337,7 @@ cd ../frontend && npm run dev
 **API Server (.env)**
 ```bash
 SOLANA_PRIVATE_KEY=<bot-keypair-base58>  # REQUIRED for market creation
-ESCROW_WALLET=48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM
+ESCROW_WALLET=<public-address>
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 BOT_WEBHOOK_URL=https://your-bot.railway.app
 ```
