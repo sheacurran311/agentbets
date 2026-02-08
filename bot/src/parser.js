@@ -51,18 +51,25 @@ class BetParser {
     // Make sure it's not a command
     if (this.isCommand(text)) return false;
 
-    // Check for explicit bet keywords (these are always valid regardless of length)
-    if (this.betKeywords.some(keyword => lowerText.includes(keyword))) {
-      return true;
-    }
-
     // Strip @mentions to get the actual content for analysis
     const textWithoutMentions = text.replace(/@\w+/g, '').trim();
+
+    // Reject tweets containing URLs -- real bet requests don't include links.
+    // This prevents the bot from responding to promotional tweets, announcements,
+    // or spam that happen to tag the bot and contain question-like phrasing.
+    if (/https?:\/\/\S+/i.test(textWithoutMentions)) {
+      return false;
+    }
 
     // Minimum content length -- avoid matching short conversational mentions
     // like "@AgentBetsBot What?" or "@AgentBetsBot Is this working?"
     if (textWithoutMentions.length < 20) {
       return false;
+    }
+
+    // Check for explicit bet keywords (these are always valid regardless of length)
+    if (this.betKeywords.some(keyword => lowerText.includes(keyword))) {
+      return true;
     }
 
     // Reject common conversational phrases that aren't bet requests
@@ -108,13 +115,29 @@ class BetParser {
 
   /**
    * Check if a tweet is a bot command
+   * Commands must appear near the beginning of the text (after @mentions),
+   * not buried in the middle of a long promotional tweet.
    */
   isCommand(text) {
     const lowerText = text.toLowerCase();
-    // Check for explicit commands first
-    if (this.commandKeywords.some(keyword => lowerText.includes(keyword))) {
+    // Strip @mentions to find the actual command content
+    const textAfterMentions = lowerText.replace(/@\w+/g, '').trim();
+
+    // For unambiguous single-word commands, allow anywhere in text
+    const strictKeywords = ['balance', 'withdraw', 'royalties', 'help', 'stats'];
+    if (strictKeywords.some(keyword => textAfterMentions.startsWith(keyword))) {
       return true;
     }
+
+    // For broader keywords that appear in normal English (bet on, wager, status, update),
+    // only match if they appear in the first 60 chars after @mentions
+    // This prevents matching "Bet on our live market now" in a long promo tweet
+    const contextualKeywords = ['bet on', 'wager', 'status', 'update'];
+    const leadingText = textAfterMentions.slice(0, 60);
+    if (contextualKeywords.some(keyword => leadingText.includes(keyword))) {
+      return true;
+    }
+
     // Check for bet placement format (amount + outcome + market)
     if (this.isBetPlacement(text)) {
       return true;
@@ -177,11 +200,17 @@ class BetParser {
    */
   isBetPlacement(text) {
     const lowerText = text.toLowerCase();
-    return lowerText.includes('bet on') ||
-           lowerText.includes('wager on') ||
-           lowerText.includes('bet yes') ||
-           lowerText.includes('bet no') ||
-           /\d+\s*(usdc|sol)\s+(yes|no)\s+on/i.test(lowerText);
+    // Strip @mentions and check the leading portion of the text
+    // to avoid matching "bet on" buried in promotional/conversational text
+    const textAfterMentions = lowerText.replace(/@\w+/g, '').trim();
+    const leadingText = textAfterMentions.slice(0, 80);
+    return leadingText.startsWith('bet on') ||
+           leadingText.startsWith('wager on') ||
+           leadingText.startsWith('bet yes') ||
+           leadingText.startsWith('bet no') ||
+           /^\d+\s*(usdc|sol)\s+(yes|no)\s+on/i.test(leadingText) ||
+           /^bet\s+\d+/i.test(leadingText) ||
+           /^wager\s+\d+/i.test(leadingText);
   }
 
   /**

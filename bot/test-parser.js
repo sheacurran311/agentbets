@@ -54,6 +54,20 @@ test('Conversational phrases are NOT bet requests', () => {
   assert(!p.isBetRequest('@AgentBetsBot What do you think about the market?'), 'Opinion request should not be bet request');
 });
 
+test('Promotional tweet with URLs is NOT a bet or command', () => {
+  // Real scenario: user posts a promo tweet tagging bot with "Bet on" and URLs
+  const promoTweet = '@AgentBetsBot The /agentbets submolt on @moltbook is LIVE.\n\n' +
+    'Create markets. Place bets. Earn 0.3% creator royalties.\n\n' +
+    'Bet on our live market now:\nhttps://dial.to/?action=solana-action\n\n' +
+    'Join: https://moltbook.com/m/agentbets\nhttps://agentbets.gg';
+  assert(!p.isCommand(promoTweet), 'Promo tweet should not be a command');
+  assert(!p.isBetRequest(promoTweet), 'Promo tweet with URLs should not be a bet request');
+});
+
+test('Tweet with URL is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Check out https://agentbets.gg for predictions'), 'Tweet with URL should not be bet request');
+});
+
 test('"balance" is a command, not a bet', () => {
   assert(p.isCommand('@AgentBetsBot balance'), 'balance should be command');
   assert(!p.isBetRequest('@AgentBetsBot balance'), 'balance should not be bet request');
