@@ -60,6 +60,12 @@ const PROCESSED_TWEETS_FILE = path.join(DATA_DIR, 'processed-tweets.json');
 const PENDING_CONFIRMATIONS_FILE = path.join(DATA_DIR, 'pending-confirmations.json');
 const PROCESSED_MOLTBOOK_FILE = path.join(DATA_DIR, 'processed-moltbook.json');
 const PENDING_MOLTBOOK_CONFIRMATIONS_FILE = path.join(DATA_DIR, 'pending-moltbook-confirmations.json');
+const LAST_MENTION_ID_FILE = path.join(DATA_DIR, 'last-mention-id.json');
+
+// Track startup time for grace period (skip old mentions on restart)
+const BOT_STARTUP_TIME = new Date();
+const STARTUP_GRACE_PERIOD_MS = 5 * 60 * 1000; // 5 minutes - skip mentions older than this on first check
+let isFirstMentionCheck = true;
 
 // Pending market creation confirmations (awaiting date clarification from agents)
 // Key: tweetId (the bot's clarification reply tweet ID)
@@ -338,6 +344,49 @@ function savePendingConfirmations() {
   } catch (error) {
     console.error('[Persistence] Error saving pending confirmations to disk:', error.message);
   }
+}
+
+/**
+ * Save lastMentionId to database or disk so restarts don't re-fetch old mentions
+ */
+async function saveLastMentionId() {
+  const mentionId = twitter.lastMentionId;
+  if (!mentionId) return;
+
+  if (dbConnected) {
+    try {
+      // Use a simple key-value approach in the processed_tweets table
+      // Store with a special key prefix to distinguish from tweet IDs
+      await ProcessedTweet.add(`__last_mention_id__:${mentionId}`);
+    } catch (error) {
+      console.error('[Persistence] Error saving lastMentionId to database:', error.message);
+    }
+  }
+  // Always save to file as backup
+  try {
+    ensureDataDir();
+    fs.writeFileSync(LAST_MENTION_ID_FILE, JSON.stringify({ lastMentionId: mentionId, savedAt: new Date().toISOString() }));
+  } catch (error) {
+    console.error('[Persistence] Error saving lastMentionId to disk:', error.message);
+  }
+}
+
+/**
+ * Load lastMentionId from disk (called during startup)
+ */
+function loadLastMentionId() {
+  try {
+    if (fs.existsSync(LAST_MENTION_ID_FILE)) {
+      const data = JSON.parse(fs.readFileSync(LAST_MENTION_ID_FILE, 'utf8'));
+      if (data.lastMentionId) {
+        console.log(`[Persistence] Loaded lastMentionId: ${data.lastMentionId} (saved: ${data.savedAt || 'unknown'})`);
+        return data.lastMentionId;
+      }
+    }
+  } catch (error) {
+    console.error('[Persistence] Error loading lastMentionId from disk:', error.message);
+  }
+  return null;
 }
 
 /**
