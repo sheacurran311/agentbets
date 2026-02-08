@@ -247,9 +247,9 @@ router.post('/bet/:marketId/place', async (req, res) => {
 
     const userPubkey = new PublicKey(account);
 
-    // Determine if gasless mode is available (for choosing the payer)
+    // Determine if gasless mode is available (for choosing the fee payer)
     const gaslessAvailable = gaslessService.enabled && gaslessService.feePayerKeypair;
-    const initPayerOverride = gaslessAvailable
+    const feePayerOverride = gaslessAvailable
       ? gaslessService.feePayerKeypair.publicKey  // API pays SOL rent in gasless mode
       : userPubkey;                                // User pays SOL rent otherwise
 
@@ -258,19 +258,42 @@ router.post('/bet/:marketId/place', async (req, res) => {
     try {
       const userData = await pollFunService.getUserData(account);
       if (!userData.success) {
-        console.log(`[Actions] User ${account.slice(0, 8)}... needs Poll.fun account, including init instruction`);
-        userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
-          payerOverride: initPayerOverride
-        });
+        // Only add init instruction if account truly doesn't exist (not just an RPC error)
+        const errorLower = (userData.error || '').toLowerCase();
+        const accountNotExists = errorLower.includes('account does not exist') || 
+                                  errorLower.includes('could not find') ||
+                                  errorLower.includes('not found') ||
+                                  errorLower.includes('invalid account');
+        
+        if (accountNotExists) {
+          console.log(`[Actions] User ${account.slice(0, 8)}... needs Poll.fun account, including init instruction`);
+          userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
+            payerOverride: userPubkey,        // owner = the actual user's wallet
+            feePayerOverride: feePayerOverride // SOL payer = API wallet in gasless mode
+          });
+        } else {
+          console.log(`[Actions] User account check returned error (may exist): ${userData.error}`);
+        }
+      } else {
+        console.log(`[Actions] User ${account.slice(0, 8)}... already has Poll.fun account`);
       }
     } catch (err) {
-      console.log(`[Actions] User account check failed, including init instruction: ${err.message}`);
-      try {
-        userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
-          payerOverride: initPayerOverride
-        });
-      } catch (initErr) {
-        console.warn(`[Actions] Could not build user init instruction: ${initErr.message}`);
+      // Only include init instruction if error suggests account doesn't exist
+      const errorLower = err.message.toLowerCase();
+      if (errorLower.includes('account does not exist') || 
+          errorLower.includes('could not find') ||
+          errorLower.includes('not found')) {
+        console.log(`[Actions] User account check failed (not found), including init instruction: ${err.message}`);
+        try {
+          userInitIx = await pollFunService.sdk.instructions.initializeUserIx({
+            payerOverride: userPubkey,        // owner = the actual user's wallet
+            feePayerOverride: feePayerOverride // SOL payer = API wallet in gasless mode
+          });
+        } catch (initErr) {
+          console.warn(`[Actions] Could not build user init instruction: ${initErr.message}`);
+        }
+      } else {
+        console.log(`[Actions] User account check failed (unknown error, skipping init): ${err.message}`);
       }
     }
 
