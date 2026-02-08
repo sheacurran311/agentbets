@@ -73,6 +73,173 @@ const sanitizeCategory = (category) => {
   return 'general' // Default to general if invalid
 }
 
+/**
+ * Comprehensive bet question validation
+ * Matches AgentBetsBot's standards from bot/src/parser.js and bot/src/phishing.js
+ * Returns { valid: boolean, errors: string[], warnings: string[], suggestions: string[] }
+ */
+const validateBetQuestion = (question) => {
+  const result = {
+    valid: true,
+    errors: [],      // Blocking errors - cannot submit
+    warnings: [],    // Non-blocking warnings - can submit but should consider improving
+    suggestions: []  // Helpful suggestions for improvement
+  }
+
+  if (!question || typeof question !== 'string') {
+    return { valid: false, errors: ['Please enter a prediction question'], warnings: [], suggestions: [] }
+  }
+
+  const trimmed = question.trim()
+  const lower = trimmed.toLowerCase()
+
+  // === BLOCKING ERRORS (cannot submit) ===
+
+  // 1. Minimum length check
+  if (trimmed.length < 20) {
+    result.errors.push('Question must be at least 20 characters')
+    result.valid = false
+  }
+
+  // 2. Phishing: Block ALL URLs (mirrors bot/src/phishing.js)
+  if (/https?:\/\/\S+/i.test(trimmed)) {
+    result.errors.push('URLs are not allowed in bet questions for security')
+    result.valid = false
+  }
+  // URL-like patterns without protocol
+  if (/(?:^|\s)(?:www\.|[\w-]+\.(?:com|io|xyz|net|org|gg|app|dev|co|me|finance|exchange|claim|drop))\b/i.test(trimmed)) {
+    result.errors.push('Links and domains are not allowed in bet questions')
+    result.valid = false
+  }
+
+  // 3. Phishing: Secret key / seed phrase requests
+  const secretKeyPhrases = [
+    'private key', 'secret key', 'seed phrase', 'seed words', 'recovery phrase',
+    'recovery words', 'mnemonic', 'backup phrase', 'wallet phrase', 'passphrase',
+    'secret recovery', '12 words', '24 words', 'twelve words', 'twenty-four words',
+    'json keyfile', 'keystore file', 'solana keypair', 'phantom recovery',
+    'export private', 'share your key', 'give me your key', 'send your key',
+    'paste your key', 'enter your key', 'provide your key'
+  ]
+  for (const phrase of secretKeyPhrases) {
+    if (lower.includes(phrase)) {
+      result.errors.push('Questions cannot request private keys or seed phrases')
+      result.valid = false
+      break
+    }
+  }
+
+  // 4. Phishing: Social engineering patterns
+  const socialEngineeringPatterns = [
+    { pattern: /dm\s+me\s+(your|the|a)\s+(wallet|key|seed|phrase|secret)/i, msg: 'Questions cannot request private information via DM' },
+    { pattern: /send\s+(your|the|a)\s+(wallet|key|seed|private|secret|recovery)/i, msg: 'Questions cannot request sensitive information' },
+    { pattern: /verify\s+(your|by)\s+(sending|sharing|providing|entering)/i, msg: 'Questions cannot request verification of personal data' },
+    { pattern: /claim\s+your\s+(reward|prize|airdrop|tokens?)\s+(?:by|at|via)/i, msg: 'Questions cannot include airdrop/reward claims' },
+    { pattern: /connect\s+your\s+wallet\s+(?:at|to|via)\s+https?/i, msg: 'Questions cannot request wallet connections' },
+    { pattern: /(?:double|triple|multiply)\s+your\s+(?:sol|crypto|tokens?)/i, msg: 'Questions cannot include fund multiplication schemes' },
+    { pattern: /send\s+\d+\s*(?:sol|usdc|lamports)\s+(?:to|and)\s+(?:get|receive)/i, msg: 'Questions cannot request fund transfers' },
+  ]
+  for (const { pattern, msg } of socialEngineeringPatterns) {
+    if (pattern.test(trimmed)) {
+      result.errors.push(msg)
+      result.valid = false
+      break
+    }
+  }
+
+  // 5. Phishing: Wallet drain patterns
+  if (/(?:send|transfer|deposit)\s+(?:\d+\s*)?(?:sol|usdc|lamports|spl|tokens?)\s+(?:to|into|at)/i.test(trimmed)) {
+    result.errors.push('Questions cannot request fund transfers')
+    result.valid = false
+  }
+
+  // 6. XSS patterns (additional check beyond sanitizeInput)
+  if (/<script|<iframe|<object|<embed|<form|javascript:|data:text\/html/i.test(trimmed)) {
+    result.errors.push('Invalid characters detected in question')
+    result.valid = false
+  }
+
+  // === WARNINGS (can submit but should consider improving) ===
+
+  // 7. Not a question format
+  if (!trimmed.includes('?')) {
+    result.warnings.push('This doesn\'t appear to be a question - consider adding a "?" at the end')
+  }
+
+  // 8. Subjective / opinion-based language (mirrors bot/src/parser.js validateVerifiability)
+  const subjectivePatterns = [
+    { pattern: /\b(best|worst|greatest|most important|least important)\b/i, label: 'subjective comparison', suggestion: 'Use specific metrics instead (e.g., "highest market cap" not "best")' },
+    { pattern: /\b(should|could|might|would|may)\s+(we|they|it|he|she)\b/i, label: 'speculative language', suggestion: 'Rephrase as a factual prediction (e.g., "Will X happen?" not "Should X happen?")' },
+    { pattern: /\b(beautiful|ugly|amazing|terrible|awesome|awful|good|bad)\b/i, label: 'opinion-based adjective', suggestion: 'Use measurable criteria instead of subjective terms' },
+    { pattern: /\b(deserve|fair|unfair|right|wrong|ethical|moral)\b/i, label: 'value judgment', suggestion: 'Focus on factual, verifiable outcomes' },
+  ]
+  for (const { pattern, label, suggestion } of subjectivePatterns) {
+    if (pattern.test(trimmed)) {
+      result.warnings.push(`Contains ${label} - may be hard to verify objectively`)
+      result.suggestions.push(suggestion)
+    }
+  }
+
+  // 9. Vague / unmeasurable outcome patterns
+  const vaguePatterns = [
+    { pattern: /\b(go mainstream|take over|dominate|revolutionize|change the world)\b/i, label: 'vague outcome', suggestion: 'Add specific criteria (e.g., "reach 1M users" not "go mainstream")' },
+    { pattern: /\b(full autonomy|fully autonomous|sentient|conscious)\b/i, label: 'unmeasurable concept', suggestion: 'Use verifiable metrics instead' },
+    { pattern: /\b(succeed|fail|win)\b(?!.*\b(hackathon|contest|competition|game|match|election)\b)/i, label: 'vague success/failure', suggestion: 'Define what "success" means specifically (e.g., "reach $X valuation")' },
+  ]
+  for (const { pattern, label, suggestion } of vaguePatterns) {
+    if (pattern.test(trimmed)) {
+      result.warnings.push(`"${label}" is hard to verify - add specific criteria`)
+      result.suggestions.push(suggestion)
+    }
+  }
+
+  // 10. Token-related bets with "moon/pump/dump" but no threshold
+  const hasTokenMention = /\$[A-Z]{2,10}\b/i.test(trimmed)
+  const hasMoonPumpDump = /\b(moon|pump|dump|rug)\b/i.test(trimmed)
+  const hasThreshold = hasImplicitThreshold(trimmed)
+  
+  if (hasMoonPumpDump && !hasThreshold) {
+    result.warnings.push('"moon", "pump", "dump" need specific price/mcap targets to be verifiable')
+    if (hasTokenMention) {
+      const token = trimmed.match(/\$([A-Z]{2,10})\b/i)?.[1] || 'TOKEN'
+      result.suggestions.push(`Try: "Will $${token} hit $X mcap by [date]?" with a specific number`)
+    } else {
+      result.suggestions.push('Add a specific price or market cap target')
+    }
+  }
+
+  // 11. Token bet without any measurable target
+  if (hasTokenMention && !hasThreshold && !hasMoonPumpDump) {
+    // Check if it's asking about price/mcap/volume without a number
+    if (/\b(price|mcap|market\s*cap|volume|ath|all.?time.?high)\b/i.test(lower) && !/\d/.test(trimmed)) {
+      result.warnings.push('Token bets should include a specific number/threshold')
+      result.suggestions.push('Add a target like "$1M mcap", "$100", or "10K holders"')
+    }
+  }
+
+  return result
+}
+
+/**
+ * Check if question has an implicit numeric threshold
+ * Mirrors bot/src/parser.js hasImplicitThreshold()
+ */
+const hasImplicitThreshold = (question) => {
+  // Dollar amounts: $200, $1M, $2.5B, $100K
+  if (/\$[\d,.]+\s*[KkMmBb]?/.test(question)) return true
+  // Number + abbreviated multiplier: 10K, 2.5M, 100B
+  if (/\d+(?:\.\d+)?\s*[KkMmBb]\b/.test(question)) return true
+  // Number + spelled-out multiplier: 2.5 million, 100 thousand
+  if (/\d+(?:\.\d+)?\s*(?:thousand|million|billion|trillion|mil|mm)\b/i.test(question)) return true
+  // Comma-separated numbers: 1,000,000
+  if (/\b\d{1,3}(?:,\d{3})+\b/.test(question)) return true
+  // Comparison phrases with a number: "more than 500", "at least 10000"
+  if (/\b(?:more\s+than|at\s+least|exceed|over|above|reach|hit|pass|surpass|below|under)\s+[\d,.]+/i.test(question)) return true
+  // Percentages
+  if (/\d+(?:\.\d+)?%/.test(question)) return true
+  return false
+}
+
 // Design System - PolyClaw-Inspired Premium Dark Theme
 const COLORS = {
   // Primary brand colors (Solana)
@@ -896,6 +1063,7 @@ function App() {
   const [adminConfirming, setAdminConfirming] = useState(null) // Currently confirming market ID
   const [showDatePicker, setShowDatePicker] = useState(false) // Date picker modal visibility
   const [countdownTick, setCountdownTick] = useState(0) // Ticker for countdown updates
+  const [questionValidation, setQuestionValidation] = useState({ valid: true, errors: [], warnings: [], suggestions: [] })
 
   // Check if connected wallet is admin
   const isAdmin = publicKey?.toString() === ADMIN_WALLET
@@ -921,6 +1089,18 @@ function App() {
   const setMarketField = useCallback((field, value) => {
     dispatchMarket({ type: 'SET_FIELD', field, value })
   }, [])
+
+  // Real-time validation of bet question (debounced)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (newMarket.question) {
+        setQuestionValidation(validateBetQuestion(newMarket.question))
+      } else {
+        setQuestionValidation({ valid: true, errors: [], warnings: [], suggestions: [] })
+      }
+    }, 300) // 300ms debounce
+    return () => clearTimeout(timer)
+  }, [newMarket.question])
 
   // Memoized card hover handlers for performance
   const handleCardMouseEnter = useCallback((e) => {
@@ -1190,7 +1370,7 @@ function App() {
       // Fetch odds history for first 12 markets (visible on initial load)
       const historyPromises = marketList.slice(0, 12).map(async (market) => {
         try {
-          const histRes = await fetch(`${API_BASE}/markets/${market.id}/history?limit=10`)
+          const histRes = await fetch(`${API_BASE}/markets/${market.id}/history`)
           const histData = await histRes.json()
           return { marketId: market.id, history: histData.history || [] }
         } catch {
@@ -1214,7 +1394,7 @@ function App() {
     if (oddsHistoryCache[marketId]) return oddsHistoryCache[marketId]
     
     try {
-      const res = await fetch(`${API_BASE}/markets/${marketId}/history?limit=10`)
+      const res = await fetch(`${API_BASE}/markets/${marketId}/history`)
       const data = await res.json()
       const history = data.history || []
       setOddsHistoryCache(prev => ({ ...prev, [marketId]: history }))
@@ -1227,7 +1407,7 @@ function App() {
   // Force-refresh odds history for a market (bypasses cache, used after placing bets)
   const refreshOddsHistory = useCallback(async (marketId) => {
     try {
-      const res = await fetch(`${API_BASE}/markets/${marketId}/history?limit=10`)
+      const res = await fetch(`${API_BASE}/markets/${marketId}/history`)
       const data = await res.json()
       const history = data.history || []
       setOddsHistoryCache(prev => ({ ...prev, [marketId]: history }))
@@ -1651,6 +1831,13 @@ function App() {
 
     if (!newMarket.question || !newMarket.endDate) {
       alert('Please fill in question and end date')
+      return
+    }
+
+    // Check validation - block if there are errors
+    const validation = validateBetQuestion(newMarket.question)
+    if (validation.errors.length > 0) {
+      alert('Please fix the errors in your question:\n\n' + validation.errors.join('\n'))
       return
     }
 
@@ -2242,13 +2429,111 @@ function App() {
                   
                   <label style={styles.label}>What are you predicting? *</label>
                   <textarea
-                    style={{...styles.input, minHeight: '100px', resize: 'vertical', fontSize: '18px', fontWeight: '500', lineHeight: '1.5'}}
+                    style={{
+                      ...styles.input, 
+                      minHeight: '100px', 
+                      resize: 'vertical', 
+                      fontSize: '18px', 
+                      fontWeight: '500', 
+                      lineHeight: '1.5',
+                      borderColor: newMarket.question.length > 0 
+                        ? (questionValidation.errors.length > 0 ? COLORS.error 
+                          : questionValidation.warnings.length > 0 ? COLORS.warning 
+                          : questionValidation.valid && newMarket.question.length >= 20 ? COLORS.success 
+                          : COLORS.border)
+                        : COLORS.border
+                    }}
                     placeholder="Will $BUTTERS hit $1M mcap by Feb 28?"
                     value={newMarket.question}
                     onChange={(e) => setMarketField('question', e.target.value)}
                     maxLength={256}
                   />
-                  <span style={{fontSize: '11px', color: COLORS.textMuted, marginTop: '4px', display: 'block'}}>
+                  
+                  {/* Validation Feedback */}
+                  {newMarket.question.length > 0 && (questionValidation.errors.length > 0 || questionValidation.warnings.length > 0) && (
+                    <div style={{
+                      marginTop: '8px',
+                      padding: '12px',
+                      borderRadius: '8px',
+                      background: questionValidation.errors.length > 0 ? `${COLORS.error}10` : `${COLORS.warning}10`,
+                      border: `1px solid ${questionValidation.errors.length > 0 ? COLORS.error : COLORS.warning}30`
+                    }}>
+                      {/* Errors (blocking) */}
+                      {questionValidation.errors.map((error, i) => (
+                        <div key={`err-${i}`} style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: '8px',
+                          color: COLORS.error,
+                          fontSize: '13px',
+                          marginBottom: i < questionValidation.errors.length - 1 ? '6px' : 0
+                        }}>
+                          <span style={{flexShrink: 0}}>&#10060;</span>
+                          <span>{error}</span>
+                        </div>
+                      ))}
+                      
+                      {/* Warnings (non-blocking) */}
+                      {questionValidation.warnings.map((warning, i) => (
+                        <div key={`warn-${i}`} style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: '8px',
+                          color: COLORS.warning,
+                          fontSize: '13px',
+                          marginTop: questionValidation.errors.length > 0 && i === 0 ? '8px' : 0,
+                          marginBottom: i < questionValidation.warnings.length - 1 ? '6px' : 0
+                        }}>
+                          <span style={{flexShrink: 0}}>&#9888;</span>
+                          <span>{warning}</span>
+                        </div>
+                      ))}
+                      
+                      {/* Suggestions */}
+                      {questionValidation.suggestions.length > 0 && (
+                        <div style={{
+                          marginTop: '10px',
+                          paddingTop: '10px',
+                          borderTop: `1px solid ${questionValidation.errors.length > 0 ? COLORS.error : COLORS.warning}20`
+                        }}>
+                          {questionValidation.suggestions.slice(0, 2).map((suggestion, i) => (
+                            <div key={`sug-${i}`} style={{
+                              display: 'flex',
+                              alignItems: 'flex-start',
+                              gap: '8px',
+                              color: COLORS.textSecondary,
+                              fontSize: '12px',
+                              marginBottom: i < Math.min(questionValidation.suggestions.length, 2) - 1 ? '4px' : 0
+                            }}>
+                              <span style={{color: COLORS.primary, flexShrink: 0}}>&#128161;</span>
+                              <span>{suggestion}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {/* Valid indicator */}
+                  {newMarket.question.length >= 20 && questionValidation.valid && questionValidation.errors.length === 0 && questionValidation.warnings.length === 0 && (
+                    <div style={{
+                      marginTop: '8px',
+                      padding: '8px 12px',
+                      borderRadius: '8px',
+                      background: `${COLORS.success}10`,
+                      border: `1px solid ${COLORS.success}30`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      color: COLORS.success,
+                      fontSize: '13px'
+                    }}>
+                      <span>&#9989;</span>
+                      <span>Looks good! This prediction has clear, verifiable criteria.</span>
+                    </div>
+                  )}
+                  
+                  <span style={{fontSize: '11px', color: COLORS.textMuted, marginTop: '8px', display: 'block'}}>
                     {newMarket.question.length}/256 characters - Be specific with measurable outcomes
                   </span>
 
@@ -2322,14 +2607,46 @@ function App() {
                   </div>
                 )}
 
+                {/* Validation blocker message */}
+                {questionValidation.errors.length > 0 && newMarket.question.length > 0 && (
+                  <div style={{
+                    padding: '12px 16px',
+                    borderRadius: '8px',
+                    background: `${COLORS.error}10`,
+                    border: `1px solid ${COLORS.error}30`,
+                    marginBottom: '12px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px'
+                  }}>
+                    <span style={{color: COLORS.error, fontSize: '18px'}}>&#128683;</span>
+                    <span style={{color: COLORS.error, fontSize: '13px'}}>
+                      Please fix the errors above before creating the market
+                    </span>
+                  </div>
+                )}
+
                 <button
-                  style={styles.createSubmitBtn}
-                  onClick={createMarket}
-                  onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+                  style={{
+                    ...styles.createSubmitBtn,
+                    opacity: questionValidation.errors.length > 0 ? 0.5 : 1,
+                    cursor: questionValidation.errors.length > 0 ? 'not-allowed' : 'pointer'
+                  }}
+                  onClick={questionValidation.errors.length > 0 ? undefined : createMarket}
+                  disabled={questionValidation.errors.length > 0}
+                  onMouseEnter={(e) => {
+                    if (questionValidation.errors.length === 0) {
+                      e.currentTarget.style.transform = 'translateY(-2px)'
+                    }
+                  }}
                   onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
                 >
                   <span style={{fontSize: '20px'}}>&#9889;</span>
-                  {connected ? 'Launch Market' : 'Connect Wallet to Launch'}
+                  {!connected 
+                    ? 'Connect Wallet to Launch' 
+                    : questionValidation.errors.length > 0 
+                      ? 'Fix Errors to Launch' 
+                      : 'Launch Market'}
                 </button>
               </div>
             </div>
