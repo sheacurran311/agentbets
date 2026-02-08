@@ -11,6 +11,12 @@ let pool = null;
  * Initialize database connection
  */
 async function initDatabase() {
+  // Prevent double initialization
+  if (pool) {
+    console.log('[DB] Already connected, reusing existing pool');
+    return true;
+  }
+  
   if (!process.env.DATABASE_URL) {
     console.log('[DB] No DATABASE_URL set, skipping database initialization');
     return false;

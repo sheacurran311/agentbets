@@ -17,6 +17,9 @@ const { execSync, exec } = require('child_process');
 
 class TwitterService {
   constructor() {
+    // Track tweets we've replied to in this session (prevents duplicates)
+    this._repliedToTweets = new Set();
+    
     // Initialize OAuth 1.0a client (user context - supports BOTH reads and writes)
     // Under X's new pay-per-use model, user context auth is the primary auth method
     // that's tied to billing. Bearer token (app-only) may not be authorized for all endpoints.
@@ -249,16 +252,32 @@ class TwitterService {
       return { success: false, reason: 'Write client not configured' };
     }
 
+    // Prevent duplicate replies to the same tweet in this session
+    if (this._repliedToTweets.has(tweetId)) {
+      console.log(`[Twitter] Already replied to ${tweetId} in this session, skipping duplicate`);
+      return { success: false, reason: 'Already replied to this tweet', duplicate: true };
+    }
+
     try {
       // Truncate if too long
       const truncated = text.length > 280 ? text.slice(0, 277) + '...' : text;
 
       const result = await this.writeClient.v2.reply(truncated, tweetId);
       console.log('[Twitter] Posted reply:', result.data.id);
+      
+      // Mark as replied to prevent duplicates
+      this._repliedToTweets.add(tweetId);
+      
       return { success: true, id: result.data.id };
 
     } catch (error) {
       console.error('[Twitter] Error posting reply:', error.message);
+      
+      // If Twitter says we already replied (duplicate), mark it and don't retry
+      if (error.message.includes('duplicate') || error.code === 403) {
+        this._repliedToTweets.add(tweetId);
+      }
+      
       return { success: false, error: error.message };
     }
   }

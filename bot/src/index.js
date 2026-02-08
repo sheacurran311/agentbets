@@ -1001,8 +1001,11 @@ async function processMention(tweet) {
 
   // Skip if already processed
   if (await isTweetProcessed(tweetId)) {
+    console.log(`[Bot] Skipping tweet ${tweetId} (already processed)`);
     return;
   }
+  
+  // Mark as processed IMMEDIATELY before any processing to prevent duplicates
   await markTweetProcessed(tweetId);
   saveProcessedTweets(); // Persist immediately so restarts don't re-process
 
