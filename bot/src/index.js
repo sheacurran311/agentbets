@@ -155,6 +155,24 @@ function validateEnvironment() {
     console.error('[Config] For local dev: Copy .env.example to .env and fill in values\n');
   }
 
+  // #region agent log
+  // CRITICAL: Check if AGENTBETS_URL or AGENTBETS_API_URL contains dev/replit URLs
+  const urlToCheck = process.env.AGENTBETS_URL || '';
+  const apiUrlToCheck = process.env.AGENTBETS_API_URL || '';
+  if (urlToCheck.includes('replit') || urlToCheck.includes('localhost') || urlToCheck.includes('127.0.0.1')) {
+    console.error(`[Config] CRITICAL WARNING: AGENTBETS_URL contains a dev URL: ${urlToCheck}`);
+    console.error(`[Config] This will cause dev URLs to appear in tweets! Fix AGENTBETS_URL in env vars.`);
+    if (process.env.NODE_ENV === 'production') {
+      console.error(`[Config] OVERRIDING AGENTBETS_URL to https://agentbets.gg for safety`);
+      process.env.AGENTBETS_URL = 'https://agentbets.gg';
+    }
+  }
+  if (apiUrlToCheck.includes('replit.dev') || apiUrlToCheck.includes('kirk.replit')) {
+    console.error(`[Config] CRITICAL WARNING: AGENTBETS_API_URL contains a Replit dev URL: ${apiUrlToCheck}`);
+    console.error(`[Config] This may leak dev URLs into tweets if any code derives URLs from AGENTBETS_API_URL`);
+  }
+  // #endregion
+
   return !hasErrors;
 }
 
@@ -1405,6 +1423,9 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
     // Reply with success - include Blink URL for direct betting
     // IMPORTANT: Use AGENTBETS_URL (public frontend URL), NOT AGENTBETS_API_URL
     const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+    // #region agent log
+    console.log(`[DEBUG-URL] createMarketFromParams baseUrl="${baseUrl}" | AGENTBETS_URL="${process.env.AGENTBETS_URL}" | AGENTBETS_API_URL="${process.env.AGENTBETS_API_URL}" | Contains replit: ${baseUrl.includes('replit')}`);
+    // #endregion
     const marketUrl = `${baseUrl}/markets/${market.market.id}`;
     const actionUrl = `${baseUrl}/api/actions/bet/${market.market.id}`;
     const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
@@ -2453,6 +2474,18 @@ app.post('/webhook/bet-placed', async (req, res) => {
 // Start server with async initialization
 async function startBot() {
   try {
+    // #region agent log
+    console.log(`[DEBUG-STARTUP] ===== BOT ENVIRONMENT AUDIT =====`);
+    console.log(`[DEBUG-STARTUP] AGENTBETS_URL="${process.env.AGENTBETS_URL || 'NOT SET'}"`);
+    console.log(`[DEBUG-STARTUP] AGENTBETS_API_URL="${process.env.AGENTBETS_API_URL || 'NOT SET'}"`);
+    console.log(`[DEBUG-STARTUP] AGENTBETS_URL contains replit: ${(process.env.AGENTBETS_URL || '').includes('replit')}`);
+    console.log(`[DEBUG-STARTUP] AGENTBETS_API_URL contains replit: ${(process.env.AGENTBETS_API_URL || '').includes('replit')}`);
+    console.log(`[DEBUG-STARTUP] NODE_ENV="${process.env.NODE_ENV || 'NOT SET'}"`);
+    console.log(`[DEBUG-STARTUP] BOT_PORT="${process.env.BOT_PORT || 'NOT SET'}"`);
+    console.log(`[DEBUG-STARTUP] PID=${process.pid} | Platform=${process.platform} | CWD=${process.cwd()}`);
+    console.log(`[DEBUG-STARTUP] ================================`);
+    // #endregion
+
     // Initialize storage (database or file-based)
     await initializeStorage();
     
