@@ -7,8 +7,16 @@
 
 class BetParser {
   constructor() {
-    // Keywords that indicate a bet request
-    this.betKeywords = ['bet:', 'create bet', 'new bet', 'prediction:', 'market:', 'create market', 'new market'];
+    // Keywords that indicate a market creation request
+    // "bet" and "market" are interchangeable from the user's perspective (both mean create a market)
+    // Note: "bet on" is a command (placing a wager), NOT a creation keyword — handled in commandKeywords
+    this.betKeywords = [
+      'bet:', 'create bet', 'new bet', 'make a bet', 'make bet', 'start a bet', 'start bet',
+      'prediction:', 'market:', 'create market', 'new market', 'make a market', 'make market',
+      'start a market', 'start market', 'open a market', 'open market', 'set up a bet',
+      'set up a market', 'setup a bet', 'setup a market', 'create a bet', 'create a market',
+      'create a new bet', 'create a new market', 'make a new bet', 'make a new market'
+    ];
 
     // Bot command keywords - now includes 'bet on' for placing bets and 'status' for market updates
     this.commandKeywords = ['balance', 'withdraw', 'royalties', 'help', 'stats', 'status', 'update', 'bet on', 'wager'];
@@ -54,9 +62,18 @@ class BetParser {
     // Strip @mentions to get the actual content for analysis
     const textWithoutMentions = text.replace(/@\w+/g, '').trim();
 
+    // Check for explicit bet keywords FIRST -- these are high-signal, unambiguous phrases
+    // like "create market", "new market", "create bet", etc. They should always be recognized
+    // even when the tweet contains URLs (Twitter auto-converts domains like agentbets.gg
+    // into https://t.co/... links, which would otherwise trigger the URL rejection below).
+    if (this.betKeywords.some(keyword => lowerText.includes(keyword))) {
+      return true;
+    }
+
     // Reject tweets containing URLs -- real bet requests don't include links.
     // This prevents the bot from responding to promotional tweets, announcements,
     // or spam that happen to tag the bot and contain question-like phrasing.
+    // (Explicit bet keywords above bypass this check intentionally.)
     if (/https?:\/\/\S+/i.test(textWithoutMentions)) {
       return false;
     }
@@ -65,11 +82,6 @@ class BetParser {
     // like "@AgentBetsBot What?" or "@AgentBetsBot Is this working?"
     if (textWithoutMentions.length < 20) {
       return false;
-    }
-
-    // Check for explicit bet keywords (these are always valid regardless of length)
-    if (this.betKeywords.some(keyword => lowerText.includes(keyword))) {
-      return true;
     }
 
     // Reject common conversational phrases that aren't bet requests
@@ -92,7 +104,7 @@ class BetParser {
       return false;
     }
 
-    // Check for natural language question patterns
+    // Check for natural language question patterns (with question mark)
     // These match with or without @handle prefix (supports both Twitter and Moltbook)
     const naturalQuestionPatterns = [
       /(?:@\w+\s+)?Will\s+.+\?/i,
@@ -107,6 +119,21 @@ class BetParser {
     ];
 
     if (naturalQuestionPatterns.some(pattern => pattern.test(text))) {
+      return true;
+    }
+
+    // Fallback: Statement-form bet requests WITHOUT a question mark
+    // Many Twitter users omit the "?" -- recognize prediction-like statements
+    // with sufficient content (20+ chars after the keyword) and a date/time reference
+    const statementPatterns = [
+      /(?:@\w+\s+)?Will\s+.{20,}/i,           // "Will $SOL hit $200 by March"
+      /(?:@\w+\s+)?Who\s+will\s+.{15,}/i,     // "Who will win the hackathon"
+      /(?:@\w+\s+)?How\s+many\s+.{15,}/i,     // "How many followers will X get"
+    ];
+    // Only match statement-form if there's a date-like reference (to avoid matching casual chat)
+    const hasDateReference = /\b(by|before|until|ends?|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4}[-/]\d{2}|\d{1,2}\/\d{1,2}\/\d{2,4}|next\s+(?:week|month)|end\s+of|tomorrow|tonight)\b/i.test(text);
+
+    if (hasDateReference && statementPatterns.some(pattern => pattern.test(text))) {
       return true;
     }
 
@@ -309,6 +336,7 @@ class BetParser {
       const questionMatch = text.match(/["\u201C\u201D]([^"\u201C\u201D]+)["\u201C\u201D]/) ||
                            text.match(/bet:\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
                            text.match(/prediction:\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
+                           // Natural language with question mark
                            text.match(/(?:@\w+\s+)?(Will\s+.+\?)/i) ||
                            text.match(/(?:@\w+\s+)?(Who\s+.+\?)/i) ||
                            text.match(/(?:@\w+\s+)?(What\s+.+\?)/i) ||
@@ -317,11 +345,28 @@ class BetParser {
                            text.match(/(?:@\w+\s+)?(Is\s+.+\?)/i) ||
                            text.match(/(?:@\w+\s+)?(Are\s+.+\?)/i) ||
                            text.match(/(?:@\w+\s+)?(How\s+many\s+.+\?)/i) ||
-                           text.match(/(?:create|new)\s+(?:bet|market)\s*:?\s*(.+?)(?:\n|ends:|resolution:|$)/i);
+                           // Keyword-based creation (create/new/make/start/open + bet/market)
+                           text.match(/(?:create|new|make|start|open|set\s*up)\s+(?:a\s+)?(?:new\s+)?(?:bet|market)\s*:?\s*,?\s*(.+?)(?:\n|ends:|resolution:|$)/i) ||
+                           // Statement-form fallback (no question mark) -- only if substantial content
+                           text.match(/(?:@\w+\s+)?(Will\s+.{20,})/i) ||
+                           text.match(/(?:@\w+\s+)?(Who\s+will\s+.{15,})/i) ||
+                           text.match(/(?:@\w+\s+)?(How\s+many\s+.{15,})/i);
 
       if (questionMatch) {
         // Normalize whitespace: Twitter wraps long tweets with newlines
-        result.question = questionMatch[1].replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+        let question = questionMatch[1].replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+
+        // Strip Twitter t.co URLs from the question text
+        // Twitter auto-converts domains (e.g. agentbets.gg → https://t.co/XXXX)
+        // which creates ugly market titles. Remove them for cleaner questions.
+        question = question.replace(/https?:\/\/t\.co\/\S+/gi, '').replace(/\s{2,}/g, ' ').trim();
+
+        // If the question doesn't end with "?" add one for cleaner market titles
+        if (!question.endsWith('?')) {
+          question = question + '?';
+        }
+
+        result.question = question;
       } else {
         return { valid: false, error: 'Could not find question. Use quotes or "bet: your question" or ask a question ending in ?' };
       }

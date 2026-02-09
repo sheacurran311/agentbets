@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS pending_resolutions (
 -- Tweet deduplication for bot
 -- ============================================
 CREATE TABLE IF NOT EXISTS processed_tweets (
-  tweet_id VARCHAR(30) PRIMARY KEY,
+  tweet_id VARCHAR(64) PRIMARY KEY,
   processed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
