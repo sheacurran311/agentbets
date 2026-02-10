@@ -504,8 +504,7 @@ class MoltbookService {
   async announceMarket(market) {
     const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
     const marketUrl = `${baseUrl}/markets/${market.id}`;
-    const actionUrl = `solana-action:${baseUrl}/api/actions/bet/${market.id}`;
-    const blinkUrl = `https://dial.to/?action=${encodeURIComponent(actionUrl)}`;
+    const blinkUrl = marketUrl; // Own domain URL - actions.json maps /markets/* to Blink actions
 
     const title = `New Market: ${market.question}`;
 

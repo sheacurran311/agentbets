@@ -39,6 +39,8 @@ const agentVerification = require('./agentVerification');
 const x402 = require('./x402-payments');
 // Gasless relay for USDC-only transactions (no SOL needed)
 const { gaslessService } = require('./gasless');
+// Dynamic OG image generation for social previews
+const { router: ogRouter } = require('./og');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -3472,8 +3474,7 @@ app.get('/api/blink/:marketId', async (req, res) => {
     question: market.question,
     blinkUrl,
     actionUrl,
-    dialToUrl: `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`,
-    instructions: 'Share the blinkUrl on X/Twitter. Users with Blink-compatible wallets can bet directly!'
+    instructions: 'Share the blinkUrl on X/Twitter. Users with Blink-compatible wallets can bet directly, and social crawlers see rich OG previews!'
   });
 });
 
@@ -3489,7 +3490,6 @@ app.get('/api/blink', (req, res) => {
   res.json({
     blinkUrl,
     actionUrl,
-    dialToUrl: `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`,
     instructions: 'Share this Blink URL on X/Twitter to let users browse all active markets!'
   });
 });
@@ -4410,8 +4410,7 @@ app.post('/api/agent/create-and-bet', agentLimiter, requireApiKey, async (req, r
 
     // Generate Blink URL for others to bet
     const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-    const actionUrl = `${baseUrl}/api/actions/bet/${marketId}`;
-    const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
+    const blinkUrl = `${baseUrl}/markets/${marketId}`;
 
     console.log(`[x402] Market created: ${marketId} by ${agentHandle}`);
 
@@ -4595,10 +4594,121 @@ app.get('/api/agent/:handle/bets', async (req, res) => {
   });
 });
 
+// Mount OG image generation endpoint
+app.use('/api/og', ogRouter);
+
 // Serve frontend in production mode
 // This serves the built React app from frontend/dist
 const frontendPath = path.join(__dirname, '../../frontend/dist');
 app.use(express.static(frontendPath));
+
+// Bot/crawler User-Agent patterns for social media preview cards
+const BOT_USER_AGENTS = /Twitterbot|facebookexternalhit|Facebot|Slackbot|Discordbot|LinkedInBot|WhatsApp|TelegramBot|Applebot|Googlebot|bingbot|Pinterestbot|redditbot/i;
+
+/**
+ * Crawler-detection middleware for /markets/:id
+ * Serves dynamic HTML with OG meta tags to social media bots,
+ * while regular users fall through to the SPA catch-all.
+ */
+app.get('/markets/:marketId', async (req, res, next) => {
+  const userAgent = req.get('User-Agent') || '';
+  
+  // Only intercept for known bots/crawlers
+  if (!BOT_USER_AGENTS.test(userAgent)) {
+    return next(); // Regular users get the SPA
+  }
+
+  try {
+    const { marketId } = req.params;
+    const market = await markets.get(marketId);
+    const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+
+    if (!market) {
+      // Market not found - serve generic OG tags
+      return res.send(buildOgHtml({
+        title: 'AgentBets - Prediction Markets for AI Agents',
+        description: 'Bet on AI agent outcomes with USDC on Solana. On-chain prediction markets powered by Poll.fun.',
+        image: `${baseUrl}/agentbets-logo-full.png`,
+        url: `${baseUrl}/markets`,
+      }));
+    }
+
+    // Calculate odds for description
+    const yesPool = (market.yesPool || 0) / 1e6;
+    const noPool = (market.noPool || 0) / 1e6;
+    const totalPool = yesPool + noPool;
+    const yesPercent = totalPool > 0 ? Math.round((yesPool / totalPool) * 100) : 50;
+    const noPercent = totalPool > 0 ? Math.round((noPool / totalPool) * 100) : 50;
+    const totalBets = market.totalBets || 0;
+
+    const question = market.question.length > 100
+      ? market.question.substring(0, 97) + '...'
+      : market.question;
+
+    let description = `YES ${yesPercent}% | NO ${noPercent}%`;
+    if (totalPool > 0) description += ` | Pool: ${totalPool.toFixed(2)} USDC`;
+    if (totalBets > 0) description += ` | ${totalBets} bet${totalBets !== 1 ? 's' : ''}`;
+    description += ' — Bet now on AgentBets';
+
+    res.send(buildOgHtml({
+      title: question,
+      description,
+      image: `${baseUrl}/api/og/${marketId}`,
+      url: `${baseUrl}/markets/${marketId}`,
+    }));
+
+  } catch (error) {
+    console.error('[Crawler] Error serving OG tags:', error);
+    next(); // Fall through to SPA on error
+  }
+});
+
+/**
+ * Crawler-detection for /markets (browse all)
+ */
+app.get('/markets', (req, res, next) => {
+  const userAgent = req.get('User-Agent') || '';
+  if (!BOT_USER_AGENTS.test(userAgent)) {
+    return next();
+  }
+
+  const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+  res.send(buildOgHtml({
+    title: 'AgentBets - Browse Prediction Markets',
+    description: 'Bet on AI agent outcomes with USDC on Solana. On-chain prediction markets powered by Poll.fun.',
+    image: `${baseUrl}/agentbets-logo-full.png`,
+    url: `${baseUrl}/markets`,
+  }));
+});
+
+/**
+ * Build minimal HTML with OG meta tags for social crawlers
+ */
+function buildOgHtml({ title, description, image, url }) {
+  const escHtml = (str) => str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta property="og:title" content="${escHtml(title)}" />
+  <meta property="og:description" content="${escHtml(description)}" />
+  <meta property="og:image" content="${escHtml(image)}" />
+  <meta property="og:url" content="${escHtml(url)}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="AgentBets" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:site" content="@AgentBetsBot" />
+  <meta name="twitter:title" content="${escHtml(title)}" />
+  <meta name="twitter:description" content="${escHtml(description)}" />
+  <meta name="twitter:image" content="${escHtml(image)}" />
+  <title>${escHtml(title)}</title>
+</head>
+<body>
+  <p>${escHtml(title)}</p>
+  <p>${escHtml(description)}</p>
+</body>
+</html>`;
+}
 
 // Handle SPA routing - serve index.html for all non-API routes
 app.get('*', (req, res, next) => {

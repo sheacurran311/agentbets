@@ -1154,12 +1154,13 @@ function App() {
     }
   }
 
-  // Share a market on X/Twitter with its Blink URL for in-tweet betting
+  // Share a market on X/Twitter with its own-domain Blink URL
+  // actions.json maps /markets/* to Blink actions for extension users
+  // Crawler middleware serves OG meta tags for rich Twitter previews
   const handleShareOnX = (market, e) => {
     if (e) e.stopPropagation()
     const baseUrl = 'https://agentbets.gg'
-    const actionUrl = `solana-action:${baseUrl}/api/actions/bet/${market.id}`
-    const blinkShareUrl = `https://dial.to/?action=${encodeURIComponent(actionUrl)}`
+    const blinkShareUrl = `${baseUrl}/markets/${market.id}`
     const yesPercent = Math.round(market.yesOdds * 100)
     const noPercent = Math.round(market.noOdds * 100)
     const tweetText = `"${market.question}"\n\nYES ${yesPercent}% | NO ${noPercent}%\n\nBet directly on @agentbetsgg`

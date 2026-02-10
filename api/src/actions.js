@@ -852,12 +852,15 @@ router.post('/create/submit', async (req, res) => {
 
 /**
  * Helper: Generate Blink URL for a market
+ * 
+ * Uses own domain instead of dial.to interstitial.
+ * actions.json maps /markets/* -> /api/actions/bet/* so Blink-aware
+ * clients (Chrome extension, wallets) resolve the action automatically.
+ * Social crawlers get custom OG meta tags via the crawler middleware.
  */
 function generateBlinkUrl(marketId, baseUrl = null) {
   const base = baseUrl || process.env.AGENTBETS_URL || 'https://agentbets.gg';
-  const actionUrl = `solana-action:${base}/api/actions/bet/${marketId}`;
-  const encodedAction = encodeURIComponent(actionUrl);
-  return `https://dial.to/?action=${encodedAction}`;
+  return `${base}/markets/${marketId}`;
 }
 
 /**
@@ -865,9 +868,7 @@ function generateBlinkUrl(marketId, baseUrl = null) {
  */
 function generateMarketsBlinkUrl(baseUrl = null) {
   const base = baseUrl || process.env.AGENTBETS_URL || 'https://agentbets.gg';
-  const actionUrl = `solana-action:${base}/api/actions/markets`;
-  const encodedAction = encodeURIComponent(actionUrl);
-  return `https://dial.to/?action=${encodedAction}`;
+  return `${base}/markets`;
 }
 
 /**
@@ -875,9 +876,7 @@ function generateMarketsBlinkUrl(baseUrl = null) {
  */
 function generateCreateBlinkUrl(baseUrl = null) {
   const base = baseUrl || process.env.AGENTBETS_URL || 'https://agentbets.gg';
-  const actionUrl = `solana-action:${base}/api/actions/create`;
-  const encodedAction = encodeURIComponent(actionUrl);
-  return `https://dial.to/?action=${encodedAction}`;
+  return `${base}/create`;
 }
 
 // Export router and helpers

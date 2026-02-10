@@ -1433,8 +1433,7 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
       console.error(`[Bot] CRITICAL: baseUrl for market links is a dev URL: ${baseUrl}`);
     }
     const marketUrl = `${baseUrl}/markets/${market.market.id}`;
-    const actionUrl = `${baseUrl}/api/actions/bet/${market.market.id}`;
-    const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
+    const blinkUrl = marketUrl; // Own domain URL - actions.json maps /markets/* to Blink actions
 
     const endDateFormatted = new Date(betParams.endDate).toLocaleDateString('en-US', {
       timeZone: 'UTC',
@@ -1452,16 +1451,18 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
       `Ends: ${endDateFormatted}\n` +
       `Resolution: ${betParams.resolution}\n\n`;
 
-    // Always include Blink betting instructions so agents can place wagers
+    // Always include both Blink URLs so agents AND humans can place wagers
     if (hasInitialBet) {
-      replyMessage += `Place your ${betParams.initialBet} ${betParams.initialCurrency} ${betParams.initialOutcome} wager:\n`;
+      replyMessage += `Place your ${betParams.initialBet} ${betParams.initialCurrency} ${betParams.initialOutcome} wager:\n\n`;
     } else {
-      replyMessage += `Place a wager:\n`;
+      replyMessage += `Place a wager:\n\n`;
     }
-    replyMessage += `POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
+    // Blinks API endpoint (for agents - programmatic)
+    replyMessage += `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
       `Body: { "account": "YOUR_SOLANA_PUBKEY" }\n\n`;
 
-    replyMessage += `Bet via Blink: ${blinkUrl}`;
+    // Blink URL (for humans - clickable in-feed, unfurls with OG preview)
+    replyMessage += `Humans: ${blinkUrl}`;
 
     // Post reply with Blink URL for in-feed betting
     await twitter.reply(tweetId, replyMessage);
@@ -1729,14 +1730,13 @@ async function processCommand(tweetId, authorHandle, text, tweet = null) {
         // IMPORTANT: Use AGENTBETS_URL (public frontend URL), NOT AGENTBETS_API_URL
         const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
         const shortMarketId = marketId.split('-')[0];
-        const blinkActionUrl = `${baseUrl}/api/actions/bet/${marketId}`;
-        const blinkDialUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${blinkActionUrl}`)}`;
+        const blinkUrl = `${baseUrl}/markets/${marketId}`;
 
         await twitter.reply(tweetId,
           `@${authorHandle} To bet ${betParams.amount} USDC ${betParams.outcome} on market ${shortMarketId}:\n\n` +
-          `POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=${betParams.outcome}&amount=${betParams.amount}\n` +
+          `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=${betParams.outcome}&amount=${betParams.amount}\n` +
           `Body: { "account": "YOUR_SOLANA_PUBKEY" }\n\n` +
-          `Bet via Blink: ${blinkDialUrl}`
+          `Humans: ${blinkUrl}`
         );
         break;
       }
@@ -2236,8 +2236,7 @@ async function createMarketFromMoltbook(request, betParams) {
       // Cross-post to Twitter if available
       if (twitter.writeClient || twitter.infshAvailable) {
         const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-        const actionUrl = `${baseUrl}/api/actions/bet/${market.market.id}`;
-        const blinkUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${actionUrl}`)}`;
+        const blinkUrl = `${baseUrl}/markets/${market.market.id}`;
         await twitter.tweet(
           `New bet from Moltbook agent ${request.author}!\n\n` +
           `"${betParams.question.slice(0, 80)}"\n\n` +
