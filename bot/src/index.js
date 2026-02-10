@@ -1444,20 +1444,24 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
     });
 
     // Build reply message - include short market ID for easy reference
+    // The reply() method will auto-thread if this exceeds 280 chars
     const shortId = market.market.id.split('-')[0]; // First segment of UUID (8 chars)
-    let replyMessage = `New bet created by @${authorHandle}!\n\n` +
+    let replyMessage = `New market by @${authorHandle}!\n\n` +
       `"${betParams.question}"\n\n` +
       `ID: ${shortId}\n` +
       `Ends: ${endDateFormatted}\n` +
       `Resolution: ${betParams.resolution}\n\n`;
 
-    // If agent requested initial bet, include x402 payment instructions
+    // Always include Blink betting instructions so agents can place wagers
     if (hasInitialBet) {
-      replyMessage += `To place your ${betParams.initialBet} ${betParams.initialCurrency} ${betParams.initialOutcome} bet:\n` +
-        `POST ${baseUrl}/api/agent/bet/${market.market.id}\n\n`;
+      replyMessage += `Place your ${betParams.initialBet} ${betParams.initialCurrency} ${betParams.initialOutcome} wager:\n`;
+    } else {
+      replyMessage += `Place a wager:\n`;
     }
+    replyMessage += `POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
+      `Body: { "account": "YOUR_SOLANA_PUBKEY" }\n\n`;
 
-    replyMessage += `Bet now: ${blinkUrl}`;
+    replyMessage += `Bet via Blink: ${blinkUrl}`;
 
     // Post reply with Blink URL for in-feed betting
     await twitter.reply(tweetId, replyMessage);
@@ -1721,16 +1725,18 @@ async function processCommand(tweetId, authorHandle, text, tweet = null) {
 
         console.log(`[Bot] Bet command: ${betParams.amount} USDC ${betParams.outcome} on ${marketId} (found via ${foundVia})`);
 
-        // Reply with x402 payment instructions
+        // Reply with Blink betting instructions
         // IMPORTANT: Use AGENTBETS_URL (public frontend URL), NOT AGENTBETS_API_URL
         const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
         const shortMarketId = marketId.split('-')[0];
+        const blinkActionUrl = `${baseUrl}/api/actions/bet/${marketId}`;
+        const blinkDialUrl = `https://dial.to/?action=${encodeURIComponent(`solana-action:${blinkActionUrl}`)}`;
 
         await twitter.reply(tweetId,
           `@${authorHandle} To bet ${betParams.amount} USDC ${betParams.outcome} on market ${shortMarketId}:\n\n` +
-          `POST ${baseUrl}/api/agent/bet/${marketId}\n` +
-          `Body: { outcome: "${betParams.outcome}", amount: ${betParams.amount} }\n\n` +
-          `Or use Blink: ${baseUrl}/api/actions/bet/${marketId}`
+          `POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=${betParams.outcome}&amount=${betParams.amount}\n` +
+          `Body: { "account": "YOUR_SOLANA_PUBKEY" }\n\n` +
+          `Bet via Blink: ${blinkDialUrl}`
         );
         break;
       }

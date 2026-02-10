@@ -15,6 +15,10 @@
 const { TwitterApi } = require('twitter-api-v2');
 const { execSync, exec } = require('child_process');
 
+// Tweet character limit -- AgentBetsBot is a Premium account (4,000 char limit)
+// Standard accounts are 280, Premium is 4,000, Premium+ is 10,000
+const TWEET_CHAR_LIMIT = 4000;
+
 class TwitterService {
   constructor() {
     // Track tweets we've replied to in this session (prevents duplicates)
@@ -227,8 +231,8 @@ class TwitterService {
     }
 
     try {
-      // Truncate if too long (280 chars max)
-      const truncated = text.length > 280 ? text.slice(0, 277) + '...' : text;
+      // Truncate if too long (Premium account limit)
+      const truncated = text.length > TWEET_CHAR_LIMIT ? text.slice(0, TWEET_CHAR_LIMIT - 3) + '...' : text;
 
       const result = await this.writeClient.v2.tweet(truncated);
       console.log('[Twitter] Posted tweet:', result.data.id);
@@ -267,16 +271,30 @@ class TwitterService {
     }
 
     try {
-      // Truncate if too long
-      const truncated = text.length > 280 ? text.slice(0, 277) + '...' : text;
+      // If the message fits in one tweet, send it directly (Premium: 4000 chars)
+      if (text.length <= TWEET_CHAR_LIMIT) {
+        const result = await this.writeClient.v2.reply(text, tweetId);
+        console.log('[Twitter] Posted reply:', result.data.id);
+        this._repliedToTweets.add(tweetId);
+        return { success: true, id: result.data.id };
+      }
 
-      const result = await this.writeClient.v2.reply(truncated, tweetId);
-      console.log('[Twitter] Posted reply:', result.data.id);
-      
-      // Mark as replied to prevent duplicates
+      // Message is too long -- split into a thread of replies
+      // Split on double-newline paragraph boundaries to keep messages coherent
+      const chunks = this._splitForThread(text);
+      console.log(`[Twitter] Reply too long (${text.length} chars), splitting into ${chunks.length} thread replies`);
+
+      let lastReplyId = tweetId;
+      let firstReplyId = null;
+      for (const chunk of chunks) {
+        const result = await this.writeClient.v2.reply(chunk, lastReplyId);
+        if (!firstReplyId) firstReplyId = result.data.id;
+        lastReplyId = result.data.id;
+        console.log('[Twitter] Posted thread reply:', result.data.id);
+      }
+
       this._repliedToTweets.add(tweetId);
-      
-      return { success: true, id: result.data.id };
+      return { success: true, id: firstReplyId };
 
     } catch (error) {
       console.error('[Twitter] Error posting reply:', error.message);
@@ -291,6 +309,64 @@ class TwitterService {
   }
 
   /**
+   * Split a long message into chunks suitable for a Twitter thread.
+   * Splits on double-newline paragraph boundaries first, then falls back
+   * to single-newline, then hard-wraps at the character limit.
+   */
+  _splitForThread(text, maxLen = TWEET_CHAR_LIMIT) {
+    // Split on paragraph boundaries (double newline)
+    const paragraphs = text.split(/\n\n/);
+    const chunks = [];
+    let current = '';
+
+    for (const para of paragraphs) {
+      const candidate = current ? current + '\n\n' + para : para;
+      if (candidate.length <= maxLen) {
+        current = candidate;
+      } else if (current) {
+        chunks.push(current);
+        // If this single paragraph exceeds maxLen, hard-wrap it
+        if (para.length > maxLen) {
+          const hardChunks = this._hardWrap(para, maxLen);
+          // Add all but the last as complete chunks; keep last as current
+          for (let i = 0; i < hardChunks.length - 1; i++) {
+            chunks.push(hardChunks[i]);
+          }
+          current = hardChunks[hardChunks.length - 1];
+        } else {
+          current = para;
+        }
+      } else {
+        // current is empty but para alone exceeds maxLen
+        const hardChunks = this._hardWrap(para, maxLen);
+        for (let i = 0; i < hardChunks.length - 1; i++) {
+          chunks.push(hardChunks[i]);
+        }
+        current = hardChunks[hardChunks.length - 1];
+      }
+    }
+    if (current) chunks.push(current);
+
+    return chunks;
+  }
+
+  /**
+   * Hard-wrap text at maxLen, breaking at the last space before the limit.
+   */
+  _hardWrap(text, maxLen = TWEET_CHAR_LIMIT) {
+    const chunks = [];
+    let remaining = text;
+    while (remaining.length > maxLen) {
+      let breakAt = remaining.lastIndexOf(' ', maxLen);
+      if (breakAt <= 0) breakAt = maxLen; // No space found, hard break
+      chunks.push(remaining.slice(0, breakAt).trim());
+      remaining = remaining.slice(breakAt).trim();
+    }
+    if (remaining) chunks.push(remaining);
+    return chunks;
+  }
+
+  /**
    * Quote tweet
    */
   async quote(tweetId, text) {
@@ -300,7 +376,7 @@ class TwitterService {
     }
 
     try {
-      const truncated = text.length > 280 ? text.slice(0, 277) + '...' : text;
+      const truncated = text.length > TWEET_CHAR_LIMIT ? text.slice(0, TWEET_CHAR_LIMIT - 3) + '...' : text;
 
       const result = await this.writeClient.v2.tweet(truncated, {
         quote_tweet_id: tweetId
@@ -385,7 +461,7 @@ class TwitterService {
     }
 
     try {
-      const truncated = text.length > 280 ? text.slice(0, 277) + '...' : text;
+      const truncated = text.length > TWEET_CHAR_LIMIT ? text.slice(0, TWEET_CHAR_LIMIT - 3) + '...' : text;
       
       let input;
       let appId;

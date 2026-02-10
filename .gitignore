@@ -57,6 +57,5 @@ tests/
 create-zip.js
 bot/src/test.js
 
-# Internal docs
-docs/WALLETS.md
-docs/DEPLOYMENT_CHECKLIST.md
+# Internal docs (entire folder is private)
+docs/
