@@ -1333,6 +1333,11 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
       // Use create-and-bet endpoint (requires x402 payment)
       console.log(`[Bot] Agent wants to create market with initial bet: ${betParams.initialBet} ${betParams.initialCurrency} ${betParams.initialOutcome}`);
 
+      // Merge standard tags with auto-detected platform tags from parser
+      const baseTags = ['agent-created', authorHandle, betParams.resolution];
+      const autoTags = betParams.autoTags || [];
+      const allTags = [...new Set([...baseTags, ...autoTags])].slice(0, 10);
+
       // For now, create market without the bet (x402 payment would need to come from agent's wallet)
       // The agent will need to follow up with x402 payment to place the bet
       market = await agentbets.createMarket({
@@ -1344,7 +1349,7 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
         threshold: betParams.threshold,
         verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
         creatorAgent: `@${authorHandle}`,
-        tags: ['agent-created', authorHandle, betParams.resolution],
+        tags: allTags,
         // Include initial bet info for the reply
         requestedInitialBet: {
           amount: betParams.initialBet,
@@ -1353,6 +1358,11 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
         }
       });
     } else {
+      // Merge standard tags with auto-detected platform tags from parser
+      const baseTags = ['agent-created', authorHandle, betParams.resolution];
+      const autoTags = betParams.autoTags || [];
+      const allTags = [...new Set([...baseTags, ...autoTags])].slice(0, 10);
+
       market = await agentbets.createMarket({
         question: betParams.question,
         description: `Created by @${authorHandle} via AgentBets Bot`,
@@ -1362,7 +1372,7 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
         threshold: betParams.threshold,
         verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
         creatorAgent: `@${authorHandle}`,
-        tags: ['agent-created', authorHandle, betParams.resolution]
+        tags: allTags
       });
     }
 
@@ -2166,6 +2176,11 @@ async function createMarketFromMoltbook(request, betParams) {
       return;
     }
 
+    // Merge standard tags with auto-detected platform tags from parser
+    const moltBaseTags = ['moltbook-created', request.author, betParams.resolution];
+    const moltAutoTags = betParams.autoTags || [];
+    const moltAllTags = [...new Set([...moltBaseTags, ...moltAutoTags])].slice(0, 10);
+
     // Create market via AgentBets API
     const market = await agentbets.createMarket({
       question: betParams.question,
@@ -2176,7 +2191,7 @@ async function createMarketFromMoltbook(request, betParams) {
       threshold: betParams.threshold,
       verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
       creatorAgent: request.author,
-      tags: ['moltbook-created', request.author, betParams.resolution]
+      tags: moltAllTags
     });
 
     // Handle duplicate market (409) - treat as success

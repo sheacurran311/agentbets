@@ -95,10 +95,49 @@ const markets = {
     if (filters.category) {
       results = results.filter(m => m.category === filters.category);
     }
+    if (filters.creatorAgent) {
+      results = results.filter(m => m.creatorAgent === filters.creatorAgent);
+    }
+    if (filters.tags && Array.isArray(filters.tags) && filters.tags.length > 0) {
+      results = results.filter(m => {
+        const marketTags = m.tags || [];
+        return filters.tags.some(t => marketTags.includes(t));
+      });
+    }
+    if (filters.since) {
+      const sinceDate = new Date(filters.since);
+      results = results.filter(m => new Date(m.createdAt) > sinceDate);
+    }
+    // Sort by created_at DESC (matching DB behavior)
+    results.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     if (filters.limit) {
       results = results.slice(0, filters.limit);
     }
     return results;
+  },
+
+  async count(filters = {}) {
+    if (dbConnected) {
+      return await Market.count(filters);
+    }
+    let results = Array.from(fallbackMarkets.values());
+    if (filters.status) {
+      results = results.filter(m => m.status === filters.status);
+    }
+    if (filters.category) {
+      results = results.filter(m => m.category === filters.category);
+    }
+    if (filters.tags && Array.isArray(filters.tags) && filters.tags.length > 0) {
+      results = results.filter(m => {
+        const marketTags = m.tags || [];
+        return filters.tags.some(t => marketTags.includes(t));
+      });
+    }
+    if (filters.since) {
+      const sinceDate = new Date(filters.since);
+      results = results.filter(m => new Date(m.createdAt) > sinceDate);
+    }
+    return results.length;
   },
 
   async getStats() {

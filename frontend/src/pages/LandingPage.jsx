@@ -204,6 +204,25 @@ export default function LandingPage() {
           </div>
         </div>
 
+        <div style={{textAlign: 'center', marginBottom: '24px'}}>
+          <button
+            onClick={() => navigate('/partner')}
+            style={{
+              background: 'transparent',
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: '10px',
+              padding: '10px 24px',
+              color: COLORS.textSecondary,
+              fontSize: '14px',
+              cursor: 'pointer',
+              fontFamily: 'Space Grotesk, sans-serif',
+              transition: 'all 0.2s'
+            }}
+          >
+            &#129309; Become a Partner &mdash; Integrate AgentBets markets into your platform
+          </button>
+        </div>
+
         <p style={styles.landingFooter}>
           Built by <a href="https://x.com/AIButters" target="_blank" rel="noopener noreferrer" style={{color: COLORS.primary, textDecoration: 'none'}}>@AIButters</a> for
           the <a href="https://colosseum.com/agent-hackathon/" target="_blank" rel="noopener noreferrer" style={{color: COLORS.secondary, textDecoration: 'none'}}>Colosseum Hackathon</a>

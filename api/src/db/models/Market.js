@@ -83,6 +83,18 @@ const Market = {
       params.push(filters.onChain);
     }
 
+    // Tag filtering - matches markets that have ANY of the specified tags
+    if (filters.tags && Array.isArray(filters.tags) && filters.tags.length > 0) {
+      sql += ` AND tags && $${paramIndex++}::text[]`;
+      params.push(filters.tags);
+    }
+
+    // Date-based filtering for feed polling
+    if (filters.since) {
+      sql += ` AND created_at > $${paramIndex++}`;
+      params.push(filters.since);
+    }
+
     sql += ' ORDER BY created_at DESC';
 
     if (filters.limit) {
@@ -97,6 +109,38 @@ const Market = {
 
     const result = await query(sql, params);
     return result.rows.map(row => this.toJS(row));
+  },
+
+  /**
+   * Count markets matching filters (for feed total_new)
+   */
+  async count(filters = {}) {
+    let sql = 'SELECT COUNT(*) as total FROM markets WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+
+    if (filters.status) {
+      sql += ` AND status = $${paramIndex++}`;
+      params.push(filters.status);
+    }
+
+    if (filters.category) {
+      sql += ` AND category = $${paramIndex++}`;
+      params.push(filters.category);
+    }
+
+    if (filters.tags && Array.isArray(filters.tags) && filters.tags.length > 0) {
+      sql += ` AND tags && $${paramIndex++}::text[]`;
+      params.push(filters.tags);
+    }
+
+    if (filters.since) {
+      sql += ` AND created_at > $${paramIndex++}`;
+      params.push(filters.since);
+    }
+
+    const result = await query(sql, params);
+    return parseInt(result.rows[0].total) || 0;
   },
 
   /**

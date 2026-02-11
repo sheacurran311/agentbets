@@ -1061,6 +1061,8 @@ function App() {
   const [oddsHistoryCache, setOddsHistoryCache] = useState({}) // Cache for odds history per market
   const [pendingResolutions, setPendingResolutions] = useState([]) // Markets awaiting admin confirmation
   const [adminConfirming, setAdminConfirming] = useState(null) // Currently confirming market ID
+  const [pendingPartnerApps, setPendingPartnerApps] = useState([]) // Partner applications awaiting review
+  const [partnerActionLoading, setPartnerActionLoading] = useState(null) // ID of app being approved/rejected
   const [showDatePicker, setShowDatePicker] = useState(false) // Date picker modal visibility
   const [countdownTick, setCountdownTick] = useState(0) // Ticker for countdown updates
   const [questionValidation, setQuestionValidation] = useState({ valid: true, errors: [], warnings: [], suggestions: [] })
@@ -1266,10 +1268,11 @@ function App() {
     }
   }, [markets])
 
-  // Fetch pending resolutions when admin wallet connects
+  // Fetch admin data when admin wallet connects
   useEffect(() => {
     if (isAdmin) {
       fetchPendingResolutions()
+      fetchPendingPartnerApps()
     }
   }, [isAdmin])
 
@@ -1530,6 +1533,145 @@ function App() {
       alert('Error confirming resolution: ' + err.message)
     } finally {
       setAdminConfirming(null)
+    }
+  }
+
+  // Fetch pending partner applications for admin panel
+  const fetchPendingPartnerApps = async () => {
+    if (!isAdmin) return
+    try {
+      const res = await fetch(`${API_BASE}/admin/platform-keys?status=pending`, {
+        headers: { 'X-API-Key': ADMIN_WALLET }
+      })
+      const data = await res.json()
+      setPendingPartnerApps(data.platformKeys || [])
+    } catch (err) {
+      console.error('Failed to fetch pending partner apps:', err)
+    }
+  }
+
+  // Admin: Approve partner application
+  const approvePartnerApp = async (appId) => {
+    if (!isAdmin || !publicKey) {
+      alert('Admin wallet required')
+      return
+    }
+
+    setPartnerActionLoading(appId)
+    try {
+      // Get challenge
+      const challengeRes = await fetch(`${API_BASE}/admin/platform-keys/challenge?action=approve`)
+      const { message } = await challengeRes.json()
+
+      // Sign message
+      const encoded = new TextEncoder().encode(message)
+      const signatureBytes = await window.solana?.signMessage?.(encoded, 'utf8')
+        || await publicKey?.signMessage?.(encoded)
+      
+      if (!signatureBytes?.signature) {
+        alert('Failed to sign message. Please try again.')
+        return
+      }
+
+      // Import bs58 for encoding
+      const bs58Chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+      const encodeSig = (bytes) => {
+        const sig = new Uint8Array(bytes.signature || bytes)
+        let result = ''
+        let num = BigInt('0x' + Array.from(sig).map(b => b.toString(16).padStart(2, '0')).join(''))
+        while (num > 0n) {
+          result = bs58Chars[Number(num % 58n)] + result
+          num = num / 58n
+        }
+        for (let i = 0; i < sig.length && sig[i] === 0; i++) result = '1' + result
+        return result
+      }
+
+      const res = await fetch(`${API_BASE}/admin/platform-keys/${appId}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminWallet: publicKey.toString(),
+          signature: encodeSig(signatureBytes),
+          message
+        })
+      })
+
+      const data = await res.json()
+      if (data.success) {
+        alert(`Partner "${data.platformKey?.platformName}" approved!`)
+        fetchPendingPartnerApps()
+      } else {
+        alert(data.error || 'Failed to approve application')
+      }
+    } catch (err) {
+      alert('Error approving application: ' + err.message)
+    } finally {
+      setPartnerActionLoading(null)
+    }
+  }
+
+  // Admin: Reject partner application
+  const rejectPartnerApp = async (appId) => {
+    if (!isAdmin || !publicKey) {
+      alert('Admin wallet required')
+      return
+    }
+
+    const reason = window.prompt('Rejection reason (optional):')
+    if (reason === null) return // User cancelled
+
+    setPartnerActionLoading(appId)
+    try {
+      // Get challenge
+      const challengeRes = await fetch(`${API_BASE}/admin/platform-keys/challenge?action=reject`)
+      const { message } = await challengeRes.json()
+
+      // Sign message
+      const encoded = new TextEncoder().encode(message)
+      const signatureBytes = await window.solana?.signMessage?.(encoded, 'utf8')
+        || await publicKey?.signMessage?.(encoded)
+
+      if (!signatureBytes?.signature) {
+        alert('Failed to sign message. Please try again.')
+        return
+      }
+
+      const bs58Chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+      const encodeSig = (bytes) => {
+        const sig = new Uint8Array(bytes.signature || bytes)
+        let result = ''
+        let num = BigInt('0x' + Array.from(sig).map(b => b.toString(16).padStart(2, '0')).join(''))
+        while (num > 0n) {
+          result = bs58Chars[Number(num % 58n)] + result
+          num = num / 58n
+        }
+        for (let i = 0; i < sig.length && sig[i] === 0; i++) result = '1' + result
+        return result
+      }
+
+      const res = await fetch(`${API_BASE}/admin/platform-keys/${appId}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminWallet: publicKey.toString(),
+          signature: encodeSig(signatureBytes),
+          message,
+          reason: reason || undefined
+        })
+      })
+
+      const data = await res.json()
+      if (data.success) {
+        alert(`Partner application rejected.`)
+        fetchPendingPartnerApps()
+      } else {
+        alert(data.error || 'Failed to reject application')
+      }
+    } catch (err) {
+      alert('Error rejecting application: ' + err.message)
+    } finally {
+      setPartnerActionLoading(null)
     }
   }
 
@@ -2014,6 +2156,26 @@ function App() {
                   fontWeight: '700'
                 }}>
                   {pendingResolutions.length}
+                </span>
+              )}
+            </button>
+            <button
+              style={{...styles.sidebarItem, ...(view === 'admin-partners' ? styles.sidebarItemActive : {})}}
+              onClick={() => { setView('admin-partners'); fetchPendingPartnerApps(); }}
+            >
+              <span style={styles.iconWrapper}>{Icons.users || '\u{1F465}'}</span>
+              Partner Applications
+              {pendingPartnerApps.length > 0 && (
+                <span style={{
+                  marginLeft: 'auto',
+                  background: COLORS.secondary,
+                  color: '#fff',
+                  padding: '2px 8px',
+                  borderRadius: '10px',
+                  fontSize: '11px',
+                  fontWeight: '700'
+                }}>
+                  {pendingPartnerApps.length}
                 </span>
               )}
             </button>
@@ -2944,6 +3106,138 @@ function App() {
                           disabled={adminConfirming === market.id}
                         >
                           {adminConfirming === market.id ? 'Confirming...' : 'Confirm NO'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Admin Partner Applications View */}
+          {view === 'admin-partners' && isAdmin && (
+            <div style={styles.adminPanel}>
+              <h1 style={styles.pageTitle}>Partner Applications</h1>
+              <p style={styles.formSubtitle}>Review and approve/reject platform integration requests</p>
+
+              {pendingPartnerApps.length === 0 ? (
+                <div style={styles.emptyState}>
+                  <div style={styles.emptyStateIcon}>
+                    <span style={{fontSize: '64px', opacity: 0.4}}>{'\u{1F465}'}</span>
+                  </div>
+                  <h3 style={{fontFamily: 'Space Grotesk, sans-serif', fontSize: '24px', marginBottom: '12px'}}>No pending applications</h3>
+                  <p style={{color: COLORS.textMuted}}>All partner applications have been reviewed</p>
+                </div>
+              ) : (
+                <div style={styles.marketGrid}>
+                  {pendingPartnerApps.map((app) => (
+                    <div key={app.id} style={styles.adminCard}>
+                      <div style={{marginBottom: '12px'}}>
+                        <span style={{
+                          ...styles.pendingBadge,
+                          background: `${COLORS.secondary}20`,
+                          color: COLORS.secondary
+                        }}>
+                          {'\u{1F4E8}'} Pending Review
+                        </span>
+                      </div>
+
+                      <h3 style={{...styles.marketQuestion, marginBottom: '16px'}}>{app.platformName}</h3>
+
+                      <div style={{fontSize: '13px', color: COLORS.textSecondary, marginBottom: '16px'}}>
+                        <div style={{marginBottom: '6px'}}>
+                          <strong>Wallet:</strong>{' '}
+                          <span style={{fontFamily: 'JetBrains Mono, monospace', fontSize: '12px'}}>
+                            {app.walletAddress ? `${app.walletAddress.substring(0, 6)}...${app.walletAddress.substring(app.walletAddress.length - 4)}` : 'N/A'}
+                          </span>
+                        </div>
+                        {app.contactEmail && (
+                          <div style={{marginBottom: '6px'}}>
+                            <strong>Email:</strong> {app.contactEmail}
+                          </div>
+                        )}
+                        <div style={{marginBottom: '6px'}}>
+                          <strong>Applied:</strong> {new Date(app.createdAt).toLocaleString()}
+                        </div>
+                        {app.tagsFilter && app.tagsFilter.length > 0 && (
+                          <div style={{marginBottom: '6px'}}>
+                            <strong>Tag Filters:</strong>{' '}
+                            {app.tagsFilter.map(t => (
+                              <span key={t} style={{
+                                background: `${COLORS.primary}15`,
+                                color: COLORS.primary,
+                                padding: '2px 8px',
+                                borderRadius: '4px',
+                                fontSize: '11px',
+                                marginRight: '4px'
+                              }}>{t}</span>
+                            ))}
+                          </div>
+                        )}
+                        {app.categoriesFilter && app.categoriesFilter.length > 0 && (
+                          <div style={{marginBottom: '6px'}}>
+                            <strong>Category Filters:</strong>{' '}
+                            {app.categoriesFilter.map(c => (
+                              <span key={c} style={{
+                                background: `${COLORS.accent}15`,
+                                color: COLORS.accent,
+                                padding: '2px 8px',
+                                borderRadius: '4px',
+                                fontSize: '11px',
+                                marginRight: '4px'
+                              }}>{c}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Integration Description */}
+                      {app.platformDescription && (
+                        <div style={{
+                          background: `${COLORS.bgDark}80`,
+                          borderRadius: '10px',
+                          padding: '14px',
+                          marginBottom: '16px',
+                          border: `1px solid ${COLORS.border}`
+                        }}>
+                          <div style={{fontWeight: '700', marginBottom: '8px', color: COLORS.textPrimary, fontSize: '13px'}}>
+                            Integration Plan
+                          </div>
+                          <div style={{fontSize: '13px', color: COLORS.textSecondary, lineHeight: '1.5', whiteSpace: 'pre-wrap'}}>
+                            {app.platformDescription}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* API Key (masked) */}
+                      <div style={{fontSize: '12px', color: COLORS.textMuted, marginBottom: '12px', fontFamily: 'JetBrains Mono, monospace'}}>
+                        Key: {app.apiKey || 'N/A'}
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div style={styles.adminBtnGroup}>
+                        <button
+                          style={{
+                            ...styles.confirmYesBtn,
+                            opacity: partnerActionLoading === app.id ? 0.6 : 1,
+                            cursor: partnerActionLoading === app.id ? 'wait' : 'pointer'
+                          }}
+                          onClick={() => approvePartnerApp(app.id)}
+                          disabled={partnerActionLoading === app.id}
+                        >
+                          {partnerActionLoading === app.id ? 'Processing...' : 'Approve'}
+                        </button>
+                        <button
+                          style={{
+                            ...styles.confirmNoBtn,
+                            opacity: partnerActionLoading === app.id ? 0.6 : 1,
+                            cursor: partnerActionLoading === app.id ? 'wait' : 'pointer'
+                          }}
+                          onClick={() => rejectPartnerApp(app.id)}
+                          disabled={partnerActionLoading === app.id}
+                        >
+                          {partnerActionLoading === app.id ? 'Processing...' : 'Reject'}
                         </button>
                       </div>
                     </div>

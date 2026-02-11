@@ -445,6 +445,9 @@ class BetParser {
       // Detect category
       result.category = this.detectCategory(result.question);
 
+      // Auto-detect tags for platform integration filtering
+      result.autoTags = this.detectTags(result.question, result.category, result.resolution);
+
       // NEW: Extract initial bet amount (for create + bet in one tweet)
       // Formats: "betting 10 USDC YES", "wager: 5 USDC NO", "10 USDC on YES"
       const betAmountMatch = text.match(/(?:betting|wager|stake|put)\s*:?\s*(\d+(?:\.\d+)?)\s*(usdc|sol|eth|btc|bonk|usdt)/i) ||
@@ -517,6 +520,34 @@ class BetParser {
       }
     }
     return 'general';
+  }
+
+  /**
+   * Auto-detect tags from question content for platform integration filtering
+   * These tags enable platforms (Moltbook, Pump.fun, etc.) to filter relevant markets
+   */
+  detectTags(question, category, resolutionSource) {
+    const tags = [];
+    const lower = (question || '').toLowerCase();
+
+    // Platform keyword detection
+    if (/moltbook|molt\.book/i.test(lower)) tags.push('moltbook');
+    if (/pump\.fun|pumpfun|bonding curve/i.test(lower)) tags.push('pumpfun');
+    if (/openclaw/i.test(lower)) tags.push('openclaw');
+    if (/clawd/i.test(lower)) tags.push('clawd');
+
+    // Market type tags
+    if (/\$[A-Z]+/i.test(question) || /token|price|mcap|market cap/i.test(lower)) tags.push('token-market');
+    if (/bond|graduate|migration/i.test(lower)) tags.push('bonding');
+    if (/agent|ai agent|bot/i.test(lower)) tags.push('agent-market');
+
+    // Category as tag
+    if (category && category !== 'general') tags.push(`category:${category}`);
+
+    // Resolution source as tag
+    if (resolutionSource && resolutionSource !== 'manual') tags.push(`source:${resolutionSource}`);
+
+    return [...new Set(tags)];
   }
 
   /**

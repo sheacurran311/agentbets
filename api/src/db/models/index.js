@@ -9,6 +9,7 @@ const Bet = require('./Bet');
 const Agent = require('./Agent');
 const { Royalty, Points, Referral } = require('./Royalty');
 const { Resolution, ProcessedTweet, OddsHistory, Position } = require('./Resolution');
+const PlatformKey = require('./PlatformKey');
 
 module.exports = {
   Market,
@@ -20,5 +21,6 @@ module.exports = {
   Resolution,
   ProcessedTweet,
   OddsHistory,
-  Position
+  Position,
+  PlatformKey
 };

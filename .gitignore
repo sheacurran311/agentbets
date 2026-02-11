@@ -43,6 +43,7 @@ replit.md
 .cursor/
 
 # Internal documentation
+frontend/public/pitch.md
 DATE_PICKER_FIX_DIAGRAM.md
 DATE_PREVIEW_COUNTDOWN_FIX.md
 FIXES_SUMMARY.md

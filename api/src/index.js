@@ -18,7 +18,7 @@ const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER
 // Database
 const db = require('./db');
 const dbCompat = require('./db/compat');
-const { Market, Bet, Agent, Royalty, Points, Referral, OddsHistory, Position } = require('./db/models');
+const { Market, Bet, Agent, Royalty, Points, Referral, OddsHistory, Position, PlatformKey } = require('./db/models');
 
 // Use compatibility layer for storage (works with both DB and in-memory)
 const { markets, bets, positions, oddsHistory } = dbCompat;
@@ -97,6 +97,34 @@ const sanitizeWalletAddress = (wallet) => {
   return walletRegex.test(wallet) ? wallet : null;
 };
 
+/**
+ * Auto-detect tags from market question and metadata
+ * Used for platform integration filtering (e.g., Moltbook, Pump.fun, etc.)
+ */
+function autoDetectTags(question, category, resolutionSource) {
+  const tags = [];
+  const lower = (question || '').toLowerCase();
+
+  // Platform keyword detection
+  if (/moltbook|molt\.book/i.test(lower)) tags.push('moltbook');
+  if (/pump\.fun|pumpfun|bonding curve/i.test(lower)) tags.push('pumpfun');
+  if (/openclaw/i.test(lower)) tags.push('openclaw');
+  if (/clawd/i.test(lower)) tags.push('clawd');
+
+  // Market type tags
+  if (/\$[A-Z]+/i.test(question) || /token|price|mcap|market cap/i.test(lower)) tags.push('token-market');
+  if (/bond|graduate|migration/i.test(lower)) tags.push('bonding');
+  if (/agent|ai agent|bot/i.test(lower)) tags.push('agent-market');
+
+  // Category as tag for cross-filtering
+  if (category && category !== 'general') tags.push(`category:${category}`);
+
+  // Resolution source as tag
+  if (resolutionSource && resolutionSource !== 'manual') tags.push(`source:${resolutionSource}`);
+
+  return [...new Set(tags)];
+}
+
 // Security Middleware
 app.use(helmet({
   contentSecurityPolicy: {
@@ -156,7 +184,7 @@ const corsOrigins = process.env.CORS_ORIGINS
 app.use(cors({
   origin: corsOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-API-Key']
 }));
 app.use(express.json({ limit: '1mb' })); // Limit request body size
 
@@ -248,6 +276,118 @@ const agentLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// ==========================================
+// PLATFORM KEY AUTHENTICATION
+// ==========================================
+
+// In-memory cache for platform keys to avoid DB lookup on every request
+const platformKeyCache = new Map(); // apiKey -> { data, cachedAt }
+const PLATFORM_KEY_CACHE_TTL = 5 * 60 * 1000; // 5 minute cache
+
+// Per-key rate limiting tracking
+const platformKeyRateLimits = new Map(); // apiKey -> { count, windowStart }
+
+/**
+ * Middleware to authenticate platform API keys
+ * Sets req.authLevel to 'admin', 'platform', or 'public'
+ * Platform keys get higher rate limits but cannot create/resolve markets
+ */
+async function authenticateRequest(req, res, next) {
+  const key = req.headers['x-api-key'] || req.query.apiKey;
+
+  if (!key) {
+    req.authLevel = 'public';
+    return next();
+  }
+
+  // Check admin key first
+  if (AGENTBETS_API_KEY && key === AGENTBETS_API_KEY) {
+    req.authLevel = 'admin';
+    return next();
+  }
+
+  // Check platform keys (with cache)
+  try {
+    let platformKey = null;
+    const cached = platformKeyCache.get(key);
+    if (cached && (Date.now() - cached.cachedAt) < PLATFORM_KEY_CACHE_TTL) {
+      platformKey = cached.data;
+    } else {
+      platformKey = await PlatformKey.findByKey(key);
+      platformKeyCache.set(key, { data: platformKey, cachedAt: Date.now() });
+    }
+
+    if (!platformKey || !platformKey.isActive) {
+      return res.status(403).json({ error: 'Invalid or inactive API key' });
+    }
+
+    // Per-key rate limiting
+    const rateLimit = platformKey.rateLimitPerMinute || 60;
+    const now = Date.now();
+    const rateLimitEntry = platformKeyRateLimits.get(key) || { count: 0, windowStart: now };
+
+    // Reset window if expired
+    if (now - rateLimitEntry.windowStart > 60 * 1000) {
+      rateLimitEntry.count = 0;
+      rateLimitEntry.windowStart = now;
+    }
+
+    rateLimitEntry.count++;
+    platformKeyRateLimits.set(key, rateLimitEntry);
+
+    if (rateLimitEntry.count > rateLimit) {
+      return res.status(429).json({
+        error: 'Platform rate limit exceeded',
+        limit: rateLimit,
+        retryAfter: Math.ceil((rateLimitEntry.windowStart + 60000 - now) / 1000)
+      });
+    }
+
+    req.authLevel = 'platform';
+    req.platform = platformKey;
+
+    // Update usage stats asynchronously (don't block the request)
+    PlatformKey.updateUsage(platformKey.id).catch(err =>
+      console.error('[Platform] Usage update error:', err.message)
+    );
+
+    next();
+  } catch (error) {
+    console.error('[Platform] Auth error:', error.message);
+    // On DB error, fall through as public
+    req.authLevel = 'public';
+    next();
+  }
+}
+
+/**
+ * Middleware to require a specific permission level
+ * Use after authenticateRequest
+ */
+function requirePermission(permission) {
+  return (req, res, next) => {
+    if (req.authLevel === 'admin') return next(); // Admin has all permissions
+
+    if (req.authLevel !== 'platform') {
+      return res.status(401).json({
+        error: 'API key required',
+        message: 'This endpoint requires a platform API key. Contact the AgentBets team to get one.'
+      });
+    }
+
+    const permissions = req.platform?.permissions || [];
+    if (!permissions.includes(permission)) {
+      return res.status(403).json({
+        error: 'Insufficient permissions',
+        message: `Your API key does not have the '${permission}' permission`,
+        currentPermissions: permissions
+      });
+    }
+
+    next();
+  };
+}
 
 // Serve static files for actions.json
 const path = require('path');
@@ -592,6 +732,11 @@ app.post('/api/markets', async (req, res) => {
     const tokenSymbol = extractTokenFromQuestion(question);
     const tokenId = tokenSymbol ? getCoinGeckoId(tokenSymbol) : null;
 
+    // Auto-detect tags from question content and merge with user-provided tags
+    const userTags = Array.isArray(req.body.tags) ? req.body.tags.map(t => String(t).trim()).filter(Boolean) : [];
+    const detectedTags = autoDetectTags(question, category || 'general', finalResolutionSource);
+    const mergedTags = [...new Set([...userTags, ...detectedTags])].slice(0, 10);
+
     const market = {
       id: marketId,
       question,
@@ -613,7 +758,7 @@ app.post('/api/markets', async (req, res) => {
       threshold: req.body.threshold || null, // Target value for resolution
       tokenId, // CoinGecko token ID for price history (if token market)
       tokenSymbol: tokenSymbol ? tokenSymbol.toUpperCase() : null, // Token symbol
-      tags: req.body.tags || [], // Additional tags for filtering
+      tags: mergedTags, // Auto-detected + user-provided tags for platform filtering
 
       // Pool tracking
       yesPool: 0, // Total SOL bet on YES (in lamports)
@@ -669,9 +814,21 @@ app.post('/api/markets', async (req, res) => {
  */
 app.get('/api/markets', async (req, res) => {
   try {
-    const { status, category, limit = 50 } = req.query;
+    const { status, category, tags, creatorAgent, limit = 50 } = req.query;
 
-    let results = await markets.findAll({ status, category, limit: parseInt(limit) });
+    const filters = { status, category, limit: parseInt(limit) };
+
+    // Support tag filtering (comma-separated, e.g., ?tags=moltbook,token-market)
+    if (tags) {
+      filters.tags = tags.split(',').map(t => t.trim()).filter(Boolean);
+    }
+
+    // Support creatorAgent filtering
+    if (creatorAgent) {
+      filters.creatorAgent = creatorAgent;
+    }
+
+    let results = await markets.findAll(filters);
 
     // Sort by volume (most active first)
     results.sort((a, b) => (b.totalVolume || 0) - (a.totalVolume || 0));
@@ -683,6 +840,64 @@ app.get('/api/markets', async (req, res) => {
   } catch (error) {
     console.error('[API] Error fetching markets:', error);
     res.status(500).json({ error: 'Failed to fetch markets' });
+  }
+});
+
+/**
+ * Market Feed for Platform Integration
+ * GET /api/markets/feed
+ * Efficient polling endpoint for platforms to discover new markets
+ * Supports cursor-based pagination and tag/category filtering
+ * NOTE: This route MUST be defined before /api/markets/:id to avoid route matching issues
+ */
+app.get('/api/markets/feed', authenticateRequest, async (req, res) => {
+  try {
+    const { since, tags, category, status = 'active', limit = 20 } = req.query;
+    const parsedLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 100);
+
+    const filters = { status, limit: parsedLimit };
+
+    if (category) {
+      filters.category = category;
+    }
+
+    if (tags) {
+      filters.tags = tags.split(',').map(t => t.trim()).filter(Boolean);
+    }
+
+    if (since) {
+      const sinceDate = new Date(since);
+      if (isNaN(sinceDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid since parameter. Use ISO 8601 format (e.g., 2026-02-11T00:00:00Z)' });
+      }
+      filters.since = sinceDate.toISOString();
+    }
+
+    // Get markets matching filters
+    const results = await markets.findAll(filters);
+
+    // Get total count of matching markets (for pagination awareness)
+    const totalNew = await markets.count(filters);
+
+    // Cursor is the created_at of the last result (for next poll)
+    const cursor = results.length > 0 ? results[results.length - 1].createdAt : (since || null);
+
+    res.json({
+      markets: results,
+      total_new: totalNew,
+      returned: results.length,
+      cursor,
+      filters: {
+        since: since || null,
+        tags: filters.tags || null,
+        category: category || null,
+        status
+      },
+      next_poll_hint: `Use ?since=${cursor || new Date().toISOString()} to get only newer markets`
+    });
+  } catch (error) {
+    console.error('[API] Error fetching market feed:', error);
+    res.status(500).json({ error: 'Failed to fetch market feed' });
   }
 });
 
@@ -1172,6 +1387,444 @@ function requireAdmin(req, res, next) {
 
   next();
 }
+
+// ==========================================
+// PARTNER APPLICATION ENDPOINTS
+// ==========================================
+
+/**
+ * Get challenge message for partner wallet signature
+ * GET /api/partner/challenge
+ */
+app.get('/api/partner/challenge', (req, res) => {
+  const { wallet } = req.query;
+  if (!wallet) {
+    return res.status(400).json({ error: 'wallet query parameter required' });
+  }
+
+  const walletClean = sanitizeWalletAddress(wallet);
+  if (!walletClean) {
+    return res.status(400).json({ error: 'Invalid wallet address' });
+  }
+
+  const timestamp = Date.now();
+  const nonce = Math.random().toString(36).substring(2, 15);
+  const message = `AgentBets Partner Application by ${walletClean} at ${timestamp} nonce:${nonce}`;
+  res.json({ message, expiresIn: '5 minutes' });
+});
+
+/**
+ * Submit a partner application
+ * POST /api/partner/apply
+ * Requires wallet signature to prove ownership
+ */
+app.post('/api/partner/apply', generalLimiter, async (req, res) => {
+  try {
+    const { wallet, signature, message, platformName, contactEmail, platformDescription, tagsFilter, categoriesFilter } = req.body;
+
+    // Validate required fields
+    if (!wallet || !signature || !message || !platformName) {
+      return res.status(400).json({ error: 'wallet, signature, message, and platformName are required' });
+    }
+
+    const walletClean = sanitizeWalletAddress(wallet);
+    if (!walletClean) {
+      return res.status(400).json({ error: 'Invalid wallet address' });
+    }
+
+    // Verify the message is recent (within 5 minutes)
+    const messageMatch = message.match(/at (\d+)/);
+    if (messageMatch) {
+      const messageTime = parseInt(messageMatch[1]);
+      const now = Date.now();
+      if (now - messageTime > 5 * 60 * 1000) {
+        return res.status(401).json({ error: 'Signature expired. Please sign a new message.' });
+      }
+    }
+
+    // Verify wallet signature
+    if (!verifyWalletSignature(walletClean, message, signature)) {
+      return res.status(401).json({ error: 'Invalid signature. Could not verify wallet ownership.' });
+    }
+
+    // Check for existing application (1 key per wallet)
+    const existing = await PlatformKey.findByWallet(walletClean);
+    if (existing) {
+      const statusMessages = {
+        pending: 'You already have a pending application. Please wait for admin review.',
+        approved: 'You already have an approved API key. Visit the Partner page to view it.',
+        active: 'You already have an active API key.',
+        rejected: 'Your previous application was rejected. Contact the AgentBets team for more information.'
+      };
+      return res.status(409).json({
+        error: statusMessages[existing.status] || 'An application already exists for this wallet.',
+        status: existing.status
+      });
+    }
+
+    // Create pending application (key generated but NOT active until approved)
+    const application = await PlatformKey.create({
+      platformName: sanitizeInput(platformName).substring(0, 100),
+      contactEmail: contactEmail ? sanitizeInput(contactEmail).substring(0, 255) : null,
+      platformDescription: platformDescription ? sanitizeInput(platformDescription).substring(0, 1000) : null,
+      walletAddress: walletClean,
+      status: 'pending',
+      isActive: false,
+      permissions: ['read', 'bet'],
+      rateLimitPerMinute: 60,
+      tagsFilter: Array.isArray(tagsFilter) ? tagsFilter.map(t => sanitizeInput(String(t))).slice(0, 10) : null,
+      categoriesFilter: Array.isArray(categoriesFilter) ? categoriesFilter.map(c => sanitizeInput(String(c))).slice(0, 7) : null
+    });
+
+    console.log(`[Partner] New application from ${walletClean} for "${platformName}"`);
+
+    res.status(201).json({
+      success: true,
+      status: 'pending',
+      message: 'Application submitted successfully! The AgentBets team will review your application and you will be able to see your status on the Partner page.',
+      application: {
+        id: application.id,
+        platformName: application.platformName,
+        status: application.status,
+        createdAt: application.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('[Partner] Application error:', error);
+    res.status(500).json({ error: 'Failed to submit application' });
+  }
+});
+
+/**
+ * Check partner application status
+ * GET /api/partner/status
+ */
+app.get('/api/partner/status', async (req, res) => {
+  try {
+    const { wallet } = req.query;
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet query parameter required' });
+    }
+
+    const walletClean = sanitizeWalletAddress(wallet);
+    if (!walletClean) {
+      return res.status(400).json({ error: 'Invalid wallet address' });
+    }
+
+    const application = await PlatformKey.findByWallet(walletClean);
+    if (!application) {
+      return res.json({ found: false, status: null });
+    }
+
+    // Base response (always returned)
+    const response = {
+      found: true,
+      id: application.id,
+      status: application.status,
+      platformName: application.platformName,
+      contactEmail: application.contactEmail,
+      platformDescription: application.platformDescription,
+      tagsFilter: application.tagsFilter,
+      categoriesFilter: application.categoriesFilter,
+      createdAt: application.createdAt,
+      reviewedAt: application.reviewedAt
+    };
+
+    // Only include API key if approved (partner can copy it)
+    if (application.status === 'approved' || application.status === 'active') {
+      response.apiKey = application.apiKey;
+      response.permissions = application.permissions;
+      response.rateLimitPerMinute = application.rateLimitPerMinute;
+      response.usage = {
+        header: 'X-API-Key: <your-api-key>',
+        feedEndpoint: 'GET /api/markets/feed?tags=...',
+        marketsEndpoint: 'GET /api/markets?tags=...',
+        docsUrl: '/integrate.md'
+      };
+    }
+
+    // Include rejection reason if rejected
+    if (application.status === 'rejected') {
+      response.rejectionReason = application.rejectionReason;
+    }
+
+    res.json(response);
+  } catch (error) {
+    console.error('[Partner] Status check error:', error);
+    res.status(500).json({ error: 'Failed to check application status' });
+  }
+});
+
+// ==========================================
+// PLATFORM KEY MANAGEMENT (Admin Only)
+// ==========================================
+
+/**
+ * Generate admin challenge for platform key operations
+ * GET /api/admin/platform-keys/challenge
+ */
+app.get('/api/admin/platform-keys/challenge', (req, res) => {
+  const { action } = req.query;
+  if (!action) {
+    return res.status(400).json({ error: 'action query param required (e.g., create, list, update, delete)' });
+  }
+  const message = generateAdminChallenge(action, 'platform-keys');
+  res.json({ message, expiresIn: '5 minutes' });
+});
+
+/**
+ * Create a new platform API key
+ * POST /api/admin/platform-keys
+ */
+app.post('/api/admin/platform-keys', adminLimiter, requireAdmin, async (req, res) => {
+  try {
+    const { platformName, contactEmail, permissions, rateLimitPerMinute, tagsFilter, categoriesFilter } = req.body;
+
+    if (!platformName) {
+      return res.status(400).json({ error: 'platformName is required' });
+    }
+
+    // Validate permissions (only read and bet allowed for platform keys)
+    const validPermissions = ['read', 'bet'];
+    const requestedPermissions = permissions || ['read', 'bet'];
+    const invalidPerms = requestedPermissions.filter(p => !validPermissions.includes(p));
+    if (invalidPerms.length > 0) {
+      return res.status(400).json({
+        error: `Invalid permissions: ${invalidPerms.join(', ')}. Allowed: ${validPermissions.join(', ')}`
+      });
+    }
+
+    const platformKey = await PlatformKey.create({
+      platformName: sanitizeInput(platformName),
+      contactEmail: contactEmail ? sanitizeInput(contactEmail) : null,
+      permissions: requestedPermissions,
+      rateLimitPerMinute: Math.min(Math.max(parseInt(rateLimitPerMinute) || 60, 1), 1000),
+      tagsFilter: Array.isArray(tagsFilter) ? tagsFilter.map(t => sanitizeInput(String(t))) : null,
+      categoriesFilter: Array.isArray(categoriesFilter) ? categoriesFilter.map(c => sanitizeInput(String(c))) : null
+    });
+
+    console.log(`[Admin] Created platform key for ${platformName}: ${platformKey.id}`);
+
+    res.status(201).json({
+      success: true,
+      platformKey,
+      message: `API key created for ${platformName}. Store the apiKey securely - it cannot be retrieved again.`,
+      usage: {
+        header: 'X-API-Key: <your-api-key>',
+        feedEndpoint: 'GET /api/markets/feed?tags=...',
+        marketsEndpoint: 'GET /api/markets?tags=...',
+        docsUrl: '/integrate.md'
+      }
+    });
+  } catch (error) {
+    console.error('[Admin] Error creating platform key:', error);
+    res.status(500).json({ error: 'Failed to create platform key' });
+  }
+});
+
+/**
+ * List all platform API keys
+ * GET /api/admin/platform-keys
+ */
+app.get('/api/admin/platform-keys', async (req, res) => {
+  try {
+    // Simple admin check via API key (no signature needed for read-only)
+    const providedKey = req.headers['x-api-key'] || req.query.apiKey;
+    if (!AGENTBETS_API_KEY || providedKey !== AGENTBETS_API_KEY) {
+      return res.status(403).json({ error: 'Admin API key required' });
+    }
+
+    const filters = {};
+    if (req.query.activeOnly === 'true') filters.activeOnly = true;
+    if (req.query.status) filters.status = req.query.status;
+
+    const keys = await PlatformKey.listAll(filters);
+
+    // Mask API keys for security (show only first 8 and last 4 chars)
+    const maskedKeys = keys.map(k => ({
+      ...k,
+      apiKey: k.apiKey ? `${k.apiKey.substring(0, 8)}...${k.apiKey.substring(k.apiKey.length - 4)}` : null
+    }));
+
+    res.json({
+      total: maskedKeys.length,
+      platformKeys: maskedKeys
+    });
+  } catch (error) {
+    console.error('[Admin] Error listing platform keys:', error);
+    res.status(500).json({ error: 'Failed to list platform keys' });
+  }
+});
+
+/**
+ * Update a platform API key
+ * PUT /api/admin/platform-keys/:id
+ */
+app.put('/api/admin/platform-keys/:id', adminLimiter, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { platformName, contactEmail, permissions, rateLimitPerMinute, tagsFilter, categoriesFilter, isActive } = req.body;
+
+    const existing = await PlatformKey.findById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Platform key not found' });
+    }
+
+    // Validate permissions if provided
+    if (permissions) {
+      const validPermissions = ['read', 'bet'];
+      const invalidPerms = permissions.filter(p => !validPermissions.includes(p));
+      if (invalidPerms.length > 0) {
+        return res.status(400).json({
+          error: `Invalid permissions: ${invalidPerms.join(', ')}. Allowed: ${validPermissions.join(', ')}`
+        });
+      }
+    }
+
+    const updateData = {};
+    if (platformName !== undefined) updateData.platformName = sanitizeInput(platformName);
+    if (contactEmail !== undefined) updateData.contactEmail = sanitizeInput(contactEmail);
+    if (permissions !== undefined) updateData.permissions = permissions;
+    if (rateLimitPerMinute !== undefined) updateData.rateLimitPerMinute = Math.min(Math.max(parseInt(rateLimitPerMinute) || 60, 1), 1000);
+    if (tagsFilter !== undefined) updateData.tagsFilter = Array.isArray(tagsFilter) ? tagsFilter.map(t => sanitizeInput(String(t))) : null;
+    if (categoriesFilter !== undefined) updateData.categoriesFilter = Array.isArray(categoriesFilter) ? categoriesFilter.map(c => sanitizeInput(String(c))) : null;
+    if (isActive !== undefined) updateData.isActive = Boolean(isActive);
+
+    const updated = await PlatformKey.update(id, updateData);
+
+    // Invalidate cache for this key
+    platformKeyCache.delete(existing.apiKey);
+
+    console.log(`[Admin] Updated platform key ${id} (${existing.platformName})`);
+
+    res.json({
+      success: true,
+      platformKey: {
+        ...updated,
+        apiKey: `${updated.apiKey.substring(0, 8)}...${updated.apiKey.substring(updated.apiKey.length - 4)}`
+      }
+    });
+  } catch (error) {
+    console.error('[Admin] Error updating platform key:', error);
+    res.status(500).json({ error: 'Failed to update platform key' });
+  }
+});
+
+/**
+ * Deactivate a platform API key
+ * DELETE /api/admin/platform-keys/:id
+ */
+app.delete('/api/admin/platform-keys/:id', adminLimiter, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await PlatformKey.findById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Platform key not found' });
+    }
+
+    const deactivated = await PlatformKey.deactivate(id);
+
+    // Invalidate cache
+    platformKeyCache.delete(existing.apiKey);
+
+    console.log(`[Admin] Deactivated platform key ${id} (${existing.platformName})`);
+
+    res.json({
+      success: true,
+      message: `Platform key for ${existing.platformName} has been deactivated`,
+      platformKey: {
+        ...deactivated,
+        apiKey: `${deactivated.apiKey.substring(0, 8)}...${deactivated.apiKey.substring(deactivated.apiKey.length - 4)}`
+      }
+    });
+  } catch (error) {
+    console.error('[Admin] Error deactivating platform key:', error);
+    res.status(500).json({ error: 'Failed to deactivate platform key' });
+  }
+});
+
+/**
+ * Approve a partner application
+ * POST /api/admin/platform-keys/:id/approve
+ */
+app.post('/api/admin/platform-keys/:id/approve', adminLimiter, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await PlatformKey.findById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+
+    if (existing.status !== 'pending') {
+      return res.status(400).json({
+        error: `Cannot approve: application is already ${existing.status}`,
+        currentStatus: existing.status
+      });
+    }
+
+    const approved = await PlatformKey.approve(id);
+
+    // Invalidate cache if exists
+    platformKeyCache.delete(existing.apiKey);
+
+    console.log(`[Admin] Approved partner application ${id} (${existing.platformName}) for wallet ${existing.walletAddress}`);
+
+    res.json({
+      success: true,
+      message: `Partner application for "${existing.platformName}" has been approved. The partner can now view their API key on the Partner page.`,
+      platformKey: {
+        ...approved,
+        apiKey: `${approved.apiKey.substring(0, 8)}...${approved.apiKey.substring(approved.apiKey.length - 4)}`
+      }
+    });
+  } catch (error) {
+    console.error('[Admin] Error approving partner:', error);
+    res.status(500).json({ error: 'Failed to approve application' });
+  }
+});
+
+/**
+ * Reject a partner application
+ * POST /api/admin/platform-keys/:id/reject
+ */
+app.post('/api/admin/platform-keys/:id/reject', adminLimiter, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const existing = await PlatformKey.findById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+
+    if (existing.status !== 'pending') {
+      return res.status(400).json({
+        error: `Cannot reject: application is already ${existing.status}`,
+        currentStatus: existing.status
+      });
+    }
+
+    const rejected = await PlatformKey.reject(id, reason ? sanitizeInput(reason).substring(0, 500) : null);
+
+    console.log(`[Admin] Rejected partner application ${id} (${existing.platformName}): ${reason || 'No reason given'}`);
+
+    res.json({
+      success: true,
+      message: `Partner application for "${existing.platformName}" has been rejected.`,
+      platformKey: {
+        id: rejected.id,
+        platformName: rejected.platformName,
+        status: rejected.status,
+        rejectionReason: rejected.rejectionReason
+      }
+    });
+  } catch (error) {
+    console.error('[Admin] Error rejecting partner:', error);
+    res.status(500).json({ error: 'Failed to reject application' });
+  }
+});
 
 // Verify a bet transaction on-chain
 async function verifyBetTransaction(txSignature, expectedWallet, expectedAmount) {
@@ -2337,7 +2990,9 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
     const sanitizedThreshold = threshold ? sanitizeInput(String(threshold)) : null;
     const sanitizedCreatorAgent = creatorAgent ? sanitizeInput(creatorAgent) : null;
     const sanitizedProposerWallet = sanitizeWalletAddress(proposerWallet);
-    const sanitizedTags = Array.isArray(tags) ? tags.map(t => sanitizeInput(String(t))).slice(0, 10) : [];
+    const userTags = Array.isArray(tags) ? tags.map(t => sanitizeInput(String(t))).filter(Boolean) : [];
+    const detectedOnchainTags = autoDetectTags(sanitizedQuestion, sanitizedCategory, 'pollfun');
+    const sanitizedTags = [...new Set([...userTags, ...detectedOnchainTags])].slice(0, 10);
 
     if (!sanitizedQuestion || !sanitizedEndDate) {
       return res.status(400).json({ error: 'Question and endDate are required' });
@@ -4709,6 +5364,22 @@ function buildOgHtml({ title, description, image, url }) {
 </body>
 </html>`;
 }
+
+// Embed route - serve SPA with iframe-friendly headers
+// Allows partner platforms to embed market cards via iframe
+app.get('/embed/:marketId', (req, res, next) => {
+  const indexPath = path.join(frontendPath, 'index.html');
+  const fs = require('fs');
+  if (fs.existsSync(indexPath)) {
+    // Remove X-Frame-Options and set permissive frame-ancestors for embedding
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Security-Policy', "frame-ancestors *");
+    res.setHeader('X-Frame-Options', 'ALLOWALL');
+    res.sendFile(indexPath);
+  } else {
+    next();
+  }
+});
 
 // Handle SPA routing - serve index.html for all non-API routes
 app.get('*', (req, res, next) => {

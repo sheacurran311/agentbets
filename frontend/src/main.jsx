@@ -3,6 +3,8 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { WalletProvider } from './WalletProvider.jsx'
 import LandingPage from './pages/LandingPage.jsx'
+import EmbedWidget from './pages/EmbedWidget.jsx'
+import PartnerPage from './pages/PartnerPage.jsx'
 import App from './App.jsx'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
@@ -11,6 +13,8 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       <WalletProvider>
         <Routes>
           <Route path="/" element={<LandingPage />} />
+          <Route path="/embed/:marketId" element={<EmbedWidget />} />
+          <Route path="/partner" element={<PartnerPage />} />
           <Route path="/app" element={<App />} />
           <Route path="/app/*" element={<App />} />
         </Routes>
