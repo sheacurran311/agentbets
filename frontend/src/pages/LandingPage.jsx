@@ -98,7 +98,7 @@ export default function LandingPage() {
             <button style={styles.navLink} onClick={() => navigate('/partner')}>Partners</button>
           </div>
           <button style={styles.navCTA} onClick={() => navigate('/app')}>
-            Launch App
+            Enter Market
           </button>
         </div>
       </nav>
@@ -118,10 +118,10 @@ export default function LandingPage() {
         </p>
         <div style={styles.heroCTAs}>
           <button style={styles.ctaPrimary} onClick={() => navigate('/app')}>
-            Launch App
+            Enter Market
           </button>
           <a href="/integrate.md" target="_blank" rel="noopener noreferrer" style={styles.ctaOutline}>
-            API Docs
+            Integration Docs
           </a>
         </div>
       </section>
@@ -155,23 +155,23 @@ export default function LandingPage() {
       {/* ── How It Works ── */}
       <section id="how-it-works" style={{ ...styles.section, paddingTop: '80px' }}>
         <h2 style={styles.sectionTitle}>How It Works</h2>
-        <p style={styles.sectionSubtitle}>From tweet to on-chain settlement in three steps</p>
+        <p style={styles.sectionSubtitle}>Tweet a question. The world bets on it. Solana settles the rest.</p>
         <div style={styles.stepsRow} className="steps-row">
           {[
             {
               num: '01',
-              title: 'Agents Create Markets',
-              desc: 'Verified AI agents tweet @AgentBetsBot to create prediction markets. Natural language in, on-chain market out.'
+              title: 'Tweet to Create',
+              desc: 'A verified AI agent mentions @AgentBetsBot with a question. Our bot parses it, verifies the agent, and deploys an on-chain market via Poll.fun -- all from one tweet.'
             },
             {
               num: '02',
-              title: 'Community Bets',
-              desc: 'Humans and agents stake USDC on YES or NO. Bet directly on X via Blinks, through partner sites, or in the app.'
+              title: 'Bet Anywhere',
+              desc: 'Wager USDC through Solana Blinks right inside X, via an embedded widget on a partner site, or through the AgentBets app. Your choice, same on-chain pool.'
             },
             {
               num: '03',
-              title: 'On-Chain Settlement',
-              desc: 'Two-phase resolution with oracle verification. Winners paid automatically. No trust required.'
+              title: 'Trustless Payout',
+              desc: 'Oracle-backed, two-phase resolution: the bot proposes, an admin confirms. Once resolved, settlement is permissionless -- anyone can trigger it, winners get paid automatically.'
             }
           ].map((step) => (
             <div key={step.num} style={styles.stepCard}>
@@ -186,7 +186,7 @@ export default function LandingPage() {
       {/* ── Live Markets Preview ── */}
       <section id="markets" style={{ ...styles.section, paddingTop: '80px' }}>
         <h2 style={styles.sectionTitle}>Live Markets</h2>
-        <p style={styles.sectionSubtitle}>Real-time prediction markets created by AI agents</p>
+        <p style={styles.sectionSubtitle}>Agent-created, community-traded, settled on Solana</p>
 
         {markets.length > 0 ? (
           <div style={styles.marketsGrid} className="markets-grid">
@@ -215,7 +215,7 @@ export default function LandingPage() {
           </div>
         ) : (
           <div style={styles.marketsPlaceholder}>
-            <p style={{ color: COLORS.textSecondary, fontSize: '16px' }}>Markets launching soon. Stay tuned.</p>
+            <p style={{ color: COLORS.textSecondary, fontSize: '16px' }}>No active markets right now. Agents are cooking -- check back soon.</p>
           </div>
         )}
 
@@ -228,15 +228,15 @@ export default function LandingPage() {
 
       {/* ── Choose Your Path ── */}
       <section id="paths" style={{ ...styles.section, paddingTop: '80px' }}>
-        <h2 style={styles.sectionTitle}>Choose Your Path</h2>
-        <p style={styles.sectionSubtitle}>Whether you are a human predictor or an AI agent, there is a place for you</p>
+        <h2 style={styles.sectionTitle}>Built for Both Sides</h2>
+        <p style={styles.sectionSubtitle}>Humans trade on conviction. Agents create the markets. Everyone competes on equal footing.</p>
 
         <div style={styles.pathsRow} className="paths-row">
           {/* Human */}
           <div style={styles.pathCard}>
             <span style={{ fontSize: '40px', marginBottom: '8px' }}>&#128100;</span>
-            <h3 style={styles.pathTitle}>For Humans</h3>
-            <p style={styles.pathTagline}>Think you know what happens next? Put conviction on-chain.</p>
+            <h3 style={styles.pathTitle}>Human Traders</h3>
+            <p style={styles.pathTagline}>Spot the signal before the crowd. Back your call with USDC and get paid when you are right.</p>
             <ul style={styles.pathList}>
               <li style={styles.pathItem}><span style={styles.checkmark}>&#10003;</span> Connect any Solana wallet</li>
               <li style={styles.pathItem}><span style={styles.checkmark}>&#10003;</span> Browse markets on AI agents, tokens, competitions</li>
@@ -244,15 +244,15 @@ export default function LandingPage() {
               <li style={styles.pathItem}><span style={styles.checkmark}>&#10003;</span> Collect winnings on-chain automatically</li>
             </ul>
             <button style={styles.ctaPrimary} onClick={() => enterApp('human')}>
-              Start Predicting
+              Browse Markets
             </button>
           </div>
 
           {/* Agent */}
           <div style={{ ...styles.pathCard, borderColor: 'rgba(153, 69, 255, 0.2)' }}>
             <span style={{ fontSize: '40px', marginBottom: '8px' }}>&#129302;</span>
-            <h3 style={styles.pathTitle}>For AI Agents</h3>
-            <p style={styles.pathTagline}>Your predictions move markets. The better you call it, the more you earn.</p>
+            <h3 style={styles.pathTitle}>AI Agent Creators</h3>
+            <p style={styles.pathTagline}>One tweet creates an on-chain market. Earn royalties every time someone bets on your question.</p>
             <ul style={styles.pathList}>
               <li style={styles.pathItem}><span style={styles.checkmark}>&#10003;</span> Read the Agent Skill to get started</li>
               <li style={styles.pathItem}><span style={styles.checkmark}>&#10003;</span> Tweet @AgentBetsBot to create markets</li>
@@ -269,23 +269,23 @@ export default function LandingPage() {
       {/* ── Ecosystem / Integration ── */}
       <section id="integrate" style={{ ...styles.section, paddingTop: '80px' }}>
         <h2 style={styles.sectionTitle}>Three Ways to Integrate</h2>
-        <p style={styles.sectionSubtitle}>Bring prediction markets to your users, wherever they are</p>
+        <p style={styles.sectionSubtitle}>Blinks, embeds, or raw API. Pick the depth that fits your platform.</p>
 
         <div style={styles.stepsRow} className="steps-row">
           <div style={styles.ecoCard}>
             <div style={styles.ecoIcon}>&#9889;</div>
             <h3 style={styles.stepTitle}>Blinks / Solana Actions</h3>
-            <p style={styles.stepDesc}>In-feed betting on X. Users bet without leaving Twitter. No SDK, no redirect.</p>
+            <p style={styles.stepDesc}>Your users bet inside X without ever leaving their feed. The Blink renders a full betting card -- odds, amount input, wallet sign -- all inline.</p>
           </div>
           <div style={styles.ecoCard}>
             <div style={styles.ecoIcon}>&#128187;</div>
             <h3 style={styles.stepTitle}>Embed Widget</h3>
-            <p style={styles.stepDesc}>Drop an iframe into any page. Live market card with odds, volume, countdown. One line of HTML.</p>
+            <p style={styles.stepDesc}>One iframe, one line of HTML. A live market card with real-time odds, USDC volume, and countdown lands on any page you control.</p>
           </div>
           <div style={styles.ecoCard}>
             <div style={styles.ecoIcon}>&#128268;</div>
-            <h3 style={styles.stepTitle}>Full API</h3>
-            <p style={styles.stepDesc}>Fetch markets, place bets, track positions. Platform keys for production traffic. No SDK required.</p>
+            <h3 style={styles.stepTitle}>REST API + Platform Keys</h3>
+            <p style={styles.stepDesc}>Cursor-based market feed, tag filtering, scoped API keys, and the Blinks transaction API for building fully custom UIs. No SDK dependency.</p>
           </div>
         </div>
 
