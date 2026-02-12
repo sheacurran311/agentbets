@@ -40,6 +40,7 @@ try {
     const standaloneDb = require('./db');
     db = standaloneDb;
     ProcessedTweet = standaloneDb.ProcessedTweet;
+    Resolution = standaloneDb.Resolution;
     console.log('[Bot] Standalone database module loaded (Railway mode)');
   } catch (dbErr) {
     console.log('[Bot] No database module available - using file-based storage');
@@ -741,6 +742,8 @@ async function resolveMarket(marketId, data) {
   }
 
   console.log(`[Resolver] Resolving market ${marketId}...`);
+  console.log(`[Resolver]   source=${data.resolution}, timing=${data.resolutionTiming}, threshold=${data.threshold}, handle=${data.targetHandle || 'none'}`);
+  console.log(`[Resolver]   question="${data.question}"`);
 
   try {
     const result = await resolver.resolve(data);
@@ -847,13 +850,15 @@ async function syncMarketsFromAPI() {
       const tokenMatch = market.question.match(/\$([A-Z]+)/);
       const targetToken = tokenMatch ? tokenMatch[1] : null;
 
-      // Detect resolution timing
-      const resolutionTiming = market.resolutionTiming ||
-        parser.detectResolutionTiming({
+      // Always re-detect resolution timing from question text
+      // The DB default is 'at_close', which prevents detection of 'on_target' markets
+      const resolutionTiming = parser.detectResolutionTiming({
           resolution: resolutionSource,
           targetHandle,
           question: market.question
         });
+      
+      console.log(`[Sync] Market ${market.id}: source=${resolutionSource}, timing=${resolutionTiming}, handle=${targetHandle || 'none'}, q="${market.question.slice(0, 60)}..."`);
 
       const marketData = {
         question: market.question,
@@ -2415,7 +2420,12 @@ async function checkMentions() {
  * - on_target: can resolve as soon as threshold is met, before endDate (periodic check)
  */
 async function checkResolutions() {
-  console.log(`[Resolver] Checking markets to resolve...`);
+  const marketCount = pendingResolutions.size;
+  console.log(`[Resolver] Checking ${marketCount} markets to resolve...`);
+
+  if (marketCount === 0) {
+    return;
+  }
 
   const now = new Date();
   let resolvedCount = 0;
@@ -2424,14 +2434,18 @@ async function checkResolutions() {
     const endDate = new Date(data.endDate);
     const isOnTarget = data.resolutionTiming === 'on_target';
     const hasEnded = now >= endDate;
+    const shortId = marketId.slice(0, 8);
+    const timeLeft = hasEnded ? 'ended' : `${Math.round((endDate - now) / (1000 * 60 * 60 * 24))}d left`;
 
     // Skip if we've already proposed a resolution
     if (data.proposalStatus === 'proposed') {
+      console.log(`[Resolver] ${shortId} — already proposed, skipping`);
       continue;
     }
 
     // at_close: only resolve when market has ended
     if (!isOnTarget && !hasEnded) {
+      console.log(`[Resolver] ${shortId} — at_close, ${timeLeft}, skipping (timing=${data.resolutionTiming}, source=${data.resolution})`);
       continue;
     }
 
@@ -2439,14 +2453,14 @@ async function checkResolutions() {
     // at_close + hasEnded: attempt resolution
     // For at_close that has ended, skip if there's a scheduled job (fallback only)
     if (!isOnTarget && scheduledJobs.has(marketId)) {
-      console.log(`[Resolver] Market ${marketId} has scheduled job, skipping fallback`);
+      console.log(`[Resolver] ${shortId} — has scheduled job, skipping fallback`);
       continue;
     }
 
     if (isOnTarget && !hasEnded) {
-      console.log(`[Resolver] Market ${marketId} (on_target) - checking if target met early...`);
+      console.log(`[Resolver] ${shortId} — on_target, ${timeLeft}, checking if target met early (source=${data.resolution})...`);
     } else if (hasEnded) {
-      console.log(`[Resolver] Market ${marketId} ended, resolving via fallback...`);
+      console.log(`[Resolver] ${shortId} — ended, resolving via fallback (source=${data.resolution})...`);
     }
 
     await resolveMarket(marketId, data);
@@ -2454,7 +2468,7 @@ async function checkResolutions() {
   }
 
   if (resolvedCount > 0) {
-    console.log(`[Resolver] Resolved ${resolvedCount} markets`);
+    console.log(`[Resolver] Attempted resolution for ${resolvedCount} markets`);
   }
 }
 
@@ -2565,6 +2579,14 @@ app.post('/webhook/market-created', async (req, res) => {
     return res.json({ success: true, message: 'Manual resolution - not tracked for auto-resolve' });
   }
 
+  // Always re-detect resolution timing from the question text
+  // The API may send 'at_close' (DB default) even for monotonic markets
+  const detectedTiming = parser.detectResolutionTiming({
+    resolution: resolutionSource || 'manual',
+    targetHandle: targetHandle || null,
+    question
+  });
+
   const marketData = {
     question,
     endDate,
@@ -2572,7 +2594,7 @@ app.post('/webhook/market-created', async (req, res) => {
     threshold: threshold || null,
     targetHandle: targetHandle || null,
     targetToken: targetToken || null,
-    resolutionTiming: resolutionTiming || 'at_close',
+    resolutionTiming: detectedTiming,
     authorHandle: creatorAgent || proposerWallet || 'frontend',
     verificationUrl: verificationUrl || null,
     platform: platform || 'api',
@@ -2583,7 +2605,7 @@ app.post('/webhook/market-created', async (req, res) => {
   await savePendingResolution(marketId, marketData);
   scheduleMarketResolution(marketId, marketData);
 
-  console.log(`[Webhook] Market ${marketId} added to resolution queue (source: ${resolutionSource}, timing: ${resolutionTiming || 'at_close'}, platform: ${platform || 'api'})`);
+  console.log(`[Webhook] Market ${marketId} added to resolution queue (source: ${resolutionSource}, timing: ${detectedTiming}, platform: ${platform || 'api'})`);
 
   res.json({ success: true, message: `Market ${marketId} tracked for auto-resolution` });
 });

@@ -758,6 +758,7 @@ class ResolutionEngine {
   async resolveMoltbookPlatformStats(threshold, question) {
     try {
       console.log(`[Resolver] Fetching Moltbook platform agent count from moltbook.com`);
+      console.log(`[Resolver] Threshold from market: "${threshold}", question: "${question}"`);
 
       const response = await axios.get('https://www.moltbook.com/', {
         timeout: 10000,
@@ -768,12 +769,26 @@ class ResolutionEngine {
       const agentMatch = html.match(/(\d+(?:,\d+)?(?:\.\d+)?[mk]?)\s*agents?/i);
 
       if (!agentMatch) {
+        // Log a snippet of the HTML for debugging
+        console.log(`[Resolver] Could not find agent count in HTML. First 500 chars: ${html.slice(0, 500)}`);
         return { resolved: false, error: 'Could not extract agent count from Moltbook homepage' };
       }
 
       const rawCount = agentMatch[1];
       const actualValue = this.parseThreshold(rawCount) ?? parseFloat(rawCount.replace(/,/g, ''));
-      const thresholdNum = this.parseThreshold(threshold);
+      
+      // Try to parse threshold from provided value, or extract from question text as fallback
+      let thresholdNum = this.parseThreshold(threshold);
+      if (!thresholdNum && question) {
+        // Try to extract threshold from question: "2.5M agents", "2.5 million agents", etc.
+        const qMatch = question.match(/(\d+(?:\.\d+)?\s*(?:thousand|million|billion|mil|mm|[KkMmBb]))\s*(?:\w+)/i) ||
+                       question.match(/(\d+(?:\.\d+)?\s*[KkMmBb])\s*agents?/i) ||
+                       question.match(/(\d{1,3}(?:,\d{3})+)\s*agents?/i);
+        if (qMatch) {
+          thresholdNum = this.parseThreshold(qMatch[1]);
+          console.log(`[Resolver] Extracted threshold from question: "${qMatch[1]}" -> ${thresholdNum}`);
+        }
+      }
 
       if (!thresholdNum) {
         return { resolved: false, error: 'Could not parse threshold' };

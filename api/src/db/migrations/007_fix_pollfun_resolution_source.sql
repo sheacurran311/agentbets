@@ -25,3 +25,11 @@ WHERE resolution_source = 'pollfun'
 -- Any remaining 'pollfun' markets default to manual
 UPDATE markets SET resolution_source = 'manual'
 WHERE resolution_source = 'pollfun';
+
+-- Fix resolution_timing for Moltbook platform-level markets (monotonic agent count)
+-- These should resolve on_target, not at_close
+UPDATE markets SET resolution_timing = 'on_target'
+WHERE resolution_source = 'moltbook'
+  AND (question ~* '\d+\s*[mk]?\s*agents?' OR question ~* 'agents?\s*(on|registered|reach)?\s*moltbook')
+  AND question !~* '@\w+'
+  AND (resolution_timing IS NULL OR resolution_timing = 'at_close');
