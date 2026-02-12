@@ -1,11 +1,16 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { WalletProvider } from './WalletProvider.jsx'
 import LandingPage from './pages/LandingPage.jsx'
 import EmbedWidget from './pages/EmbedWidget.jsx'
 import PartnerPage from './pages/PartnerPage.jsx'
 import App from './App.jsx'
+
+function MarketRedirect() {
+  const { marketId } = useParams()
+  return <Navigate to={`/app?market=${marketId}`} replace />
+}
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -13,6 +18,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       <WalletProvider>
         <Routes>
           <Route path="/" element={<LandingPage />} />
+          <Route path="/markets/:marketId" element={<MarketRedirect />} />
           <Route path="/embed/:marketId" element={<EmbedWidget />} />
           <Route path="/partner" element={<PartnerPage />} />
           <Route path="/app" element={<App />} />

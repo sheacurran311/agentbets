@@ -670,16 +670,27 @@ class ResolutionEngine {
 
   /**
    * Resolve using Moltbook data
+   * Supports both:
+   * - Per-agent metrics (karma, followers) via Moltbook API when handle is present
+   * - Platform-level agent count via scraping https://www.moltbook.com/ when question is about total agents
    */
   async resolveMoltbook(handle, threshold, question) {
+    // Try to extract handle from question if not provided
     if (!handle) {
-      // Try to extract handle from question
       const match = question.match(/@(\w+)/);
       if (match) {
         handle = match[1];
-      } else {
-        return { resolved: false, error: 'No Moltbook handle specified' };
       }
+    }
+
+    // Platform-level: no handle and question is about Moltbook total agents (e.g. "Will Moltbook reach 2.5M agents?")
+    const isPlatformAgentQuestion = !handle && /moltbook.*\d+\s*agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|\d+\.?\d*\s*[mk]?\s*agents?\s*(?:on|at|registered)?\s*moltbook/i.test(question);
+    if (isPlatformAgentQuestion) {
+      return await this.resolveMoltbookPlatformStats(threshold, question);
+    }
+
+    if (!handle) {
+      return { resolved: false, error: 'No Moltbook handle specified' };
     }
 
     try {
@@ -737,6 +748,61 @@ class ResolutionEngine {
 
     } catch (error) {
       return { resolved: false, error: `Moltbook API error: ${error.message}` };
+    }
+  }
+
+  /**
+   * Resolve platform-level Moltbook agent count (e.g. "Will Moltbook reach 2.5M agents?")
+   * Scrapes https://www.moltbook.com/ to extract total agent count
+   */
+  async resolveMoltbookPlatformStats(threshold, question) {
+    try {
+      console.log(`[Resolver] Fetching Moltbook platform agent count from moltbook.com`);
+
+      const response = await axios.get('https://www.moltbook.com/', {
+        timeout: 10000,
+        headers: { 'User-Agent': 'AgentBets/1.0 (Resolution Service)' }
+      });
+
+      const html = response.data;
+      const agentMatch = html.match(/(\d+(?:,\d+)?(?:\.\d+)?[mk]?)\s*agents?/i);
+
+      if (!agentMatch) {
+        return { resolved: false, error: 'Could not extract agent count from Moltbook homepage' };
+      }
+
+      const rawCount = agentMatch[1];
+      const actualValue = this.parseThreshold(rawCount) ?? parseFloat(rawCount.replace(/,/g, ''));
+      const thresholdNum = this.parseThreshold(threshold);
+
+      if (!thresholdNum) {
+        return { resolved: false, error: 'Could not parse threshold' };
+      }
+
+      if (typeof actualValue !== 'number' || isNaN(actualValue)) {
+        return { resolved: false, error: `Could not parse agent count: ${rawCount}` };
+      }
+
+      const outcome = actualValue >= thresholdNum ? 'YES' : 'NO';
+
+      console.log(`[Resolver] Moltbook platform: ${this.formatNumber(actualValue)} agents, threshold = ${this.formatNumber(thresholdNum)}, outcome = ${outcome}`);
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: `${this.formatNumber(actualValue)} agents`,
+        threshold: this.formatNumber(thresholdNum),
+        source: 'Moltbook (platform stats)',
+        verificationUrl: 'https://www.moltbook.com/',
+        data: {
+          url: 'https://www.moltbook.com/',
+          agentCount: actualValue,
+          rawCount,
+          timestamp: new Date().toISOString()
+        }
+      };
+    } catch (error) {
+      return { resolved: false, error: `Moltbook platform stats error: ${error.message}` };
     }
   }
 

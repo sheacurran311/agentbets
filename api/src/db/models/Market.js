@@ -18,9 +18,9 @@ const Market = {
         id, question, description, category, status, resolution_source,
         end_date, creator_wallet, creator_agent, threshold, token_id,
         token_symbol, verification_url, verification_method, bet_pda,
-        on_chain, tx_signature, currency, tags, proposer_wallet
+        on_chain, tx_signature, currency, tags, proposer_wallet, resolution_timing
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
       ) RETURNING *
     `, [
       id,
@@ -42,7 +42,8 @@ const Market = {
       data.txSignature || data.tx_signature || null,
       data.currency || 'SOL',
       data.tags || [],
-      data.proposerWallet || data.proposer_wallet || null
+      data.proposerWallet || data.proposer_wallet || null,
+      data.resolutionTiming || data.resolution_timing || 'at_close'
     ]);
     return this.toJS(result.rows[0]);
   },
@@ -186,7 +187,8 @@ const Market = {
       settledAt: 'settled_at',
       proposedResolution: 'proposed_resolution',
       resolutionEvidence: 'resolution_evidence',
-      tags: 'tags'
+      tags: 'tags',
+      resolutionTiming: 'resolution_timing'
     };
 
     for (const [camelKey, snakeKey] of Object.entries(fieldMap)) {
@@ -310,6 +312,7 @@ const Market = {
       resolutionEvidence: row.resolution_evidence,
       tags: row.tags || [],
       proposerWallet: row.proposer_wallet,
+      resolutionTiming: row.resolution_timing || 'at_close',
       // Computed fields for compatibility
       outcomes: ['YES', 'NO']
     };

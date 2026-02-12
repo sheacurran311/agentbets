@@ -448,6 +448,9 @@ class BetParser {
       // Auto-detect tags for platform integration filtering
       result.autoTags = this.detectTags(result.question, result.category, result.resolution);
 
+      // Resolution timing: on_target (resolve when threshold met) vs at_close (resolve only at end date)
+      result.resolutionTiming = this.detectResolutionTiming(result);
+
       // NEW: Extract initial bet amount (for create + bet in one tweet)
       // Formats: "betting 10 USDC YES", "wager: 5 USDC NO", "10 USDC on YES"
       const betAmountMatch = text.match(/(?:betting|wager|stake|put)\s*:?\s*(\d+(?:\.\d+)?)\s*(usdc|sol|eth|btc|bonk|usdt)/i) ||
@@ -508,6 +511,25 @@ class BetParser {
     }
 
     return 'manual';
+  }
+
+  /**
+   * Detect resolution timing: on_target (monotonic, resolve when threshold met) vs at_close (variable, resolve at end date)
+   * on_target: Moltbook platform agent count - once reached, stays met
+   * at_close: X followers, token prices, per-agent karma - can fluctuate
+   */
+  detectResolutionTiming(betParams) {
+    const { resolution, targetHandle, question } = betParams;
+    const lower = (question || '').toLowerCase();
+
+    if (resolution === 'moltbook' && !targetHandle) {
+      // Platform-level Moltbook agent count (e.g. "Will Moltbook reach 2.5M agents?")
+      if (/\d+\s*(?:\.\d+)?\s*[mk]?\s*agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|moltbook.*\d+\s*agents?/i.test(lower)) {
+        return 'on_target';
+      }
+    }
+
+    return 'at_close';
   }
 
   /**

@@ -14,8 +14,8 @@ const Resolution = {
     const result = await query(`
       INSERT INTO pending_resolutions (
         market_id, tweet_id, author_handle, question, end_date,
-        resolution_source, threshold, target_handle, target_token
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        resolution_source, threshold, target_handle, target_token, resolution_timing
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       ON CONFLICT (market_id) DO UPDATE SET
         tweet_id = EXCLUDED.tweet_id,
         author_handle = EXCLUDED.author_handle,
@@ -24,7 +24,8 @@ const Resolution = {
         resolution_source = EXCLUDED.resolution_source,
         threshold = EXCLUDED.threshold,
         target_handle = EXCLUDED.target_handle,
-        target_token = EXCLUDED.target_token
+        target_token = EXCLUDED.target_token,
+        resolution_timing = EXCLUDED.resolution_timing
       RETURNING *
     `, [
       data.marketId || data.market_id,
@@ -35,7 +36,8 @@ const Resolution = {
       data.resolution || data.resolution_source || 'manual',
       data.threshold || null,
       data.targetHandle || data.target_handle || null,
-      data.targetToken || data.target_token || null
+      data.targetToken || data.target_token || null,
+      data.resolutionTiming || data.resolution_timing || 'at_close'
     ]);
     return this.toJS(result.rows[0]);
   },
@@ -147,7 +149,8 @@ const Resolution = {
       proposalStatus: row.proposal_status,
       proposedAt: row.proposed_at?.toISOString(),
       proposedResolution: row.proposed_resolution,
-      createdAt: row.created_at?.toISOString()
+      createdAt: row.created_at?.toISOString(),
+      resolutionTiming: row.resolution_timing || 'at_close'
     };
   }
 };

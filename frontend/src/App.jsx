@@ -2410,6 +2410,11 @@ function App() {
                             {Icons2.check} {market.threshold}
                           </span>
                         )}
+                        {market.resolutionTiming === 'on_target' && (
+                          <span style={{...styles.thresholdBadge, background: `${COLORS.success}15`, color: COLORS.success}} title="Resolves as soon as target is reached (monotonic metric)">
+                            Early resolve
+                          </span>
+                        )}
                         {market.verificationUrl && (
                           <a
                             href={market.verificationUrl}

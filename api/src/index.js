@@ -101,6 +101,44 @@ const sanitizeWalletAddress = (wallet) => {
  * Auto-detect tags from market question and metadata
  * Used for platform integration filtering (e.g., Moltbook, Pump.fun, etc.)
  */
+/**
+ * Auto-detect the resolution source from question text
+ * Mirrors bot/src/parser.js detectResolutionSource()
+ * Used for frontend-created markets so they get a proper resolution source
+ * instead of hardcoded 'pollfun' which the bot's resolver rejects
+ */
+function detectResolutionSource(question) {
+  if (!question) return 'manual';
+  const lower = question.toLowerCase();
+
+  if (/\$[A-Z]+|mcap|market cap|price/i.test(question)) return 'dexscreener';
+  if (/followers|following|likes|retweets|impressions/i.test(lower)) return 'x-api';
+  if (/karma|moltbook|molt/i.test(lower)) return 'moltbook';
+  if (/commit|release|deploy|ship|github/i.test(lower)) return 'github';
+  if (/balance|wallet|sol|transaction/i.test(lower)) return 'solana';
+
+  return 'manual';
+}
+
+/**
+ * Auto-detect resolution timing from question + resolution source
+ * on_target: monotonic metrics (Moltbook platform agent count) - resolve when threshold met
+ * at_close: variable metrics (X followers, token price) - resolve only at end date
+ */
+function detectResolutionTiming(question, resolutionSource, targetHandle) {
+  if (!question) return 'at_close';
+  const lower = question.toLowerCase();
+
+  // Moltbook platform agent count (no specific handle) -> on_target
+  if (resolutionSource === 'moltbook' && !targetHandle) {
+    if (/\d+\s*(?:\.\d+)?\s*[mk]?\s*agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|moltbook.*\d+\s*agents?/i.test(lower)) {
+      return 'on_target';
+    }
+  }
+
+  return 'at_close';
+}
+
 function autoDetectTags(question, category, resolutionSource) {
   const tags = [];
   const lower = (question || '').toLowerCase();
@@ -696,7 +734,8 @@ app.post('/api/markets', async (req, res) => {
       resolutionSource,
       endDate,
       creatorWallet,
-      creatorAgent
+      creatorAgent,
+      resolutionTiming
     } = req.body;
 
     if (!question || !endDate) {
@@ -759,6 +798,7 @@ app.post('/api/markets', async (req, res) => {
       tokenId, // CoinGecko token ID for price history (if token market)
       tokenSymbol: tokenSymbol ? tokenSymbol.toUpperCase() : null, // Token symbol
       tags: mergedTags, // Auto-detected + user-provided tags for platform filtering
+      resolutionTiming: (resolutionTiming === 'on_target' || resolutionTiming === 'at_close') ? resolutionTiming : 'at_close',
 
       // Pool tracking
       yesPool: 0, // Total SOL bet on YES (in lamports)
@@ -781,6 +821,37 @@ app.post('/api/markets', async (req, res) => {
       royalties.recordMarketCreation(creatorAgent, marketId);
       // Award points for market creation
       await agentFunding.awardMarketCreationPoints(creatorAgent, marketId);
+    }
+
+    // Notify bot to track this market for auto-resolution
+    if (process.env.BOT_WEBHOOK_URL && finalResolutionSource !== 'manual') {
+      const handleMatch = question.match(/@(\w+)\s+(?:reach|hit|get|followers)/i) ||
+                          question.match(/will\s+@(\w+)/i);
+      const detectedTargetHandle = handleMatch ? handleMatch[1] : null;
+      const detectedTargetToken = tokenSymbol || null;
+      const detectedTiming = detectResolutionTiming(question, finalResolutionSource, detectedTargetHandle);
+
+      try {
+        await axios.post(`${process.env.BOT_WEBHOOK_URL}/webhook/market-created`, {
+          marketId,
+          question,
+          endDate,
+          resolutionSource: finalResolutionSource,
+          threshold: req.body.threshold || null,
+          targetHandle: detectedTargetHandle,
+          targetToken: detectedTargetToken,
+          resolutionTiming: detectedTiming,
+          creatorAgent: creatorAgent || null,
+          verificationUrl,
+          platform: 'api'
+        }, {
+          headers: { 'x-api-key': process.env.AGENTBETS_API_KEY || '' },
+          timeout: 5000
+        });
+        console.log(`[Bot Webhook] Notified bot of new off-chain market ${marketId}`);
+      } catch (webhookErr) {
+        console.warn(`[Bot Webhook] Failed to notify bot of market ${marketId}: ${webhookErr.message}`);
+      }
     }
 
     // Estimate potential royalties
@@ -2977,7 +3048,8 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
       threshold,
       tags,
       creatorAgent, // NEW: track who proposed it
-      proposerWallet // NEW: proposer's wallet (for UI display, NOT for resolution)
+      proposerWallet, // NEW: proposer's wallet (for UI display, NOT for resolution)
+      resolutionTiming // on_target (early) or at_close (default)
     } = req.body;
 
     // SECURITY: Sanitize all inputs to prevent XSS and injection attacks
@@ -2990,6 +3062,8 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
     const sanitizedThreshold = threshold ? sanitizeInput(String(threshold)) : null;
     const sanitizedCreatorAgent = creatorAgent ? sanitizeInput(creatorAgent) : null;
     const sanitizedProposerWallet = sanitizeWalletAddress(proposerWallet);
+    const sanitizedResolutionTiming = (resolutionTiming === 'on_target' || resolutionTiming === 'at_close')
+      ? resolutionTiming : 'at_close';
     const userTags = Array.isArray(tags) ? tags.map(t => sanitizeInput(String(t))).filter(Boolean) : [];
     const detectedOnchainTags = autoDetectTags(sanitizedQuestion, sanitizedCategory, 'pollfun');
     const sanitizedTags = [...new Set([...userTags, ...detectedOnchainTags])].slice(0, 10);
@@ -3097,6 +3171,23 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
     const marketId = uuidv4();
     const createdAt = new Date().toISOString();
 
+    // Auto-detect actual resolution source from question (not 'pollfun')
+    // The bot resolver needs a real source (coingecko, x-api, moltbook, etc.)
+    // to know how to check the market outcome at resolution time
+    const detectedResolutionSource = detectResolutionSource(sanitizedQuestion);
+
+    // Extract target handle and token from question for resolution
+    const handleMatch = sanitizedQuestion.match(/@(\w+)\s+(?:reach|hit|get|followers)/i) ||
+                        sanitizedQuestion.match(/will\s+@(\w+)/i);
+    const detectedTargetHandle = handleMatch ? handleMatch[1] : null;
+    const tokenMatch = sanitizedQuestion.match(/\$([A-Z]+)/);
+    const detectedTargetToken = tokenMatch ? tokenMatch[1] : null;
+
+    // Auto-detect resolution timing (on_target vs at_close)
+    const detectedResolutionTiming = sanitizedResolutionTiming !== 'at_close'
+      ? sanitizedResolutionTiming
+      : detectResolutionTiming(sanitizedQuestion, detectedResolutionSource, detectedTargetHandle);
+
     const market = {
       id: marketId,
       betPda: result.betPda, // On-chain PDA
@@ -3104,7 +3195,7 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
       description: sanitizedDescription,
       category: sanitizedCategory,
       outcomes: ['YES', 'NO'],
-      resolutionSource: 'pollfun', // On-chain resolution
+      resolutionSource: detectedResolutionSource, // Auto-detected from question (was hardcoded 'pollfun')
       endDate: sanitizedEndDate,
       createdAt: createdAt,
       creatorWallet: result.creator, // Bot's wallet (on-chain creator)
@@ -3128,6 +3219,7 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
       onChain: true,
       txSignature: result.txSignature,
       currency: 'USDC',
+      resolutionTiming: detectedResolutionTiming,
       // SECURITY NOTE: Bot is on-chain creator, can resolve
       securityNote: 'Bot-created market. Only bot can resolve (isCreatorResolver).'
     };
@@ -3138,6 +3230,35 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
     if (sanitizedCreatorAgent) {
       royalties.recordMarketCreation(sanitizedCreatorAgent, marketId);
       await agentFunding.awardMarketCreationPoints(sanitizedCreatorAgent, marketId);
+    }
+
+    // Notify bot to track this market for auto-resolution
+    // Without this, frontend-created markets would never enter the bot's resolution pipeline
+    if (process.env.BOT_WEBHOOK_URL) {
+      try {
+        await axios.post(`${process.env.BOT_WEBHOOK_URL}/webhook/market-created`, {
+          marketId,
+          question: sanitizedQuestion,
+          endDate: sanitizedEndDate,
+          resolutionSource: detectedResolutionSource,
+          threshold: sanitizedThreshold,
+          targetHandle: detectedTargetHandle,
+          targetToken: detectedTargetToken,
+          resolutionTiming: detectedResolutionTiming,
+          creatorAgent: sanitizedCreatorAgent,
+          proposerWallet: sanitizedProposerWallet,
+          verificationUrl: sanitizedVerificationUrl,
+          platform: 'frontend'
+        }, {
+          headers: { 'x-api-key': process.env.AGENTBETS_API_KEY || '' },
+          timeout: 5000
+        });
+        console.log(`[Bot Webhook] Notified bot of new market ${marketId}`);
+      } catch (webhookErr) {
+        // Non-blocking: market is still created even if bot notification fails
+        // The bot's startup sync will catch it on next restart
+        console.warn(`[Bot Webhook] Failed to notify bot of market ${marketId}: ${webhookErr.message}`);
+      }
     }
 
     res.status(201).json({

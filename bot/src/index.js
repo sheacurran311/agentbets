@@ -811,6 +811,81 @@ function rescheduleAllMarkets() {
 }
 
 /**
+ * Sync active markets from the API that the bot isn't tracking yet
+ * This is the safety net: if the webhook was missed (bot was down, network issue),
+ * the bot will discover and start tracking untracked markets on startup
+ */
+async function syncMarketsFromAPI() {
+  try {
+    console.log(`[Sync] Fetching active markets from API...`);
+    const result = await agentbets.getMarkets({ status: 'active' });
+    const apiMarkets = result.markets || [];
+
+    if (apiMarkets.length === 0) {
+      console.log(`[Sync] No active markets found on API`);
+      return;
+    }
+
+    let synced = 0;
+    for (const market of apiMarkets) {
+      // Skip if already tracked
+      if (pendingResolutions.has(market.id)) continue;
+
+      // Detect resolution source if it's 'pollfun' or missing (legacy frontend markets)
+      let resolutionSource = market.resolutionSource;
+      if (!resolutionSource || resolutionSource === 'pollfun' || resolutionSource === 'manual') {
+        resolutionSource = parser.detectResolutionSource(market.question);
+      }
+
+      // Skip manual-only markets (no auto-resolution possible)
+      if (resolutionSource === 'manual') continue;
+
+      // Extract target handle and token from question
+      const handleMatch = market.question.match(/@(\w+)\s+(?:reach|hit|get|followers)/i) ||
+                          market.question.match(/will\s+@(\w+)/i);
+      const targetHandle = handleMatch ? handleMatch[1] : null;
+      const tokenMatch = market.question.match(/\$([A-Z]+)/);
+      const targetToken = tokenMatch ? tokenMatch[1] : null;
+
+      // Detect resolution timing
+      const resolutionTiming = market.resolutionTiming ||
+        parser.detectResolutionTiming({
+          resolution: resolutionSource,
+          targetHandle,
+          question: market.question
+        });
+
+      const marketData = {
+        question: market.question,
+        endDate: market.endDate,
+        resolution: resolutionSource,
+        threshold: market.threshold || null,
+        targetHandle,
+        targetToken,
+        resolutionTiming,
+        authorHandle: market.creatorAgent || market.proposerWallet || 'frontend',
+        verificationUrl: market.verificationUrl || null,
+        platform: 'api-sync',
+        createdAt: market.createdAt || new Date().toISOString()
+      };
+
+      pendingResolutions.set(market.id, marketData);
+      await savePendingResolution(market.id, marketData);
+      scheduleMarketResolution(market.id, marketData);
+      synced++;
+    }
+
+    if (synced > 0) {
+      console.log(`[Sync] Added ${synced} untracked markets to resolution queue`);
+    } else {
+      console.log(`[Sync] All ${apiMarkets.length} active markets already tracked`);
+    }
+  } catch (error) {
+    console.error(`[Sync] Failed to sync markets from API: ${error.message}`);
+  }
+}
+
+/**
  * Announce market resolution proposal (not final yet)
  */
 async function announceProposal(marketId, data, result) {
@@ -1350,6 +1425,7 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
         verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
         creatorAgent: `@${authorHandle}`,
         tags: allTags,
+        resolutionTiming: betParams.resolutionTiming || 'at_close',
         // Include initial bet info for the reply
         requestedInitialBet: {
           amount: betParams.initialBet,
@@ -1372,7 +1448,8 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
         threshold: betParams.threshold,
         verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
         creatorAgent: `@${authorHandle}`,
-        tags: allTags
+        tags: allTags,
+        resolutionTiming: betParams.resolutionTiming || 'at_close'
       });
     }
 
@@ -1427,6 +1504,7 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
       threshold: betParams.threshold,
       targetHandle: betParams.targetHandle,
       targetToken: betParams.targetToken,
+      resolutionTiming: betParams.resolutionTiming || 'at_close',
       createdAt: new Date().toISOString()
     };
     pendingResolutions.set(market.market.id, marketData);
@@ -2191,7 +2269,8 @@ async function createMarketFromMoltbook(request, betParams) {
       threshold: betParams.threshold,
       verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
       creatorAgent: request.author,
-      tags: moltAllTags
+      tags: moltAllTags,
+      resolutionTiming: betParams.resolutionTiming || 'at_close'
     });
 
     // Handle duplicate market (409) - treat as success
@@ -2239,6 +2318,7 @@ async function createMarketFromMoltbook(request, betParams) {
         threshold: betParams.threshold,
         targetHandle: betParams.targetHandle,
         targetToken: betParams.targetToken,
+        resolutionTiming: betParams.resolutionTiming || 'at_close',
         createdAt: new Date().toISOString(),
         platform: 'moltbook'
       };
@@ -2330,44 +2410,51 @@ async function checkMentions() {
 }
 
 /**
- * Check and resolve ended markets (fallback for missed scheduled jobs)
- * Primary resolution happens via node-schedule at exact end times
- * This runs every minute as a safety net
+ * Check and resolve markets
+ * - at_close: only when endDate has passed (scheduled job at end time, or fallback)
+ * - on_target: can resolve as soon as threshold is met, before endDate (periodic check)
  */
 async function checkResolutions() {
-  console.log(`[Resolver] Fallback check for markets to resolve...`);
+  console.log(`[Resolver] Checking markets to resolve...`);
 
   const now = new Date();
   let resolvedCount = 0;
 
   for (const [marketId, data] of pendingResolutions) {
     const endDate = new Date(data.endDate);
-
-    // Skip if not ended yet
-    if (now < endDate) {
-      continue;
-    }
+    const isOnTarget = data.resolutionTiming === 'on_target';
+    const hasEnded = now >= endDate;
 
     // Skip if we've already proposed a resolution
     if (data.proposalStatus === 'proposed') {
       continue;
     }
 
-    // Check if there's already a scheduled job for this market
-    // If so, the scheduled job should handle it
-    if (scheduledJobs.has(marketId)) {
+    // at_close: only resolve when market has ended
+    if (!isOnTarget && !hasEnded) {
+      continue;
+    }
+
+    // on_target: attempt resolution (target may be met early)
+    // at_close + hasEnded: attempt resolution
+    // For at_close that has ended, skip if there's a scheduled job (fallback only)
+    if (!isOnTarget && scheduledJobs.has(marketId)) {
       console.log(`[Resolver] Market ${marketId} has scheduled job, skipping fallback`);
       continue;
     }
 
-    // No scheduled job and market has ended - resolve now
-    console.log(`[Resolver] Market ${marketId} missed scheduled resolution, resolving via fallback...`);
+    if (isOnTarget && !hasEnded) {
+      console.log(`[Resolver] Market ${marketId} (on_target) - checking if target met early...`);
+    } else if (hasEnded) {
+      console.log(`[Resolver] Market ${marketId} ended, resolving via fallback...`);
+    }
+
     await resolveMarket(marketId, data);
     resolvedCount++;
   }
 
   if (resolvedCount > 0) {
-    console.log(`[Resolver] Fallback resolved ${resolvedCount} markets`);
+    console.log(`[Resolver] Resolved ${resolvedCount} markets`);
   }
 }
 
@@ -2438,6 +2525,68 @@ function authenticateWebhook(req, res) {
 
   return true;
 }
+
+/**
+ * Webhook endpoint for new market creation
+ * Called by API server when ANY market is created (frontend, API, or bot-created)
+ * Ensures the bot tracks all markets for auto-resolution, regardless of where they were created
+ */
+app.post('/webhook/market-created', async (req, res) => {
+  if (!authenticateWebhook(req, res)) return;
+
+  const {
+    marketId,
+    question,
+    endDate,
+    resolutionSource,
+    threshold,
+    targetHandle,
+    targetToken,
+    resolutionTiming,
+    creatorAgent,
+    proposerWallet,
+    verificationUrl,
+    platform
+  } = req.body;
+
+  if (!marketId || !question || !endDate) {
+    return res.status(400).json({ success: false, error: 'marketId, question, and endDate are required' });
+  }
+
+  // Check if we already track this market (e.g. bot-created markets are already in pendingResolutions)
+  if (pendingResolutions.has(marketId)) {
+    console.log(`[Webhook] Market ${marketId} already tracked, skipping`);
+    return res.json({ success: true, message: 'Already tracked' });
+  }
+
+  // Skip markets with manual resolution (no auto-resolution possible)
+  if (resolutionSource === 'manual') {
+    console.log(`[Webhook] Market ${marketId} uses manual resolution, skipping auto-track`);
+    return res.json({ success: true, message: 'Manual resolution - not tracked for auto-resolve' });
+  }
+
+  const marketData = {
+    question,
+    endDate,
+    resolution: resolutionSource || 'manual',
+    threshold: threshold || null,
+    targetHandle: targetHandle || null,
+    targetToken: targetToken || null,
+    resolutionTiming: resolutionTiming || 'at_close',
+    authorHandle: creatorAgent || proposerWallet || 'frontend',
+    verificationUrl: verificationUrl || null,
+    platform: platform || 'api',
+    createdAt: new Date().toISOString()
+  };
+
+  pendingResolutions.set(marketId, marketData);
+  await savePendingResolution(marketId, marketData);
+  scheduleMarketResolution(marketId, marketData);
+
+  console.log(`[Webhook] Market ${marketId} added to resolution queue (source: ${resolutionSource}, timing: ${resolutionTiming || 'at_close'}, platform: ${platform || 'api'})`);
+
+  res.json({ success: true, message: `Market ${marketId} tracked for auto-resolution` });
+});
 
 /**
  * Webhook endpoint for admin confirmations
@@ -2554,6 +2703,10 @@ async function startBot() {
       // Reschedule all pending market resolutions from persistence
       rescheduleAllMarkets();
       console.log(`[Bot] Scheduled ${scheduledJobs.size} market resolutions at exact end times`);
+
+      // Sync any active markets from the API that the bot isn't tracking yet
+      // This catches frontend-created markets and any missed webhooks
+      syncMarketsFromAPI().catch(err => console.warn(`[Sync] Startup sync error: ${err.message}`));
 
       // Initialize Moltbook if configured (async, fire-and-forget from listen callback)
       if (moltbook.enabled) {

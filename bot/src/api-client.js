@@ -62,6 +62,7 @@ class AgentBetsAPI {
       if (params.tags) body.tags = params.tags;
       if (params.expectedUserCount) body.expectedUserCount = params.expectedUserCount;
       if (params.proposerWallet) body.proposerWallet = params.proposerWallet;
+      if (params.resolutionTiming) body.resolutionTiming = params.resolutionTiming;
 
       console.log(`[API] Creating market: "${params.question?.slice(0, 60)}..." → ${this.baseUrl}/onchain/markets`);
 

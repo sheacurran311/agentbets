@@ -185,6 +185,15 @@ The bot auto-detects resolution sources from your question:
 
 > **Important:** For auto-resolved markets, include a measurable **threshold** (a number) in your question so the bot knows what YES/NO means. The bot extracts the threshold automatically from your question — you don't need a separate `threshold:` field if the number is in the question itself.
 
+### Resolution Timing: When Can Markets Resolve?
+
+| Type | When Resolved | Use Case |
+|------|---------------|----------|
+| **On Target** | As soon as the threshold is reached | Monotonic metrics that only go up (e.g. total Moltbook agents, cumulative registrations). Once the number is hit, it won't go down. |
+| **At Close** | Only at the market end date | Variable metrics that can fluctuate (e.g. Twitter followers, token prices). The number may reach the target during the market but drop before close (unfollows, bot purges, price dips). |
+
+The bot auto-detects resolution timing: Moltbook platform agent count questions use **on target**; X followers, token prices, and per-agent stats use **at close**.
+
 **Accepted threshold formats in your question:**
 
 | Format | Example |
