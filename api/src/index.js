@@ -18,7 +18,7 @@ const { Connection, PublicKey, Keypair, SystemProgram, Transaction, LAMPORTS_PER
 // Database
 const db = require('./db');
 const dbCompat = require('./db/compat');
-const { Market, Bet, Agent, Royalty, Points, Referral, OddsHistory, Position, PlatformKey } = require('./db/models');
+const { Market, Bet, Agent, Royalty, Points, Referral, Resolution, OddsHistory, Position, PlatformKey } = require('./db/models');
 
 // Use compatibility layer for storage (works with both DB and in-memory)
 const { markets, bets, positions, oddsHistory, setDbConnected, isDbConnected } = dbCompat;
@@ -573,6 +573,26 @@ async function syncMarketFromChain(marketId) {
       delete market.settlementError;
       changed = true;
       console.log(`[Sync] Fixed stuck market ${marketId}: on-chain resolved as ${resolution}, DB updated`);
+
+      // Clean up pending_resolutions row since market is now resolved
+      if (isDbConnected()) {
+        try {
+          const deleted = await Resolution.delete(marketId);
+          if (deleted) console.log(`[Sync] Removed market ${marketId} from pending_resolutions`);
+        } catch (err) {
+          console.warn(`[Sync] Failed to clean up pending_resolutions for ${marketId}:`, err.message);
+        }
+      }
+    }
+
+    // Also clean up pending_resolutions for any market already marked resolved
+    if (market.status === 'resolved' && isDbConnected()) {
+      try {
+        const deleted = await Resolution.delete(marketId);
+        if (deleted) console.log(`[Sync] Cleaned up stale pending_resolutions row for resolved market ${marketId}`);
+      } catch (err) {
+        // Ignore — row may not exist
+      }
     }
 
     if (changed) {
@@ -626,8 +646,45 @@ async function syncAllMarketsFromChain() {
     }
 
     console.log(`[Sync] Complete: ${synced}/${onChainMarkets.length} synced, ${changed} updated`);
+
+    // After syncing, clean up stale pending_resolutions for any resolved markets
+    await cleanupStalePendingResolutions();
   } catch (error) {
     console.error('[Sync] Failed to sync markets from chain:', error.message);
+  }
+}
+
+/**
+ * Remove pending_resolutions rows for markets that are already resolved.
+ * Called after chain sync to clean up stale entries that the bot never cleared
+ * (e.g., when a market was resolved directly on-chain without the bot flow).
+ */
+async function cleanupStalePendingResolutions() {
+  if (!isDbConnected()) return;
+  try {
+    // Find all pending_resolutions entries
+    const pendingRows = await db.query('SELECT market_id FROM pending_resolutions');
+    if (!pendingRows.rows || pendingRows.rows.length === 0) return;
+
+    let cleaned = 0;
+    for (const row of pendingRows.rows) {
+      const market = await markets.get(row.market_id);
+      // Remove if market is resolved, closed, or doesn't exist anymore
+      if (!market || market.status === 'resolved' || market.status === 'closed' || market.status === 'cancelled') {
+        try {
+          await Resolution.delete(row.market_id);
+          cleaned++;
+          console.log(`[Cleanup] Removed stale pending_resolutions row for ${market ? market.status : 'missing'} market ${row.market_id}`);
+        } catch (err) {
+          // ignore individual failures
+        }
+      }
+    }
+    if (cleaned > 0) {
+      console.log(`[Cleanup] Removed ${cleaned} stale pending_resolutions entries`);
+    }
+  } catch (error) {
+    console.warn('[Cleanup] Failed to clean up pending_resolutions:', error.message);
   }
 }
 
@@ -2269,6 +2326,16 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
     }
     delete market._settlementTxSignatures;
 
+    // Clean up pending_resolutions row now that market is confirmed
+    if (isDbConnected()) {
+      try {
+        const deleted = await Resolution.delete(market.id);
+        if (deleted) console.log(`[Resolution] Removed market ${market.id} from pending_resolutions`);
+      } catch (err) {
+        console.warn(`[Resolution] Failed to clean up pending_resolutions:`, err.message);
+      }
+    }
+
     console.log(`[Resolution] Market ${market.id} CONFIRMED: ${finalOutcome} by admin`);
 
     // Notify bot via webhook to announce final resolution
@@ -2589,6 +2656,16 @@ app.post('/api/markets/:id/force-sync-resolution', adminLimiter, requireAdminWal
     delete market.settlementError;
 
     await markets.set(market.id, market);
+
+    // Clean up pending_resolutions row since market is now resolved
+    if (isDbConnected()) {
+      try {
+        const deleted = await Resolution.delete(market.id);
+        if (deleted) console.log(`[Resolution] Removed market ${market.id} from pending_resolutions`);
+      } catch (err) {
+        console.warn(`[Resolution] Failed to clean up pending_resolutions:`, err.message);
+      }
+    }
 
     // Fees are collected at wager time — no settlement-time royalties to compute
     console.log(`[Resolution] Force-synced market ${market.id} from chain: ${resolution}`);

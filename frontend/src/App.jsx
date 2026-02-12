@@ -1614,11 +1614,13 @@ function App() {
       // Fetch resolved markets that might be stuck on-chain
       const res = await fetch(`${API_BASE}/markets?status=resolved&limit=20`)
       const data = await res.json()
-      // Filter to on-chain markets that might need retry
+      // Filter to on-chain markets that actually need retry:
+      // Must have betPda, be resolved, and NOT fully settled
       const onChainMarkets = (data.markets || []).filter(m => 
         m.betPda && 
         m.status === 'resolved' && 
-        (!m.onChainResolutionTx || m.onChainResolutionTx === 'already-resolved-on-chain' || m.onChainError)
+        m.settlementStatus !== 'settled' &&
+        (!m.onChainResolutionTx || m.onChainError)
       )
       setStuckMarkets(onChainMarkets)
     } catch (err) {
