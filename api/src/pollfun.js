@@ -591,13 +591,40 @@ class PollFunService {
 
       const outcome = winningOutcome === 'YES' ? Outcome.For : Outcome.Against;
 
-      // First initiate vote phase
-      const initTx = await this.sdk.initiateVoteV2({
-        bet: new PublicKey(betPda),
-        signers: [creator],
-        payerOverride: creator.publicKey
-      });
-      console.log('[PollFun] Vote phase initiated:', initTx);
+      // Check current market status to handle partial resolution (idempotency)
+      let initTx = null;
+      let marketStatus = null;
+      try {
+        const marketData = await this.getMarketData(betPda);
+        marketStatus = marketData.success ? marketData.status : null;
+        console.log(`[PollFun] Current market status: ${marketStatus}`);
+        
+        // If already fully resolved, no work needed
+        if (marketStatus === 'Resolved') {
+          console.log('[PollFun] Market already resolved on-chain');
+          return {
+            success: true,
+            betPda,
+            winningOutcome,
+            alreadyResolved: true,
+            resolvedOutcome: marketData.resolvedOutcome
+          };
+        }
+      } catch (statusErr) {
+        console.log(`[PollFun] Could not check market status: ${statusErr.message}`);
+      }
+
+      // Only initiate vote phase if not already in Resolving state
+      if (marketStatus !== 'Resolving') {
+        initTx = await this.sdk.initiateVoteV2({
+          bet: new PublicKey(betPda),
+          signers: [creator],
+          payerOverride: creator.publicKey
+        });
+        console.log('[PollFun] Vote phase initiated:', initTx);
+      } else {
+        console.log('[PollFun] Vote phase already initiated, skipping initiateVoteV2');
+      }
 
       // Then place creator's vote (resolves immediately since isCreatorResolver=true)
       const voteTx = await this.sdk.placeVoteV2({
