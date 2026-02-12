@@ -2673,15 +2673,15 @@ app.post('/webhook/resolution-confirmed', async (req, res) => {
   await announceResolution(marketId, trackedData, result);
 
   // Remove from pending and cancel any scheduled job
-  pendingResolutions.delete(marketId);
-  savePendingResolutions();
+  // Use deletePendingResolution to properly remove from BOTH in-memory Map AND database
+  await deletePendingResolution(marketId);
   
   if (scheduledJobs.has(marketId)) {
     scheduledJobs.get(marketId).cancel();
     scheduledJobs.delete(marketId);
   }
 
-  console.log(`[Webhook] Market ${marketId} final resolution announced`);
+  console.log(`[Webhook] Market ${marketId} final resolution announced and removed from pending_resolutions`);
 
   res.json({ success: true, message: 'Resolution announced' });
 });
