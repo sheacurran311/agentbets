@@ -1416,7 +1416,30 @@ function generateAdminChallenge(action, marketId) {
   return `AgentBets Admin Action: ${action} on market ${marketId} at ${timestamp} nonce:${nonce}`;
 }
 
-// Middleware to check if wallet is admin with signature verification
+// Lightweight admin check — verifies connected wallet is the admin
+// Used for actions where the server signs on-chain transactions (not the admin's wallet)
+function requireAdminWallet(req, res, next) {
+  const { adminWallet } = req.body;
+
+  if (!adminWallet) {
+    return res.status(401).json({
+      error: 'Admin wallet required',
+      message: 'You must provide adminWallet in request body'
+    });
+  }
+
+  if (adminWallet !== ADMIN_WALLET) {
+    return res.status(403).json({
+      error: 'Unauthorized',
+      message: 'Only the platform admin can perform this action'
+    });
+  }
+
+  next();
+}
+
+// Full admin check with signature verification
+// Used for sensitive actions like creating/managing API keys
 function requireAdmin(req, res, next) {
   const { adminWallet, signature, message } = req.body;
 
@@ -2019,7 +2042,7 @@ app.put('/api/markets/:id/propose-resolution', async (req, res) => {
  *
  * This FINALIZES the market and triggers settlement
  */
-app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdmin, async (req, res) => {
+app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet, async (req, res) => {
   try {
     const { finalOutcome, adminNotes, adminWallet } = req.body;
     const market = await markets.get(req.params.id);
@@ -2184,7 +2207,7 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdmin, asyn
  *
  * Use this if you disagree with the bot's proposed resolution
  */
-app.post('/api/markets/:id/override-resolution', adminLimiter, requireAdmin, async (req, res) => {
+app.post('/api/markets/:id/override-resolution', adminLimiter, requireAdminWallet, async (req, res) => {
   try {
     const { overrideOutcome, reason, adminWallet } = req.body;
     const market = await markets.get(req.params.id);
