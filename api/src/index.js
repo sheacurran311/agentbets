@@ -2075,19 +2075,35 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
       console.log(`[Resolution] Resolving on-chain market: ${market.betPda}`);
 
       try {
-        const onChainResult = await pollFunService.resolveMarket({
-          betPda: market.betPda,
-          winningOutcome: finalOutcome
-        });
+        // First check if the market is ALREADY resolved on-chain (idempotency)
+        // This handles cases where a previous attempt submitted the tx but timed out
+        let alreadyResolved = false;
+        try {
+          const onChainData = await pollFunService.getMarketData(market.betPda);
+          if (onChainData.success && onChainData.resolvedOutcome) {
+            console.log(`[Resolution] Market already resolved on-chain: ${onChainData.resolvedOutcome}`);
+            alreadyResolved = true;
+            market.onChainResolutionTx = 'already-resolved-on-chain';
+          }
+        } catch (checkErr) {
+          console.log(`[Resolution] Could not check on-chain status: ${checkErr.message}, proceeding with resolution`);
+        }
 
-        if (!onChainResult.success) {
-          console.error(`[Resolution] On-chain resolution failed:`, onChainResult.error);
-          // Don't block the off-chain resolution - mark it and continue
-          market.onChainError = onChainResult.error;
-          console.log(`[Resolution] Continuing with off-chain resolution despite on-chain failure`);
-        } else {
-          market.onChainResolutionTx = onChainResult.txSignature;
-          console.log(`[Resolution] On-chain resolution tx: ${onChainResult.txSignature}`);
+        if (!alreadyResolved) {
+          const onChainResult = await pollFunService.resolveMarket({
+            betPda: market.betPda,
+            winningOutcome: finalOutcome
+          });
+
+          if (!onChainResult.success) {
+            console.error(`[Resolution] On-chain resolution failed:`, onChainResult.error);
+            // Don't block the off-chain resolution - mark it and continue
+            market.onChainError = onChainResult.error;
+            console.log(`[Resolution] Continuing with off-chain resolution despite on-chain failure`);
+          } else {
+            market.onChainResolutionTx = onChainResult.txSignature || onChainResult.resolveTx;
+            console.log(`[Resolution] On-chain resolution tx: ${market.onChainResolutionTx}`);
+          }
         }
       } catch (onChainError) {
         console.error(`[Resolution] On-chain resolution exception:`, onChainError.message);
@@ -2137,10 +2153,11 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
       }
     }
 
-    markets.set(market.id, market);
+    await markets.set(market.id, market);
 
     // Calculate payouts for off-chain markets
-    const marketBets = Array.from(bets.values()).filter(b => b.marketId === market.id);
+    const allBets = await bets.values();
+    const marketBets = allBets.filter(b => b.marketId === market.id);
     const winningBets = marketBets.filter(b => b.outcome === finalOutcome);
     const losingPool = finalOutcome === 'YES' ? market.noPool : market.yesPool;
     const winningPool = finalOutcome === 'YES' ? market.yesPool : market.noPool;
@@ -2212,7 +2229,11 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
     });
   } catch (error) {
     console.error('[Resolution] Confirmation error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: error.message,
+      stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined,
+      details: `Failed at confirm-resolution for market ${req.params.id}`
+    });
   }
 });
 
@@ -2255,7 +2276,7 @@ app.post('/api/markets/:id/override-resolution', adminLimiter, requireAdminWalle
       proposedBy: 'admin_override'
     };
 
-    markets.set(market.id, market);
+    await markets.set(market.id, market);
 
     console.log(`[Resolution] Market ${market.id} OVERRIDDEN: ${originalProposal.outcome} → ${overrideOutcome}`);
 
