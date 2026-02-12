@@ -846,7 +846,11 @@ async function syncMarketsFromAPI() {
       // Extract target handle and token from question
       const handleMatch = market.question.match(/@(\w+)\s+(?:reach|hit|get|followers)/i) ||
                           market.question.match(/will\s+@(\w+)/i);
-      const targetHandle = handleMatch ? handleMatch[1] : null;
+      let targetHandle = handleMatch ? handleMatch[1] : null;
+      // @moltbook is the platform itself, not an individual agent handle
+      if (targetHandle && /^moltbook$/i.test(targetHandle)) {
+        targetHandle = null;
+      }
       const tokenMatch = market.question.match(/\$([A-Z]+)/);
       const targetToken = tokenMatch ? tokenMatch[1] : null;
 

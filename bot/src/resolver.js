@@ -683,9 +683,15 @@ class ResolutionEngine {
       }
     }
 
-    // Platform-level: no handle and question is about Moltbook total agents (e.g. "Will Moltbook reach 2.5M agents?")
-    const isPlatformAgentQuestion = !handle && /moltbook.*\d+\s*agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|\d+\.?\d*\s*[mk]?\s*agents?\s*(?:on|at|registered)?\s*moltbook/i.test(question);
+    // @moltbook is the platform itself, not an individual agent
+    const isMoltbookPlatformHandle = /^moltbook$/i.test(handle);
+
+    // Platform-level: handle is @moltbook (or no handle) and question is about total agents
+    // e.g. "Will @moltbook have over 2.5M registered agents by end of February?"
+    const isPlatformAgentQuestion = (!handle || isMoltbookPlatformHandle) &&
+      /moltbook.*\d+\s*(?:registered\s*)?agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|\d+\.?\d*\s*[mk]?\s*(?:registered\s*)?agents?\s*(?:on|at|registered)?\s*moltbook/i.test(question);
     if (isPlatformAgentQuestion) {
+      console.log(`[Resolver] Moltbook platform-level question detected (handle=${handle || 'none'})`);
       return await this.resolveMoltbookPlatformStats(threshold, question);
     }
 

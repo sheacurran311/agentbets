@@ -129,9 +129,12 @@ function detectResolutionTiming(question, resolutionSource, targetHandle) {
   if (!question) return 'at_close';
   const lower = question.toLowerCase();
 
-  // Moltbook platform agent count (no specific handle) -> on_target
-  if (resolutionSource === 'moltbook' && !targetHandle) {
-    if (/\d+\s*(?:\.\d+)?\s*[mk]?\s*agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|moltbook.*\d+\s*agents?/i.test(lower)) {
+  // @moltbook is the platform itself, not an individual agent handle
+  const isMoltbookPlatformHandle = !targetHandle || /^moltbook$/i.test(targetHandle);
+
+  // Moltbook platform agent count -> on_target (monotonic metric)
+  if (resolutionSource === 'moltbook' && isMoltbookPlatformHandle) {
+    if (/\d+\s*(?:\.\d+)?\s*[mk]?\s*(?:registered\s*)?agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|moltbook.*\d+\s*(?:registered\s*)?agents?/i.test(lower)) {
       return 'on_target';
     }
   }

@@ -522,8 +522,12 @@ class BetParser {
     const { resolution, targetHandle, question } = betParams;
     const lower = (question || '').toLowerCase();
 
-    if (resolution === 'moltbook' && !targetHandle) {
-      // Platform-level Moltbook agent count (e.g. "Will Moltbook reach 2.5M agents?")
+    // @moltbook is the platform itself, not an individual agent
+    const isMoltbookPlatformHandle = !targetHandle || /^moltbook$/i.test(targetHandle);
+
+    if (resolution === 'moltbook' && isMoltbookPlatformHandle) {
+      // Platform-level Moltbook agent count (e.g. "Will @moltbook have over 2.5M agents?")
+      // Registered agent counts are monotonic — once reached, they stay met
       if (/\d+\s*(?:\.\d+)?\s*[mk]?\s*agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|moltbook.*\d+\s*agents?/i.test(lower)) {
         return 'on_target';
       }

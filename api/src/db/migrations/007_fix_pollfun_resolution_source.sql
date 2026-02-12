@@ -28,8 +28,9 @@ WHERE resolution_source = 'pollfun';
 
 -- Fix resolution_timing for Moltbook platform-level markets (monotonic agent count)
 -- These should resolve on_target, not at_close
+-- @moltbook is the platform itself, not an individual agent handle
+-- Match questions about registered agents on the platform
 UPDATE markets SET resolution_timing = 'on_target'
 WHERE resolution_source = 'moltbook'
-  AND (question ~* '\d+\s*[mk]?\s*agents?' OR question ~* 'agents?\s*(on|registered|reach)?\s*moltbook')
-  AND question !~* '@\w+'
+  AND (question ~* '\d+\s*[mk]?\s*(registered\s*)?agents?' OR question ~* 'agents?\s*(on|registered|reach)?\s*moltbook')
   AND (resolution_timing IS NULL OR resolution_timing = 'at_close');

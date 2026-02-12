@@ -68,6 +68,19 @@ async function initDatabase() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    
+    // Ensure all required columns exist (table may have been created by an older migration)
+    const columnsToAdd = [
+      { name: 'verification_url', type: 'TEXT' },
+      { name: 'platform', type: 'VARCHAR(50)' },
+      { name: 'resolution_timing', type: "VARCHAR(20) DEFAULT 'at_close'" },
+      { name: 'target_token', type: 'VARCHAR(100)' },
+      { name: 'data', type: 'JSONB' },
+      { name: 'updated_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' }
+    ];
+    for (const col of columnsToAdd) {
+      await client.query(`ALTER TABLE pending_resolutions ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`).catch(() => {});
+    }
     console.log('[DB] pending_resolutions table ready');
     
     client.release();
@@ -156,48 +169,62 @@ const Resolution = {
       console.error('[DB] Resolution.create called without marketId');
       return null;
     }
+    
+    // Build insert dynamically to handle missing columns gracefully
+    // Start with columns from the original migration 001 schema
+    const columns = [
+      'market_id', 'question', 'end_date', 'resolution_source', 'threshold',
+      'target_handle', 'target_token', 'author_handle',
+      'proposal_status', 'proposed_at', 'proposed_resolution', 'created_at'
+    ];
+    const values = [
+      marketId,
+      data.question || null,
+      data.endDate || data.end_date || null,
+      data.resolution || data.resolution_source || null,
+      data.threshold || null,
+      data.targetHandle || data.target_handle || null,
+      data.targetToken || data.target_token || null,
+      data.authorHandle || data.author_handle || null,
+      data.proposalStatus || data.proposal_status || null,
+      data.proposedAt || data.proposed_at || null,
+      data.proposedResolution ? JSON.stringify(data.proposedResolution) : null,
+      data.createdAt || data.created_at || new Date().toISOString()
+    ];
+    
+    // Detect which optional columns exist and add them
+    if (!this._checkedColumns) {
+      try {
+        const colResult = await pool.query(
+          `SELECT column_name FROM information_schema.columns 
+           WHERE table_name = 'pending_resolutions'`
+        );
+        this._availableColumns = new Set(colResult.rows.map(r => r.column_name));
+        this._checkedColumns = true;
+      } catch (e) {
+        this._availableColumns = new Set();
+        this._checkedColumns = true;
+      }
+    }
+    
+    if (this._availableColumns.has('resolution_timing')) {
+      columns.push('resolution_timing');
+      values.push(data.resolutionTiming || data.resolution_timing || 'at_close');
+    }
+    
+    const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+    const updateCols = columns
+      .filter(c => c !== 'market_id' && c !== 'created_at')
+      .map(c => `${c} = EXCLUDED.${c}`)
+      .join(', ');
+    
     try {
       const result = await pool.query(
-        `INSERT INTO pending_resolutions 
-         (market_id, question, end_date, resolution_source, threshold, target_handle, 
-          target_token, resolution_timing, author_handle, verification_url, platform,
-          proposal_status, proposed_at, proposed_resolution, data, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
-         ON CONFLICT (market_id) DO UPDATE SET
-           question = EXCLUDED.question,
-           end_date = EXCLUDED.end_date,
-           resolution_source = EXCLUDED.resolution_source,
-           threshold = EXCLUDED.threshold,
-           target_handle = EXCLUDED.target_handle,
-           target_token = EXCLUDED.target_token,
-           resolution_timing = EXCLUDED.resolution_timing,
-           author_handle = EXCLUDED.author_handle,
-           verification_url = EXCLUDED.verification_url,
-           platform = EXCLUDED.platform,
-           proposal_status = EXCLUDED.proposal_status,
-           proposed_at = EXCLUDED.proposed_at,
-           proposed_resolution = EXCLUDED.proposed_resolution,
-           data = EXCLUDED.data,
-           updated_at = NOW()
+        `INSERT INTO pending_resolutions (${columns.join(', ')})
+         VALUES (${placeholders})
+         ON CONFLICT (market_id) DO UPDATE SET ${updateCols}
          RETURNING *`,
-        [
-          marketId,
-          data.question || null,
-          data.endDate || data.end_date || null,
-          data.resolution || data.resolution_source || null,
-          data.threshold || null,
-          data.targetHandle || data.target_handle || null,
-          data.targetToken || data.target_token || null,
-          data.resolutionTiming || data.resolution_timing || 'at_close',
-          data.authorHandle || data.author_handle || null,
-          data.verificationUrl || data.verification_url || null,
-          data.platform || null,
-          data.proposalStatus || data.proposal_status || null,
-          data.proposedAt || data.proposed_at || null,
-          data.proposedResolution ? JSON.stringify(data.proposedResolution) : null,
-          data.data ? JSON.stringify(data.data) : null,
-          data.createdAt || data.created_at || new Date().toISOString()
-        ]
+        values
       );
       return result.rows[0] || null;
     } catch (error) {
