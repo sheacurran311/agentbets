@@ -2316,6 +2316,8 @@ app.post('/api/markets/:id/override-resolution', adminLimiter, requireAdminWalle
 app.post('/api/markets/:id/retry-onchain-resolution', adminLimiter, requireAdminWallet, async (req, res) => {
   try {
     const { adminWallet } = req.body;
+    console.log(`[Resolution] Retry request from admin ${adminWallet} for market ${req.params.id}`);
+    
     const market = await markets.get(req.params.id);
 
     if (!market) {
@@ -2332,10 +2334,38 @@ app.post('/api/markets/:id/retry-onchain-resolution', adminLimiter, requireAdmin
       });
     }
 
+    // Check if bot keypair is configured
+    if (!pollFunService.creatorKeypair) {
+      return res.status(500).json({ 
+        error: 'Bot keypair not configured',
+        details: 'SOLANA_PRIVATE_KEY environment variable is not set on the API server'
+      });
+    }
+
+    const botWallet = pollFunService.creatorKeypair.publicKey.toBase58();
+    console.log(`[Resolution] Bot wallet (resolver): ${botWallet}`);
+    console.log(`[Resolution] Market creator: ${market.creatorWallet}`);
+    
+    // Verify bot is the creator (required for isCreatorResolver markets)
+    if (market.creatorWallet && market.creatorWallet !== botWallet) {
+      return res.status(400).json({
+        error: 'Bot wallet mismatch',
+        details: `Market was created by ${market.creatorWallet} but bot wallet is ${botWallet}. Only the creator can resolve.`
+      });
+    }
+
     console.log(`[Resolution] Admin retrying on-chain resolution for market ${req.params.id}`);
 
     // Check current on-chain state
-    const onChainData = await pollFunService.getMarketData(market.betPda);
+    let onChainData;
+    try {
+      onChainData = await pollFunService.getMarketData(market.betPda);
+    } catch (fetchErr) {
+      return res.status(500).json({
+        error: 'Failed to fetch on-chain market data',
+        details: fetchErr.message
+      });
+    }
     console.log(`[Resolution] On-chain status: ${onChainData.status}, resolvedOutcome: ${onChainData.resolvedOutcome}`);
 
     // If already fully resolved on-chain, just proceed to settlement
