@@ -189,31 +189,60 @@ function ensureDataDir() {
  * Load pending resolutions from database (or disk as fallback)
  */
 async function loadPendingResolutions() {
+  let map = new Map();
+  
   if (dbConnected) {
     try {
       const resolutions = await Resolution.getPending();
       console.log(`[Persistence] Loaded ${resolutions.length} pending resolutions from database`);
-      const map = new Map();
       for (const r of resolutions) {
         map.set(r.marketId, r);
       }
-      return map;
     } catch (error) {
       console.error('[Persistence] Error loading from database:', error.message);
     }
   }
   
   // Fallback to file
-  try {
-    if (fs.existsSync(PENDING_RESOLUTIONS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(PENDING_RESOLUTIONS_FILE, 'utf8'));
-      console.log(`[Persistence] Loaded ${Object.keys(data).length} pending resolutions from disk`);
-      return new Map(Object.entries(data));
+  if (map.size === 0) {
+    try {
+      if (fs.existsSync(PENDING_RESOLUTIONS_FILE)) {
+        const data = JSON.parse(fs.readFileSync(PENDING_RESOLUTIONS_FILE, 'utf8'));
+        console.log(`[Persistence] Loaded ${Object.keys(data).length} pending resolutions from disk`);
+        map = new Map(Object.entries(data));
+      }
+    } catch (error) {
+      console.error('[Persistence] Error loading from disk:', error.message);
     }
-  } catch (error) {
-    console.error('[Persistence] Error loading from disk:', error.message);
   }
-  return new Map();
+  
+  // Re-detect resolutionTiming for all loaded markets
+  // This fixes stale 'at_close' values stored before on_target detection was added
+  let fixed = 0;
+  for (const [marketId, data] of map) {
+    if (data.question && data.resolution) {
+      let handle = data.targetHandle || null;
+      // @moltbook is the platform, not an agent
+      if (handle && /^moltbook$/i.test(handle)) handle = null;
+      
+      const detected = parser.detectResolutionTiming({
+        resolution: data.resolution,
+        targetHandle: handle,
+        question: data.question
+      });
+      
+      if (detected !== (data.resolutionTiming || 'at_close')) {
+        console.log(`[Persistence] Fixing resolutionTiming for ${marketId}: ${data.resolutionTiming || 'at_close'} -> ${detected}`);
+        data.resolutionTiming = detected;
+        fixed++;
+      }
+    }
+  }
+  if (fixed > 0) {
+    console.log(`[Persistence] Fixed resolutionTiming for ${fixed} markets`);
+  }
+  
+  return map;
 }
 
 /**
