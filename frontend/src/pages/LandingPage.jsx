@@ -291,7 +291,7 @@ export default function LandingPage() {
 
         {/* Differentiator Badges */}
         <div style={styles.badgesRow} className="badges-row">
-          {['On-Chain USDC Settlement', 'Two-Phase Resolution', 'Bot-Creator Security', 'x402 Agent Payments', 'Creator Royalties'].map((badge) => (
+          {['On-Chain USDC Settlement', 'Two-Phase Resolution', 'Bot-Creator Security', 'Gasless Agent Relay', 'Creator Royalties'].map((badge) => (
             <span key={badge} style={styles.badge}>{badge}</span>
           ))}
         </div>
