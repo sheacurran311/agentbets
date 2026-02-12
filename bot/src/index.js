@@ -831,9 +831,9 @@ async function syncMarketsFromAPI() {
       // Skip if already tracked
       if (pendingResolutions.has(market.id)) continue;
 
-      // Detect resolution source if it's 'pollfun' or missing (legacy frontend markets)
+      // Detect resolution source if missing or invalid (legacy markets may have bad values)
       let resolutionSource = market.resolutionSource;
-      if (!resolutionSource || resolutionSource === 'pollfun' || resolutionSource === 'manual') {
+      if (!resolutionSource || resolutionSource === 'pollfun' || resolutionSource === 'manual' || resolutionSource === 'unknown') {
         resolutionSource = parser.detectResolutionSource(market.question);
       }
 
@@ -2754,7 +2754,17 @@ async function startBot() {
         })();
       }
 
-      // Initial check
+      // RESOLUTION SYSTEM: Always runs, regardless of Twitter config
+      // Check resolutions every minute (fallback for missed scheduled jobs + on_target early checks)
+      const resolveJob = new CronJob('* * * * *', checkResolutions);
+      resolveJob.start();
+      console.log('[Bot] Resolution cron started (every minute)');
+
+      // Send market reminders every hour (for markets ending within 24h)
+      const reminderJob = new CronJob('0 * * * *', sendMarketReminders);
+      reminderJob.start();
+
+      // TWITTER INTEGRATION: Only starts if credentials are configured
       if (process.env.TWITTER_BEARER_TOKEN) {
         console.log('[Bot] Twitter credentials configured, starting real-time stream + polling fallback...');
 
@@ -2782,15 +2792,6 @@ async function startBot() {
         const mentionJob = new CronJob('*/2 * * * *', checkMentions);
         mentionJob.start();
 
-        // Check resolutions every minute (fallback for missed scheduled jobs)
-        // Primary resolution happens via node-schedule at exact end times
-        const resolveJob = new CronJob('* * * * *', checkResolutions);
-        resolveJob.start();
-
-        // Send market reminders every hour (for markets ending within 24h)
-        const reminderJob = new CronJob('0 * * * *', sendMarketReminders);
-        reminderJob.start();
-
         // Save processed tweets periodically (every 5 minutes) - only for file-based
         if (!dbConnected) {
           const saveJob = new CronJob('*/5 * * * *', () => {
@@ -2802,7 +2803,7 @@ async function startBot() {
         // Initial check on startup
         setTimeout(checkMentions, 5000);
       } else {
-        console.log('[Bot] No Twitter credentials - running in demo mode');
+        console.log('[Bot] No Twitter credentials - running in resolution-only mode');
         console.log('[Bot] Set TWITTER_BEARER_TOKEN to enable Twitter integration');
         
         if (!envValid) {

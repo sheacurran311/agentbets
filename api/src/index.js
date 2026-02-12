@@ -104,8 +104,8 @@ const sanitizeWalletAddress = (wallet) => {
 /**
  * Auto-detect the resolution source from question text
  * Mirrors bot/src/parser.js detectResolutionSource()
- * Used for frontend-created markets so they get a proper resolution source
- * instead of hardcoded 'pollfun' which the bot's resolver rejects
+ * Used for all markets to auto-detect the correct resolution source
+ * (coingecko, x-api, moltbook, etc.) from the question text
  */
 function detectResolutionSource(question) {
   if (!question) return 'manual';
@@ -3065,7 +3065,7 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
     const sanitizedResolutionTiming = (resolutionTiming === 'on_target' || resolutionTiming === 'at_close')
       ? resolutionTiming : 'at_close';
     const userTags = Array.isArray(tags) ? tags.map(t => sanitizeInput(String(t))).filter(Boolean) : [];
-    const detectedOnchainTags = autoDetectTags(sanitizedQuestion, sanitizedCategory, 'pollfun');
+    const detectedOnchainTags = autoDetectTags(sanitizedQuestion, sanitizedCategory, detectResolutionSource(sanitizedQuestion));
     const sanitizedTags = [...new Set([...userTags, ...detectedOnchainTags])].slice(0, 10);
 
     if (!sanitizedQuestion || !sanitizedEndDate) {
@@ -3171,9 +3171,9 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
     const marketId = uuidv4();
     const createdAt = new Date().toISOString();
 
-    // Auto-detect actual resolution source from question (not 'pollfun')
-    // The bot resolver needs a real source (coingecko, x-api, moltbook, etc.)
-    // to know how to check the market outcome at resolution time
+    // Auto-detect resolution source from question text
+    // Every market resolves via a real data source (coingecko, x-api, moltbook, etc.)
+    // pollfun is NOT a resolution source - it's the on-chain SDK for the market itself
     const detectedResolutionSource = detectResolutionSource(sanitizedQuestion);
 
     // Extract target handle and token from question for resolution
@@ -3195,7 +3195,7 @@ app.post('/api/onchain/markets', createLimiter, async (req, res) => {
       description: sanitizedDescription,
       category: sanitizedCategory,
       outcomes: ['YES', 'NO'],
-      resolutionSource: detectedResolutionSource, // Auto-detected from question (was hardcoded 'pollfun')
+      resolutionSource: detectedResolutionSource, // Auto-detected from question text
       endDate: sanitizedEndDate,
       createdAt: createdAt,
       creatorWallet: result.creator, // Bot's wallet (on-chain creator)
@@ -3632,7 +3632,7 @@ app.post('/api/onchain/recover', requireApiKey, async (req, res) => {
       description: sanitizeInput(description || `Recovered from tx ${txSignature.slice(0, 16)}...`),
       category: sanitizeCategory(category || 'general'),
       outcomes: ['YES', 'NO'],
-      resolutionSource: resolutionSource || 'pollfun',
+      resolutionSource: resolutionSource || detectResolutionSource(sanitizedQuestion) || 'manual',
       endDate: sanitizedEndDate,
       createdAt,
       creatorWallet: recovered.creator,
