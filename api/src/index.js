@@ -2307,6 +2307,135 @@ app.post('/api/markets/:id/override-resolution', adminLimiter, requireAdminWalle
 });
 
 /**
+ * Retry on-chain resolution for stuck markets (ADMIN ONLY)
+ * POST /api/markets/:id/retry-onchain-resolution
+ * 
+ * Use this when DB shows resolved but on-chain is stuck (e.g., in "Resolving" state)
+ * This completes the on-chain resolution, settlement, and sends webhook to bot
+ */
+app.post('/api/markets/:id/retry-onchain-resolution', adminLimiter, requireAdminWallet, async (req, res) => {
+  try {
+    const { adminWallet } = req.body;
+    const market = await markets.get(req.params.id);
+
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    if (!market.betPda) {
+      return res.status(400).json({ error: 'Market is not on-chain' });
+    }
+
+    if (!market.resolution || !['YES', 'NO'].includes(market.resolution)) {
+      return res.status(400).json({ 
+        error: 'Market must have a resolution (YES/NO) set. Current resolution: ' + market.resolution 
+      });
+    }
+
+    console.log(`[Resolution] Admin retrying on-chain resolution for market ${req.params.id}`);
+
+    // Check current on-chain state
+    const onChainData = await pollFunService.getMarketData(market.betPda);
+    console.log(`[Resolution] On-chain status: ${onChainData.status}, resolvedOutcome: ${onChainData.resolvedOutcome}`);
+
+    // If already fully resolved on-chain, just proceed to settlement
+    const alreadyResolved = onChainData.success && 
+      onChainData.status === 'Resolved' && 
+      onChainData.resolvedOutcome && 
+      onChainData.resolvedOutcome !== 'NotResolvedYet';
+
+    if (!alreadyResolved) {
+      // Complete the on-chain resolution
+      console.log(`[Resolution] Completing on-chain resolution: ${market.resolution}`);
+      const onChainResult = await pollFunService.resolveMarket({
+        betPda: market.betPda,
+        winningOutcome: market.resolution
+      });
+
+      if (!onChainResult.success) {
+        return res.status(500).json({ 
+          error: 'On-chain resolution failed', 
+          details: onChainResult.error,
+          onChainStatus: onChainData.status
+        });
+      }
+
+      market.onChainResolutionTx = onChainResult.txSignature || onChainResult.resolveTx;
+      console.log(`[Resolution] On-chain resolution tx: ${market.onChainResolutionTx}`);
+    } else {
+      console.log(`[Resolution] Market already resolved on-chain, proceeding to settlement`);
+      market.onChainResolutionTx = market.onChainResolutionTx || 'already-resolved-on-chain';
+    }
+
+    // Auto-settle all batches
+    try {
+      console.log(`[Resolution] Auto-settling on-chain market: ${market.betPda}`);
+      const freshData = await pollFunService.getMarketData(market.betPda);
+      
+      if (freshData.success) {
+        const totalUsers = freshData.currentUserCount || 0;
+        const totalBatches = Math.ceil(totalUsers / 10);
+
+        for (let batchNumber = 0; batchNumber < totalBatches; batchNumber++) {
+          try {
+            await pollFunService.settleBatch({
+              betPda: market.betPda,
+              batchNumber,
+              usersPerBatch: 10
+            });
+            console.log(`[Resolution] Settled batch ${batchNumber + 1}/${totalBatches}`);
+          } catch (err) {
+            console.error(`[Resolution] Error settling batch ${batchNumber}:`, err.message);
+          }
+        }
+
+        market.settlementStatus = 'settled';
+        market.settledAt = new Date().toISOString();
+      }
+    } catch (settleError) {
+      console.error(`[Resolution] Settlement error:`, settleError.message);
+      market.settlementError = settleError.message;
+    }
+
+    // Save updated market
+    await markets.set(market.id, market);
+
+    // Notify bot via webhook
+    if (process.env.BOT_WEBHOOK_URL) {
+      try {
+        await axios.post(`${process.env.BOT_WEBHOOK_URL}/webhook/resolution-confirmed`, {
+          marketId: market.id,
+          outcome: market.resolution,
+          actualValue: market.proposedResolution?.evidence?.actualValue || market.resolution,
+          source: market.proposedResolution?.evidence?.source || 'manual',
+          data: market
+        }, {
+          headers: {
+            'X-API-Key': process.env.AGENTBETS_API_KEY || '',
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        });
+        console.log(`[Resolution] Webhook sent to bot for market ${market.id}`);
+      } catch (webhookError) {
+        console.error(`[Resolution] Failed to notify bot webhook:`, webhookError.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      market,
+      onChainResolutionTx: market.onChainResolutionTx,
+      settlementStatus: market.settlementStatus,
+      message: `On-chain resolution completed for ${market.resolution}. Settlement status: ${market.settlementStatus || 'pending'}`
+    });
+  } catch (error) {
+    console.error('[Resolution] Retry on-chain error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * DEPRECATED: Old resolve endpoint (kept for backwards compatibility)
  * Use propose-resolution + confirm-resolution instead
  */
