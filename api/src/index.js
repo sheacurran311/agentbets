@@ -133,8 +133,11 @@ function detectResolutionTiming(question, resolutionSource, targetHandle) {
   const isMoltbookPlatformHandle = !targetHandle || /^moltbook$/i.test(targetHandle);
 
   // Moltbook platform agent count -> on_target (monotonic metric)
+  // Simple check: question mentions both a number and "agents"
   if (resolutionSource === 'moltbook' && isMoltbookPlatformHandle) {
-    if (/\d+\s*(?:\.\d+)?\s*[mk]?\s*(?:registered\s*)?agents?|agents?\s*(?:on|registered|reach)?\s*moltbook|moltbook.*\d+\s*(?:registered\s*)?agents?/i.test(lower)) {
+    const hasNumber = /\d+(?:\.\d+)?\s*[mk]?/i.test(lower);
+    const hasAgents = /agents?/i.test(lower);
+    if (hasNumber && hasAgents) {
       return 'on_target';
     }
   }
