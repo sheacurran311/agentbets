@@ -2080,10 +2080,19 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
         let alreadyResolved = false;
         try {
           const onChainData = await pollFunService.getMarketData(market.betPda);
-          if (onChainData.success && onChainData.resolvedOutcome) {
+          // IMPORTANT: resolvedOutcome can be "NotResolvedYet" which is truthy but means NOT resolved
+          // Only skip if status is "Resolved" AND resolvedOutcome is an actual outcome (For/Against)
+          const actuallyResolved = onChainData.success && 
+            onChainData.status === 'Resolved' && 
+            onChainData.resolvedOutcome && 
+            onChainData.resolvedOutcome !== 'NotResolvedYet';
+          
+          if (actuallyResolved) {
             console.log(`[Resolution] Market already resolved on-chain: ${onChainData.resolvedOutcome}`);
             alreadyResolved = true;
             market.onChainResolutionTx = 'already-resolved-on-chain';
+          } else {
+            console.log(`[Resolution] On-chain status: ${onChainData.status}, resolvedOutcome: ${onChainData.resolvedOutcome} - proceeding with resolution`);
           }
         } catch (checkErr) {
           console.log(`[Resolution] Could not check on-chain status: ${checkErr.message}, proceeding with resolution`);
@@ -2204,6 +2213,12 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
           actualValue: market.proposedResolution?.evidence?.actualValue || finalOutcome,
           source: market.proposedResolution?.evidence?.source || 'manual',
           data: market
+        }, {
+          headers: {
+            'X-API-Key': process.env.AGENTBETS_API_KEY || '',
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
         });
         console.log(`[Resolution] Webhook sent to bot for market ${market.id}`);
       } catch (webhookError) {
