@@ -761,34 +761,31 @@ class ResolutionEngine {
 
   /**
    * Resolve platform-level Moltbook agent count (e.g. "Will Moltbook reach 2.5M agents?")
-   * Scrapes https://www.moltbook.com/ to extract total agent count
+   * Uses the Moltbook public stats API: https://www.moltbook.com/api/v1/stats
    */
   async resolveMoltbookPlatformStats(threshold, question) {
     try {
-      console.log(`[Resolver] Fetching Moltbook platform agent count from moltbook.com`);
+      console.log(`[Resolver] Fetching Moltbook platform stats from API`);
       console.log(`[Resolver] Threshold from market: "${threshold}", question: "${question}"`);
 
-      const response = await axios.get('https://www.moltbook.com/', {
+      const response = await axios.get('https://www.moltbook.com/api/v1/stats', {
         timeout: 10000,
         headers: { 'User-Agent': 'AgentBets/1.0 (Resolution Service)' }
       });
 
-      const html = response.data;
-      const agentMatch = html.match(/(\d+(?:,\d+)?(?:\.\d+)?[mk]?)\s*agents?/i);
+      const stats = response.data;
 
-      if (!agentMatch) {
-        // Log a snippet of the HTML for debugging
-        console.log(`[Resolver] Could not find agent count in HTML. First 500 chars: ${html.slice(0, 500)}`);
-        return { resolved: false, error: 'Could not extract agent count from Moltbook homepage' };
+      if (!stats.success || typeof stats.agents !== 'number') {
+        console.log(`[Resolver] Unexpected stats response:`, JSON.stringify(stats).slice(0, 500));
+        return { resolved: false, error: 'Moltbook stats API returned unexpected format' };
       }
 
-      const rawCount = agentMatch[1];
-      const actualValue = this.parseThreshold(rawCount) ?? parseFloat(rawCount.replace(/,/g, ''));
+      const actualValue = stats.agents;
+      console.log(`[Resolver] Moltbook stats API: ${this.formatNumber(actualValue)} agents (updated: ${stats.last_updated})`);
       
       // Try to parse threshold from provided value, or extract from question text as fallback
       let thresholdNum = this.parseThreshold(threshold);
       if (!thresholdNum && question) {
-        // Try to extract threshold from question: "2.5M agents", "2.5 million agents", etc.
         const qMatch = question.match(/(\d+(?:\.\d+)?\s*(?:thousand|million|billion|mil|mm|[KkMmBb]))\s*(?:\w+)/i) ||
                        question.match(/(\d+(?:\.\d+)?\s*[KkMmBb])\s*agents?/i) ||
                        question.match(/(\d{1,3}(?:,\d{3})+)\s*agents?/i);
@@ -800,10 +797,6 @@ class ResolutionEngine {
 
       if (!thresholdNum) {
         return { resolved: false, error: 'Could not parse threshold' };
-      }
-
-      if (typeof actualValue !== 'number' || isNaN(actualValue)) {
-        return { resolved: false, error: `Could not parse agent count: ${rawCount}` };
       }
 
       const outcome = actualValue >= thresholdNum ? 'YES' : 'NO';
@@ -818,9 +811,12 @@ class ResolutionEngine {
         source: 'Moltbook (platform stats)',
         verificationUrl: 'https://www.moltbook.com/',
         data: {
-          url: 'https://www.moltbook.com/',
+          url: 'https://www.moltbook.com/api/v1/stats',
           agentCount: actualValue,
-          rawCount,
+          submolts: stats.submolts,
+          posts: stats.posts,
+          comments: stats.comments,
+          lastUpdated: stats.last_updated,
           timestamp: new Date().toISOString()
         }
       };
@@ -1014,13 +1010,25 @@ class ResolutionEngine {
     // Remove $ and commas
     str = str.replace(/[$,]/g, '');
 
-    // Handle K/M suffixes
+    // Handle word suffixes (million, thousand, billion) BEFORE single-letter suffixes
     let multiplier = 1;
-    if (str.endsWith('k')) {
+    if (/million|mil\b|mm\b/i.test(str)) {
+      multiplier = 1000000;
+      str = str.replace(/million|mil\b|mm\b/gi, '').trim();
+    } else if (/billion|bil\b/i.test(str)) {
+      multiplier = 1000000000;
+      str = str.replace(/billion|bil\b/gi, '').trim();
+    } else if (/thousand/i.test(str)) {
+      multiplier = 1000;
+      str = str.replace(/thousand/gi, '').trim();
+    } else if (str.endsWith('k')) {
       multiplier = 1000;
       str = str.slice(0, -1);
     } else if (str.endsWith('m')) {
       multiplier = 1000000;
+      str = str.slice(0, -1);
+    } else if (str.endsWith('b')) {
+      multiplier = 1000000000;
       str = str.slice(0, -1);
     }
 
