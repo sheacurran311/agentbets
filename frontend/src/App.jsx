@@ -1273,6 +1273,7 @@ function App() {
     if (isAdmin) {
       fetchPendingResolutions()
       fetchPendingPartnerApps()
+      fetchStuckMarkets()
     }
   }, [isAdmin])
 
@@ -1533,6 +1534,63 @@ function App() {
       alert('Error confirming resolution: ' + err.message)
     } finally {
       setAdminConfirming(null)
+    }
+  }
+
+  // Admin: Retry on-chain resolution for stuck markets
+  const retryOnChainResolution = async (marketId) => {
+    if (!isAdmin || !publicKey) {
+      alert('Admin wallet required')
+      return
+    }
+    
+    if (!confirm('This will retry the on-chain resolution for this market. Continue?')) {
+      return
+    }
+    
+    setAdminConfirming(marketId)
+    try {
+      const res = await fetch(`${API_BASE}/markets/${marketId}/retry-onchain-resolution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminWallet: publicKey.toString()
+        })
+      })
+      
+      const data = await res.json()
+      if (data.success) {
+        alert(`On-chain resolution completed! ${data.message || ''}`)
+        fetchPendingResolutions()
+        fetchMarkets()
+        fetchStuckMarkets()
+      } else {
+        alert(data.error || 'Failed to retry on-chain resolution')
+      }
+    } catch (err) {
+      alert('Error retrying on-chain resolution: ' + err.message)
+    } finally {
+      setAdminConfirming(null)
+    }
+  }
+
+  // Fetch stuck markets (resolved in DB but potentially stuck on-chain)
+  const [stuckMarkets, setStuckMarkets] = useState([])
+  const fetchStuckMarkets = async () => {
+    if (!isAdmin) return
+    try {
+      // Fetch resolved markets that might be stuck on-chain
+      const res = await fetch(`${API_BASE}/markets?status=resolved&limit=20`)
+      const data = await res.json()
+      // Filter to on-chain markets that might need retry
+      const onChainMarkets = (data.markets || []).filter(m => 
+        m.betPda && 
+        m.status === 'resolved' && 
+        (!m.onChainResolutionTx || m.onChainResolutionTx === 'already-resolved-on-chain' || m.onChainError)
+      )
+      setStuckMarkets(onChainMarkets)
+    } catch (err) {
+      console.error('Failed to fetch stuck markets:', err)
     }
   }
 
@@ -3115,6 +3173,78 @@ function App() {
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* Stuck Markets Section */}
+              {stuckMarkets.length > 0 && (
+                <div style={{marginTop: '40px'}}>
+                  <h2 style={{...styles.sectionTitle, color: COLORS.warning, marginBottom: '16px'}}>
+                    &#9888; Stuck On-Chain Markets
+                  </h2>
+                  <p style={{...styles.formSubtitle, marginBottom: '20px'}}>
+                    These markets are marked resolved in the database but may need on-chain resolution retry
+                  </p>
+                  <div style={styles.marketGrid}>
+                    {stuckMarkets.map((market) => (
+                      <div key={market.id} style={{...styles.adminCard, borderColor: COLORS.warning}}>
+                        <div style={{marginBottom: '12px'}}>
+                          <span style={{
+                            ...styles.pendingBadge,
+                            background: `${COLORS.warning}20`,
+                            color: COLORS.warning
+                          }}>
+                            &#128268; On-Chain Stuck
+                          </span>
+                        </div>
+                        
+                        <h3 style={{...styles.marketQuestion, marginBottom: '16px'}}>{market.question}</h3>
+                        
+                        <div style={{fontSize: '13px', color: COLORS.textSecondary, marginBottom: '16px'}}>
+                          <div style={{marginBottom: '6px'}}>
+                            <strong>Status:</strong> {market.status}
+                          </div>
+                          <div style={{marginBottom: '6px'}}>
+                            <strong>Resolution:</strong>{' '}
+                            <span style={{
+                              color: market.resolution === 'YES' ? COLORS.success : COLORS.error,
+                              fontWeight: '700'
+                            }}>
+                              {market.resolution || 'Not set'}
+                            </span>
+                          </div>
+                          <div style={{marginBottom: '6px'}}>
+                            <strong>On-Chain TX:</strong> {market.onChainResolutionTx || 'None'}
+                          </div>
+                          {market.onChainError && (
+                            <div style={{marginBottom: '6px', color: COLORS.error}}>
+                              <strong>Error:</strong> {market.onChainError}
+                            </div>
+                          )}
+                          <div style={{marginBottom: '6px'}}>
+                            <strong>BetPDA:</strong>{' '}
+                            <span style={{fontSize: '11px', fontFamily: 'monospace'}}>
+                              {market.betPda?.slice(0, 12)}...
+                            </span>
+                          </div>
+                        </div>
+
+                        <button
+                          style={{
+                            ...styles.confirmYesBtn,
+                            background: COLORS.warning,
+                            width: '100%',
+                            opacity: adminConfirming === market.id ? 0.6 : 1,
+                            cursor: adminConfirming === market.id ? 'wait' : 'pointer'
+                          }}
+                          onClick={() => retryOnChainResolution(market.id)}
+                          disabled={adminConfirming === market.id || !market.resolution}
+                        >
+                          {adminConfirming === market.id ? 'Retrying...' : 'Retry On-Chain Resolution'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
