@@ -2045,6 +2045,7 @@ app.put('/api/markets/:id/propose-resolution', async (req, res) => {
 app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet, async (req, res) => {
   try {
     const { finalOutcome, adminNotes, adminWallet } = req.body;
+    console.log(`[Resolution] Admin confirming market ${req.params.id} as ${finalOutcome} (wallet: ${adminWallet})`);
     const market = await markets.get(req.params.id);
 
     if (!market) {
@@ -2073,51 +2074,65 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
     if (market.betPda) {
       console.log(`[Resolution] Resolving on-chain market: ${market.betPda}`);
 
-      const onChainResult = await pollFunService.resolveMarket({
-        betPda: market.betPda,
-        winningOutcome: finalOutcome
-      });
-
-      if (!onChainResult.success) {
-        return res.status(500).json({
-          error: 'Failed to resolve on-chain',
-          details: onChainResult.error
+      try {
+        const onChainResult = await pollFunService.resolveMarket({
+          betPda: market.betPda,
+          winningOutcome: finalOutcome
         });
+
+        if (!onChainResult.success) {
+          console.error(`[Resolution] On-chain resolution failed:`, onChainResult.error);
+          // Don't block the off-chain resolution - mark it and continue
+          market.onChainError = onChainResult.error;
+          console.log(`[Resolution] Continuing with off-chain resolution despite on-chain failure`);
+        } else {
+          market.onChainResolutionTx = onChainResult.txSignature;
+          console.log(`[Resolution] On-chain resolution tx: ${onChainResult.txSignature}`);
+        }
+      } catch (onChainError) {
+        console.error(`[Resolution] On-chain resolution exception:`, onChainError.message);
+        market.onChainError = onChainError.message;
+        console.log(`[Resolution] Continuing with off-chain resolution despite on-chain exception`);
       }
 
-      market.onChainResolutionTx = onChainResult.txSignature;
+      // Auto-settle all batches for on-chain market (only if on-chain resolution succeeded)
+      if (market.onChainResolutionTx && !market.onChainError) {
+        try {
+          console.log(`[Resolution] Auto-settling on-chain market: ${market.betPda}`);
 
-      // Auto-settle all batches for on-chain market
-      console.log(`[Resolution] Auto-settling on-chain market: ${market.betPda}`);
+          const marketData = await pollFunService.getMarketData(market.betPda);
+          if (marketData.success) {
+            const totalUsers = marketData.currentUserCount || 0;
+            const totalBatches = Math.ceil(totalUsers / 10);
 
-      const marketData = await pollFunService.getMarketData(market.betPda);
-      if (marketData.success) {
-        const totalUsers = marketData.currentUserCount || 0;
-        const totalBatches = Math.ceil(totalUsers / 10);
+            for (let batchNumber = 0; batchNumber < totalBatches; batchNumber++) {
+              try {
+                await pollFunService.settleBatch({
+                  betPda: market.betPda,
+                  batchNumber,
+                  usersPerBatch: 10
+                });
+                console.log(`[Resolution] Settled batch ${batchNumber}/${totalBatches}`);
+              } catch (err) {
+                console.error(`[Resolution] Error settling batch ${batchNumber}:`, err.message);
+              }
+            }
 
-        for (let batchNumber = 0; batchNumber < totalBatches; batchNumber++) {
-          try {
-            await pollFunService.settleBatch({
-              betPda: market.betPda,
-              batchNumber,
-              usersPerBatch: 10
-            });
-            console.log(`[Resolution] Settled batch ${batchNumber}/${totalBatches}`);
-          } catch (err) {
-            console.error(`[Resolution] Error settling batch ${batchNumber}:`, err.message);
+            market.settlementStatus = 'settled';
+            market.settledAt = new Date().toISOString();
+
+            // Attempt to close bet to reclaim rent (requires Poll.fun protocol authority)
+            const closeResult = await pollFunService.closeBet({ betPda: market.betPda });
+            if (closeResult.success) {
+              market.settlementStatus = 'closed';
+              console.log(`[Resolution] Bet closed, reclaimed ${closeResult.reclaimedSOL?.toFixed(6)} SOL`);
+            } else if (closeResult.protocolLimited) {
+              console.log(`[Resolution] Rent reclaim not available (Poll.fun protocol authority required)`);
+            }
           }
-        }
-
-        market.settlementStatus = 'settled';
-        market.settledAt = new Date().toISOString();
-
-        // Attempt to close bet to reclaim rent (requires Poll.fun protocol authority)
-        const closeResult = await pollFunService.closeBet({ betPda: market.betPda });
-        if (closeResult.success) {
-          market.settlementStatus = 'closed';
-          console.log(`[Resolution] Bet closed, reclaimed ${closeResult.reclaimedSOL?.toFixed(6)} SOL`);
-        } else if (closeResult.protocolLimited) {
-          console.log(`[Resolution] Rent reclaim not available (Poll.fun protocol authority required)`);
+        } catch (settleError) {
+          console.error(`[Resolution] Settlement error:`, settleError.message);
+          market.settlementError = settleError.message;
         }
       }
     }
