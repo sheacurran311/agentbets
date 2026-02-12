@@ -8,11 +8,23 @@
 
 const { Connection, PublicKey, Keypair, Transaction } = require('@solana/web3.js');
 const { SDK, Outcome, MarketStatus } = require('@solworks/poll-sdk');
+const {
+  getAssociatedTokenAddress,
+  createTransferInstruction,
+  createAssociatedTokenAccountInstruction,
+  getAccount,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
+} = require('@solana/spl-token');
 const bs58 = require('bs58').default;
 
 // USDC mint addresses
 const USDC_MINT_DEVNET = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
 const USDC_MINT_MAINNET = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+
+// Platform fee configuration (1% total: 0.3% creator, 0.7% platform)
+const PLATFORM_FEE_BPS = 100; // 1% = 100 basis points
+const USDC_DECIMALS = 6;
 
 // Default RPC endpoints
 const RPC_ENDPOINTS = {
@@ -897,9 +909,10 @@ class PollFunService {
     // Your share of the winning pool
     const share = amount / newMyPool;
 
-    // Potential winnings (your share of total pool minus protocol fee ~3%)
+    // Potential winnings (full pool — 1% platform fee already deducted at wager time,
+    // Poll.fun protocol fee is 0% / disabled)
     const grossWinnings = newTotal * share;
-    const netWinnings = grossWinnings * 0.97; // 3% protocol fee
+    const netWinnings = grossWinnings; // No protocol fee deduction at settlement
     const profit = netWinnings - amount;
 
     // Implied probability
@@ -928,11 +941,76 @@ const pollFunService = new PollFunService({
   rpcEndpoint: process.env.POLLFUN_RPC_URL || (pollFunNetwork === 'mainnet' ? 'https://api.mainnet.solana.com' : undefined)
 });
 
+/**
+ * Calculate the platform fee for a wager amount.
+ * Fee is taken at wager time (before USDC enters the Poll.fun pool).
+ *
+ * @param {number} wagerAmountUsdc - The user-facing wager amount in USDC (e.g. 10.0)
+ * @returns {Object} { feeAmountMicro, netWagerUsdc, feeUsdc, creatorShareMicro, platformShareMicro }
+ */
+function calculateWagerFee(wagerAmountUsdc) {
+  const wagerMicro = Math.round(wagerAmountUsdc * Math.pow(10, USDC_DECIMALS));
+  const feeAmountMicro = Math.floor(wagerMicro * PLATFORM_FEE_BPS / 10000);
+  const netWagerMicro = wagerMicro - feeAmountMicro;
+  // Split: 30% of fee to creator (0.3% of wager), 70% to platform (0.7% of wager)
+  const creatorShareMicro = Math.floor(feeAmountMicro * 30 / 100);
+  const platformShareMicro = feeAmountMicro - creatorShareMicro;
+  return {
+    feeAmountMicro,
+    feeUsdc: feeAmountMicro / Math.pow(10, USDC_DECIMALS),
+    netWagerMicro,
+    netWagerUsdc: netWagerMicro / Math.pow(10, USDC_DECIMALS),
+    creatorShareMicro,
+    platformShareMicro
+  };
+}
+
+/**
+ * Build an SPL token transfer instruction for the platform fee.
+ * Transfers 1% of the wager from the user's USDC ATA to the platform fee wallet ATA.
+ *
+ * @param {PublicKey|string} userPubkey - User's wallet public key
+ * @param {number} feeAmountMicro - Fee in micro-USDC (from calculateWagerFee)
+ * @param {PublicKey|string} [usdcMint] - USDC mint (defaults to mainnet)
+ * @returns {Promise<Object>} { instruction, feeWallet, feeAmount }
+ */
+async function buildPlatformFeeInstruction(userPubkey, feeAmountMicro, usdcMint) {
+  const userPk = userPubkey instanceof PublicKey ? userPubkey : new PublicKey(userPubkey);
+  const mint = usdcMint instanceof PublicKey ? usdcMint
+    : usdcMint ? new PublicKey(usdcMint) : USDC_MINT_MAINNET;
+
+  // Platform fee goes to ESCROW_WALLET (or PLATFORM_FEE_WALLET if set)
+  const feeWalletAddress = process.env.PLATFORM_FEE_WALLET || process.env.ESCROW_WALLET || '48sWTmPygvc4w2RqKMao6zXWPGzpnnD1uecXJbCkRnQM';
+  const feeWalletPk = new PublicKey(feeWalletAddress);
+
+  // Derive ATAs
+  const userAta = await getAssociatedTokenAddress(mint, userPk);
+  const feeWalletAta = await getAssociatedTokenAddress(mint, feeWalletPk);
+
+  // Build SPL transfer: user -> platform fee wallet
+  const ix = createTransferInstruction(
+    userAta,        // source
+    feeWalletAta,   // destination
+    userPk,         // authority (user signs)
+    BigInt(feeAmountMicro)
+  );
+
+  return {
+    instruction: ix,
+    feeWallet: feeWalletAddress,
+    feeWalletAta: feeWalletAta.toBase58(),
+    feeAmountMicro
+  };
+}
+
 module.exports = {
   PollFunService,
   pollFunService,
   USDC_MINT_DEVNET,
   USDC_MINT_MAINNET,
+  PLATFORM_FEE_BPS,
   Outcome,
-  MarketStatus
+  MarketStatus,
+  calculateWagerFee,
+  buildPlatformFeeInstruction
 };

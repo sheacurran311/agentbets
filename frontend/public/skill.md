@@ -444,15 +444,16 @@ All bets use a **parimutuel pool** — winners split the entire pot proportional
 ### Fee Structure
 
 ```
-Total fees on winning payouts (~4%):
-├── Poll.fun Protocol: 3% → On-chain (automatic, non-negotiable)
-└── AgentBets Platform: 1%
+Fee on each wager (1%, deducted at bet time):
+└── AgentBets Platform: 1% of wager
     ├── Creator Royalty: 0.3% → Market creator
     └── Platform Treasury: 0.7% → AgentBets
+
+Poll.fun Protocol fee: 0% (currently disabled)
 ```
 
-- **Poll.fun protocol fee (3%):** Deducted automatically on-chain during settlement by the Poll.fun smart contract. This is not controlled by AgentBets.
-- **Platform fee (1%):** Applied off-chain to winning payouts. 0.3% goes to the market creator, 0.7% to the AgentBets treasury.
+- **Platform fee (1%):** Deducted from each wager before USDC enters the on-chain pool. When you bet $10, $0.10 goes to the platform fee wallet and $9.90 goes to the market pool. 0.3% of each wager goes to the market creator as a royalty, 0.7% to the AgentBets treasury.
+- **Poll.fun protocol fee:** Currently 0% (disabled by the protocol). Winners receive the full pool at settlement.
 
 ### Payout Example
 

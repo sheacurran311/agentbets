@@ -20,7 +20,7 @@ const express = require('express');
 const { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Connection } = require('@solana/web3.js');
 
 // Poll.fun SDK for on-chain USDC wagers
-const { pollFunService } = require('./pollfun');
+const { pollFunService, calculateWagerFee, buildPlatformFeeInstruction } = require('./pollfun');
 // Gasless relay for USDC-only transactions (no SOL needed)
 const { gaslessService } = require('./gasless');
 
@@ -297,13 +297,17 @@ router.post('/bet/:marketId/place', async (req, res) => {
       }
     }
 
-    // Build Poll.fun USDC wager instruction
-    console.log(`[Actions] Building USDC wager: ${betAmount} USDC on ${outcome} for market ${marketId}`);
+    // Calculate platform fee (1%: 0.3% creator + 0.7% platform)
+    const wagerFee = calculateWagerFee(betAmount);
+    console.log(`[Actions] Wager fee: ${wagerFee.feeUsdc} USDC, net wager: ${wagerFee.netWagerUsdc} USDC`);
+
+    // Build Poll.fun USDC wager instruction with REDUCED amount
+    console.log(`[Actions] Building USDC wager: ${wagerFee.netWagerUsdc} USDC on ${outcome} for market ${marketId} (user pays ${betAmount})`);
     
     const wagerResult = await pollFunService.buildWagerInstruction({
       betPda: market.betPda,
       side: outcome,
-      amount: betAmount,
+      amount: wagerFee.netWagerUsdc,
       userPubkey: account,
       feePayerPubkey: gaslessAvailable ? gaslessService.feePayerKeypair.publicKey.toBase58() : undefined
     });
@@ -326,14 +330,17 @@ router.post('/bet/:marketId/place', async (req, res) => {
       });
     }
 
-    // Build transaction with the Poll.fun instruction
+    // Build platform fee instruction (user -> platform fee wallet)
+    const platformFeeResult = await buildPlatformFeeInstruction(userPubkey, wagerFee.feeAmountMicro);
+
+    // Build transaction: init (if needed) + platform fee + wager
     const transaction = new Transaction();
-    // If user needs account initialization, add it as a pre-instruction
     if (userInitIx) {
       console.log(`[Actions] Including user account initialization instruction`);
       transaction.add(userInitIx);
     }
-    transaction.add(wagerResult.instruction);
+    transaction.add(platformFeeResult.instruction); // Platform fee first
+    transaction.add(wagerResult.instruction);        // Then the wager
 
     // Determine if gasless mode is enabled
     const useGasless = req.query.gasless !== 'false' && gaslessService.enabled && gaslessService.feePayerKeypair;
@@ -342,7 +349,7 @@ router.post('/bet/:marketId/place', async (req, res) => {
 
     if (useGasless) {
       // Gasless: API pays SOL gas, user pays small USDC fee
-      console.log(`[Actions] Using gasless relay — user pays ${gaslessService.feeUsdc} USDC fee instead of SOL`);
+      console.log(`[Actions] Using gasless relay — user pays ${gaslessService.feeUsdc} USDC gas fee + ${wagerFee.feeUsdc} USDC platform fee`);
       const wrapped = await gaslessService.wrapWithGasless(transaction, userPubkey);
       serializedTransaction = wrapped.transaction;
     } else {
@@ -364,13 +371,13 @@ router.post('/bet/:marketId/place', async (req, res) => {
       potentialPayout = payoutCalc.potentialWinnings;
     }
 
-    console.log(`[Actions] USDC wager transaction built for ${account.slice(0, 8)}... (gasless: ${useGasless})`);
+    console.log(`[Actions] USDC wager transaction built for ${account.slice(0, 8)}... (gasless: ${useGasless}, fee: ${wagerFee.feeUsdc} USDC)`);
 
     res.json({
       transaction: serializedTransaction,
       message: useGasless
-        ? `Bet ${betAmount} USDC on ${outcome} (no SOL needed, ${gaslessService.feeUsdc} USDC gas fee) - "${market.question.substring(0, 50)}..."`
-        : `Bet ${betAmount} USDC on ${outcome} - "${market.question.substring(0, 50)}..."`,
+        ? `Bet ${betAmount} USDC on ${outcome} (no SOL needed, ${gaslessService.feeUsdc} USDC gas fee + ${wagerFee.feeUsdc} USDC platform fee) - "${market.question.substring(0, 50)}..."`
+        : `Bet ${betAmount} USDC on ${outcome} (includes ${wagerFee.feeUsdc} USDC platform fee) - "${market.question.substring(0, 50)}..."`,
       gasless: useGasless,
       gasFee: useGasless ? gaslessService.feeUsdc : null,
       links: {

@@ -1,18 +1,21 @@
 /**
  * Creator Earnings System (Per-Market Fees)
  *
- * When you create a market, you earn 0.3% of winning payouts from THAT market only.
- * This is not a perpetual royalty - it's a one-time creator fee per market.
+ * When you create a market, you earn 0.3% of every wager placed on THAT market.
+ * Fees are collected at WAGER TIME — before USDC enters the Poll.fun pool —
+ * because Poll.fun's on-chain settlement distributes the full pool to winners
+ * with no configurable fee (protocol fee is 0% / disabled).
  *
- * Fee Structure:
- * - Total Platform Fee: 1% of winnings (from that market)
- * - Creator Fee: 30% of fee (0.3% of winnings from YOUR market)
- * - Platform Treasury: 70% of fee (0.7% of winnings)
+ * Fee Structure (deducted from each wager):
+ * - Total Platform Fee: 1% of wager amount
+ * - Creator Fee: 30% of fee (0.3% of wager from YOUR market)
+ * - Platform Treasury: 70% of fee (0.7% of wager)
  *
- * Example: Your market has $1000 in winnings
- * - Total fee: $10
- * - You get: $3 (from that market)
- * - Platform gets: $7
+ * Example: Someone bets $10 on your market
+ * - $0.10 goes to platform fee wallet (1%)
+ * - $9.90 goes to Poll.fun pool (99%)
+ * - Creator earns: $0.03 (tracked in royalty_transactions)
+ * - Platform earns: $0.07 (tracked in escrow_transactions)
  *
  * Create more markets = more earning opportunities
  */

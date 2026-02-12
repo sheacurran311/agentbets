@@ -1537,6 +1537,38 @@ function App() {
     }
   }
 
+  // Admin: Force-sync market status from on-chain (for DB stuck but on-chain settled)
+  const forceSyncFromChain = async (marketId) => {
+    if (!isAdmin || !publicKey) {
+      alert('Admin wallet required')
+      return
+    }
+    if (!confirm('Sync this market\'s status from on-chain? Use when on-chain already settled but DB shows pending.')) {
+      return
+    }
+    setAdminConfirming(marketId)
+    try {
+      const res = await fetch(`${API_BASE}/markets/${marketId}/force-sync-resolution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminWallet: publicKey.toString() })
+      })
+      const data = await res.json()
+      if (data.success) {
+        alert(`Market synced! ${data.message || ''}`)
+        fetchPendingResolutions()
+        fetchMarkets()
+        fetchStuckMarkets()
+      } else {
+        alert(data.error || 'Failed to force-sync')
+      }
+    } catch (err) {
+      alert('Error force-syncing: ' + err.message)
+    } finally {
+      setAdminConfirming(null)
+    }
+  }
+
   // Admin: Retry on-chain resolution for stuck markets
   const retryOnChainResolution = async (marketId) => {
     if (!isAdmin || !publicKey) {
@@ -3170,6 +3202,21 @@ function App() {
                         >
                           {adminConfirming === market.id ? 'Confirming...' : 'Confirm NO'}
                         </button>
+                        {market.betPda && (
+                          <button
+                            style={{
+                              ...styles.confirmNoBtn,
+                              background: COLORS.textMuted,
+                              opacity: adminConfirming === market.id ? 0.6 : 1,
+                              cursor: adminConfirming === market.id ? 'wait' : 'pointer'
+                            }}
+                            onClick={(e) => { e.stopPropagation(); forceSyncFromChain(market.id) }}
+                            disabled={adminConfirming === market.id}
+                            title="Sync DB from on-chain (use when tx settled but DB stuck)"
+                          >
+                            Force Sync
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}

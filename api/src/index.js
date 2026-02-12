@@ -21,14 +21,14 @@ const dbCompat = require('./db/compat');
 const { Market, Bet, Agent, Royalty, Points, Referral, OddsHistory, Position, PlatformKey } = require('./db/models');
 
 // Use compatibility layer for storage (works with both DB and in-memory)
-const { markets, bets, positions, oddsHistory } = dbCompat;
+const { markets, bets, positions, oddsHistory, setDbConnected, isDbConnected } = dbCompat;
 
 // Escrow module for on-chain operations
 const escrow = require('./escrow');
 // Oracle module for market resolution
 const oracle = require('./oracle');
 // Poll.fun SDK for on-chain prediction markets
-const { pollFunService, PollFunService } = require('./pollfun');
+const { pollFunService, PollFunService, calculateWagerFee, buildPlatformFeeInstruction } = require('./pollfun');
 // Creator Earnings (per-market fees)
 const royalties = require('./royalties');
 // Solana Actions (Blinks) for X/Twitter integration
@@ -549,11 +549,31 @@ async function syncMarketFromChain(marketId) {
     const noPoolMicro = Math.round(onChain.noPool * 1e6);
     const totalVolumeMicro = yesPoolMicro + noPoolMicro;
 
-    const changed = (
+    let changed = (
       market.yesPool !== yesPoolMicro ||
       market.noPool !== noPoolMicro ||
       market.totalBets !== (onChain.wagers?.length || 0)
     );
+
+    // Detect resolved-on-chain but stuck-in-DB: update status to match on-chain
+    const isResolvedOnChain = onChain.status === 'Resolved' &&
+      onChain.resolvedOutcome &&
+      onChain.resolvedOutcome !== 'NotResolvedYet';
+    const isStuckInDb = market.status === 'pending_confirmation' || market.status === 'active';
+
+    if (isResolvedOnChain && isStuckInDb) {
+      const resolution = onChain.resolvedOutcome === 'For' ? 'YES' : 'NO';
+      market.status = 'resolved';
+      market.resolution = resolution;
+      market.resolvedAt = market.resolvedAt || new Date().toISOString();
+      market.onChainResolutionTx = market.onChainResolutionTx || 'synced-from-chain';
+      market.settlementStatus = 'settled';
+      market.settledAt = market.settledAt || new Date().toISOString();
+      delete market.onChainError;
+      delete market.settlementError;
+      changed = true;
+      console.log(`[Sync] Fixed stuck market ${marketId}: on-chain resolved as ${resolution}, DB updated`);
+    }
 
     if (changed) {
       market.yesPool = yesPoolMicro;
@@ -608,6 +628,49 @@ async function syncAllMarketsFromChain() {
     console.log(`[Sync] Complete: ${synced}/${onChainMarkets.length} synced, ${changed} updated`);
   } catch (error) {
     console.error('[Sync] Failed to sync markets from chain:', error.message);
+  }
+}
+
+/**
+ * Persist settlement transaction signatures to escrow_transactions for tracking.
+ * NOTE: Fees (1% per wager) are now collected at wager time, not at settlement.
+ * This function now primarily records settlement tx signatures for audit trail.
+ * Creator royalty and platform fee amounts passed here are typically 0 for new markets.
+ * Does not block resolution on failure.
+ */
+async function persistResolutionFees(market, totalCreatorRoyalty, totalPlatformFee, settlementTxSignatures = []) {
+  if (!isDbConnected()) return;
+  try {
+    // Persist creator royalty to royalty_transactions and agent_royalties
+    if (totalCreatorRoyalty > 0 && market.creatorAgent) {
+      const handle = market.creatorAgent.toLowerCase().replace('@', '');
+      await Royalty.getOrCreate(handle);
+      await Royalty.addEarnings(handle, totalCreatorRoyalty, market.id);
+      console.log(`[Resolution] Persisted creator royalty: ${totalCreatorRoyalty} for @${handle}`);
+    }
+    // Record settlement batch tx signatures in escrow_transactions
+    for (const txSig of settlementTxSignatures) {
+      if (txSig) {
+        await db.query(
+          `INSERT INTO escrow_transactions (tx_signature, type, amount, market_id, status)
+           VALUES ($1, 'payout', 0, $2, 'confirmed')
+           ON CONFLICT (tx_signature) DO NOTHING`,
+          [txSig, market.id]
+        );
+      }
+    }
+    // Record platform fee as accounting entry (no on-chain tx - fee is tracked off-chain)
+    if (totalPlatformFee > 0) {
+      const platformFeeTxId = `platform-fee-${market.id}-${Date.now()}`;
+      await db.query(
+        `INSERT INTO escrow_transactions (tx_signature, type, from_wallet, to_wallet, amount, market_id, status)
+         VALUES ($1, 'payout', NULL, $2, $3, $4, 'confirmed')`,
+        [platformFeeTxId, process.env.ADMIN_WALLET || 'platform', totalPlatformFee, market.id]
+      );
+      console.log(`[Resolution] Persisted platform fee: ${totalPlatformFee} to escrow_transactions`);
+    }
+  } catch (err) {
+    console.error('[Resolution] Failed to persist fees (non-blocking):', err.message);
   }
 }
 
@@ -2120,7 +2183,12 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
         console.log(`[Resolution] Continuing with off-chain resolution despite on-chain exception`);
       }
 
+      // Persist resolved state early so DB reflects reality even if settlement fails
+      market.settlementStatus = market.onChainResolutionTx && !market.onChainError ? 'resolving' : market.settlementStatus;
+      await markets.set(market.id, market);
+
       // Auto-settle all batches for on-chain market (only if on-chain resolution succeeded)
+      market._settlementTxSignatures = [];
       if (market.onChainResolutionTx && !market.onChainError) {
         try {
           console.log(`[Resolution] Auto-settling on-chain market: ${market.betPda}`);
@@ -2132,11 +2200,14 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
 
             for (let batchNumber = 0; batchNumber < totalBatches; batchNumber++) {
               try {
-                await pollFunService.settleBatch({
+                const settleResult = await pollFunService.settleBatch({
                   betPda: market.betPda,
                   batchNumber,
                   usersPerBatch: 10
                 });
+                if (settleResult.success && settleResult.txSignature) {
+                  market._settlementTxSignatures.push(settleResult.txSignature);
+                }
                 console.log(`[Resolution] Settled batch ${batchNumber}/${totalBatches}`);
               } catch (err) {
                 console.error(`[Resolution] Error settling batch ${batchNumber}:`, err.message);
@@ -2164,43 +2235,39 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
 
     await markets.set(market.id, market);
 
-    // Calculate payouts for off-chain markets
+    // Calculate payouts (fees were already taken at wager time — pool is net of 1% fee)
     const allBets = await bets.values();
     const marketBets = allBets.filter(b => b.marketId === market.id);
     const winningBets = marketBets.filter(b => b.outcome === finalOutcome);
     const losingPool = finalOutcome === 'YES' ? market.noPool : market.yesPool;
     const winningPool = finalOutcome === 'YES' ? market.yesPool : market.noPool;
 
-    let totalCreatorRoyalty = 0;
-    let totalPlatformFee = 0;
-
     const payouts = winningBets.map(bet => {
-      const share = bet.amount / winningPool;
+      const share = winningPool > 0 ? bet.amount / winningPool : 0;
       const grossWinnings = bet.amount + (share * losingPool);
-
-      const royaltyInfo = royalties.calculateRoyalties(market.creatorAgent, grossWinnings);
-      totalCreatorRoyalty += royaltyInfo.creatorRoyalty;
-      totalPlatformFee += royaltyInfo.platformShare;
-
       return {
         betId: bet.id,
         wallet: bet.wallet,
         originalBet: bet.amount,
         grossWinnings: Math.floor(grossWinnings),
-        netWinnings: Math.floor(royaltyInfo.netWinnings),
-        feeDeducted: Math.floor(royaltyInfo.totalFee),
+        netWinnings: Math.floor(grossWinnings), // No settlement fee — taken at wager time
+        feeDeducted: 0,
         share: share
       };
     });
 
     const royaltySummary = {
       creatorAgent: market.creatorAgent,
-      creatorRoyalty: totalCreatorRoyalty,
-      creatorRoyaltySOL: totalCreatorRoyalty / LAMPORTS_PER_SOL,
-      platformFee: totalPlatformFee,
-      platformFeeSOL: totalPlatformFee / LAMPORTS_PER_SOL,
-      feeBreakdown: '1% total fee: 0.3% to creator, 0.7% to platform'
+      feeBreakdown: '1% fee deducted at wager time (0.3% creator, 0.7% platform). No additional fee at settlement.',
+      note: 'Fees already collected when wagers were placed.'
     };
+
+    // Record settlement tx signatures in escrow_transactions for tracking
+    const settlementTxSignatures = market._settlementTxSignatures || [];
+    if (settlementTxSignatures.length > 0) {
+      await persistResolutionFees(market, 0, 0, settlementTxSignatures);
+    }
+    delete market._settlementTxSignatures;
 
     console.log(`[Resolution] Market ${market.id} CONFIRMED: ${finalOutcome} by admin`);
 
@@ -2398,6 +2465,7 @@ app.post('/api/markets/:id/retry-onchain-resolution', adminLimiter, requireAdmin
     }
 
     // Auto-settle all batches
+    const settlementTxSignatures = [];
     try {
       console.log(`[Resolution] Auto-settling on-chain market: ${market.betPda}`);
       const freshData = await pollFunService.getMarketData(market.betPda);
@@ -2408,11 +2476,14 @@ app.post('/api/markets/:id/retry-onchain-resolution', adminLimiter, requireAdmin
 
         for (let batchNumber = 0; batchNumber < totalBatches; batchNumber++) {
           try {
-            await pollFunService.settleBatch({
+            const settleResult = await pollFunService.settleBatch({
               betPda: market.betPda,
               batchNumber,
               usersPerBatch: 10
             });
+            if (settleResult.success && settleResult.txSignature) {
+              settlementTxSignatures.push(settleResult.txSignature);
+            }
             console.log(`[Resolution] Settled batch ${batchNumber + 1}/${totalBatches}`);
           } catch (err) {
             console.error(`[Resolution] Error settling batch ${batchNumber}:`, err.message);
@@ -2429,6 +2500,11 @@ app.post('/api/markets/:id/retry-onchain-resolution', adminLimiter, requireAdmin
 
     // Save updated market
     await markets.set(market.id, market);
+
+    // Persist settlement tx signatures for tracking (fees were already collected at wager time)
+    if (settlementTxSignatures.length > 0) {
+      await persistResolutionFees(market, 0, 0, settlementTxSignatures);
+    }
 
     // Notify bot via webhook
     if (process.env.BOT_WEBHOOK_URL) {
@@ -2461,6 +2537,72 @@ app.post('/api/markets/:id/retry-onchain-resolution', adminLimiter, requireAdmin
     });
   } catch (error) {
     console.error('[Resolution] Retry on-chain error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Force-sync market status from on-chain (ADMIN ONLY)
+ * POST /api/markets/:id/force-sync-resolution
+ *
+ * Use when on-chain settlement succeeded but DB is still pending_confirmation.
+ * Reads on-chain state and updates DB to match. Also persists royalty/escrow records.
+ */
+app.post('/api/markets/:id/force-sync-resolution', adminLimiter, requireAdminWallet, async (req, res) => {
+  try {
+    const market = await markets.get(req.params.id);
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+    if (!market.betPda) {
+      return res.status(400).json({ error: 'Market is not on-chain' });
+    }
+
+    const onChainData = await pollFunService.getMarketData(market.betPda);
+    if (!onChainData.success) {
+      return res.status(500).json({ error: 'Failed to fetch on-chain data', details: onChainData.error });
+    }
+
+    const isResolved = onChainData.status === 'Resolved' &&
+      onChainData.resolvedOutcome &&
+      onChainData.resolvedOutcome !== 'NotResolvedYet';
+
+    if (!isResolved) {
+      return res.status(400).json({
+        error: 'Market is not resolved on-chain',
+        onChainStatus: onChainData.status,
+        resolvedOutcome: onChainData.resolvedOutcome
+      });
+    }
+
+    // Map Poll.fun outcome to YES/NO
+    const resolution = onChainData.resolvedOutcome === 'For' ? 'YES' : 'NO';
+
+    // Update market to match on-chain state
+    market.status = 'resolved';
+    market.resolution = resolution;
+    market.resolvedAt = market.resolvedAt || new Date().toISOString();
+    market.onChainResolutionTx = market.onChainResolutionTx || 'synced-from-chain';
+    market.settlementStatus = 'settled';
+    market.settledAt = market.settledAt || new Date().toISOString();
+    delete market.onChainError;
+    delete market.settlementError;
+
+    await markets.set(market.id, market);
+
+    // Fees are collected at wager time — no settlement-time royalties to compute
+    console.log(`[Resolution] Force-synced market ${market.id} from chain: ${resolution}`);
+
+    res.json({
+      success: true,
+      market,
+      syncedFromChain: true,
+      resolution,
+      feeNote: 'Fees were collected at wager time (1% per wager). No additional settlement fees.',
+      message: `Market synced from on-chain state. Status: resolved, Resolution: ${resolution}`
+    });
+  } catch (error) {
+    console.error('[Resolution] Force-sync error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2601,6 +2743,36 @@ app.post('/api/bets', betLimiter, async (req, res) => {
 
     // Update user positions
     await positions.upsert(wallet, marketId, outcome, amountMicroUsdc);
+
+    // Persist platform fee (1% taken at wager time) to royalty & escrow tables
+    if (market.betPda && isDbConnected()) {
+      try {
+        const wagerFee = calculateWagerFee(amount);
+        if (wagerFee.feeAmountMicro > 0) {
+          // Track creator royalty (0.3% of wager)
+          if (market.creatorAgent && wagerFee.creatorShareMicro > 0) {
+            const handle = market.creatorAgent.toLowerCase().replace('@', '');
+            await Royalty.getOrCreate(handle);
+            await Royalty.addEarnings(handle, wagerFee.creatorShareMicro, market.id);
+            console.log(`[Fees] Creator @${handle} earned ${wagerFee.creatorShareMicro / 1e6} USDC from wager on market ${market.id}`);
+          }
+          // Track platform fee (0.7% of wager) in escrow_transactions
+          if (wagerFee.platformShareMicro > 0) {
+            const feeTxId = `wager-fee-${betId}`;
+            await db.query(
+              `INSERT INTO escrow_transactions (tx_signature, type, from_wallet, to_wallet, amount, market_id, bet_id, status)
+               VALUES ($1, 'deposit', $2, $3, $4, $5, $6, 'confirmed')
+               ON CONFLICT (tx_signature) DO NOTHING`,
+              [feeTxId, wallet, process.env.PLATFORM_FEE_WALLET || process.env.ESCROW_WALLET || 'platform', wagerFee.platformShareMicro, market.id, betId]
+            );
+          }
+          // Also track in-memory royalty system
+          royalties.calculateRoyalties(market.creatorAgent, amountMicroUsdc);
+        }
+      } catch (feeErr) {
+        console.error('[Fees] Failed to persist wager fee (non-blocking):', feeErr.message);
+      }
+    }
 
     // Award wager points if agent handle is provided (1 point per $1 wagered)
     let pointsAwarded = null;
@@ -3632,11 +3804,15 @@ app.post('/api/onchain/wager', async (req, res) => {
       }
     }
 
-    // Build wager instruction for client-side signing
+    // Calculate platform fee (1%: 0.3% creator + 0.7% platform)
+    const wagerFee = calculateWagerFee(amount);
+    console.log(`[API] Wager fee: ${wagerFee.feeUsdc} USDC (${wagerFee.feeAmountMicro} micro), net wager: ${wagerFee.netWagerUsdc} USDC`);
+
+    // Build wager instruction with REDUCED amount (fee already deducted)
     const result = await pollFunService.buildWagerInstruction({
       betPda: pdaAddress,
       side: outcome,
-      amount,
+      amount: wagerFee.netWagerUsdc,
       userPubkey: wallet,
       feePayerPubkey: useGasless ? gaslessService.feePayerKeypair.publicKey.toBase58() : undefined
     });
@@ -3645,15 +3821,19 @@ app.post('/api/onchain/wager', async (req, res) => {
       return res.status(500).json({ error: result.error });
     }
 
+    // Build platform fee instruction (user -> platform fee wallet)
+    const platformFeeResult = await buildPlatformFeeInstruction(userPubkey, wagerFee.feeAmountMicro);
+
     if (useGasless) {
       // GASLESS MODE: Build full transaction, wrap with USDC fee, pre-sign
-      console.log(`[API] Building gasless wager for ${wallet.slice(0, 8)}...`);
+      console.log(`[API] Building gasless wager for ${wallet.slice(0, 8)}... (fee: ${wagerFee.feeUsdc} USDC, net: ${wagerFee.netWagerUsdc} USDC)`);
 
       const transaction = new Transaction();
       if (userInitIx) {
         transaction.add(userInitIx);
       }
-      transaction.add(result.instruction);
+      transaction.add(platformFeeResult.instruction); // Platform fee first
+      transaction.add(result.instruction);             // Then the wager
 
       const wrapped = await gaslessService.wrapWithGasless(transaction, userPubkey);
 
@@ -3665,45 +3845,57 @@ app.post('/api/onchain/wager', async (req, res) => {
         lastValidBlockHeight: wrapped.lastValidBlockHeight,
         feePayer: wrapped.feePayer,
         gasFee: wrapped.feeUsdc,
+        platformFee: {
+          feeUsdc: wagerFee.feeUsdc,
+          creatorShareUsdc: wagerFee.creatorShareMicro / 1e6,
+          platformShareUsdc: wagerFee.platformShareMicro / 1e6,
+          feeWallet: platformFeeResult.feeWallet
+        },
         wagerDetails: {
           betPda: pdaAddress,
           marketId: marketId || null,
           side: outcome,
           amount,
+          netWagerAmount: wagerFee.netWagerUsdc,
           currency: 'USDC'
         },
-        message: `Bet ${amount} USDC on ${outcome} (gasless — ${wrapped.feeUsdc} USDC gas fee, no SOL needed)`,
+        message: `Bet ${amount} USDC on ${outcome} (gasless — ${wrapped.feeUsdc} USDC gas fee + ${wagerFee.feeUsdc} USDC platform fee)`,
         instructions: 'Transaction is pre-signed by the relay. Sign with your wallet and broadcast directly, or POST to /api/relay.'
       });
     } else {
-      // TRADITIONAL MODE: Return individual instructions
+      // TRADITIONAL MODE: Return individual instructions (platform fee + wager)
+      const serializeIx = (ix) => ix ? {
+        programId: ix.programId?.toBase58(),
+        keys: ix.keys?.map(k => ({
+          pubkey: k.pubkey.toBase58(),
+          isSigner: k.isSigner,
+          isWritable: k.isWritable
+        })),
+        data: ix.data?.toString('base64')
+      } : null;
+
       res.json({
         success: true,
         gasless: false,
         userInitInstruction: userInitInstructionSerialized || null,
-        userAccountNote: userInitInstructionSerialized
-          ? 'User account does not exist. Include the userInitInstruction BEFORE the wager instruction in your transaction.'
-          : 'User account exists.',
-        instruction: result.instruction ? {
-          programId: result.instruction.programId?.toBase58(),
-          keys: result.instruction.keys?.map(k => ({
-            pubkey: k.pubkey.toBase58(),
-            isSigner: k.isSigner,
-            isWritable: k.isWritable
-          })),
-          data: result.instruction.data?.toString('base64')
-        } : null,
+        platformFeeInstruction: serializeIx(platformFeeResult.instruction),
+        instruction: serializeIx(result.instruction),
+        platformFee: {
+          feeUsdc: wagerFee.feeUsdc,
+          creatorShareUsdc: wagerFee.creatorShareMicro / 1e6,
+          platformShareUsdc: wagerFee.platformShareMicro / 1e6,
+          feeWallet: platformFeeResult.feeWallet
+        },
         wagerDetails: {
           betPda: pdaAddress,
           marketId: marketId || null,
           side: outcome,
           amount,
+          netWagerAmount: wagerFee.netWagerUsdc,
           currency: 'USDC'
         },
-        message: result.message,
-        instructions: userInitInstructionSerialized
-          ? 'Build a transaction with userInitInstruction first, then the wager instruction, and sign with your wallet.'
-          : 'Build a transaction with this instruction and sign with your wallet.'
+        message: `Bet ${amount} USDC on ${outcome} (includes ${wagerFee.feeUsdc} USDC platform fee)`,
+        instructions: 'Build a transaction with: 1) userInitInstruction (if needed), 2) platformFeeInstruction, 3) wager instruction. Sign with your wallet.'
       });
     }
   } catch (error) {
