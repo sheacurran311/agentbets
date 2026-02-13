@@ -2909,6 +2909,20 @@ app.post('/check-moltbook', async (req, res) => {
   res.json({ success: true, message: 'Checked Moltbook requests', enabled: moltbook.enabled });
 });
 
+// Admin endpoint to clear a processed Moltbook item (allows reprocessing)
+app.post('/admin/clear-moltbook-item', async (req, res) => {
+  const { itemId, type = 'post' } = req.body;
+  if (!itemId) {
+    return res.status(400).json({ success: false, error: 'itemId required' });
+  }
+  const itemKey = `${type}_${itemId}`;
+  const existed = processedMoltbookItems.has(itemKey);
+  processedMoltbookItems.delete(itemKey);
+  saveProcessedMoltbookItems();
+  console.log(`[Admin] Cleared Moltbook item: ${itemKey} (existed: ${existed})`);
+  res.json({ success: true, itemKey, existed, message: existed ? 'Item cleared, will be reprocessed on next poll' : 'Item was not in processed set' });
+});
+
 app.post('/resolve', async (req, res) => {
   await checkResolutions();
   res.json({ success: true, message: 'Checked resolutions' });
