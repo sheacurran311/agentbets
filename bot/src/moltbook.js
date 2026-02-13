@@ -600,15 +600,18 @@ class MoltbookService {
       if (posts.success && posts.data) {
         const postList = Array.isArray(posts.data) ? posts.data : (posts.data.posts || []);
         for (const post of postList) {
+          // Extract author name (API returns author as object {id, name, karma})
+          const authorName = typeof post.author === 'object' ? post.author?.name : post.author;
+          
           // Skip our own posts
-          if (post.author === this.botName) continue;
+          if (authorName === this.botName) continue;
 
           const text = `${post.title || ''} ${post.content || ''}`;
           if (this.looksLikeBetRequest(text)) {
             betRequests.push({
               type: 'post',
               id: post.id,
-              author: post.author,
+              author: authorName,
               text,
               createdAt: post.created_at || post.createdAt,
               platform: 'moltbook'
@@ -622,7 +625,10 @@ class MoltbookService {
       if (searchResult.success && searchResult.data) {
         const results = Array.isArray(searchResult.data) ? searchResult.data : (searchResult.data.results || []);
         for (const item of results) {
-          if (item.author === this.botName) continue;
+          // Extract author name (API may return author as object {id, name, karma})
+          const authorName = typeof item.author === 'object' ? item.author?.name : item.author;
+          
+          if (authorName === this.botName) continue;
 
           const text = item.content || item.title || '';
           if (this.looksLikeBetRequest(text)) {
@@ -630,7 +636,7 @@ class MoltbookService {
               type: item.type || 'search_result',
               id: item.id,
               postId: item.post_id || item.postId,
-              author: item.author,
+              author: authorName,
               text,
               createdAt: item.created_at || item.createdAt,
               platform: 'moltbook'
