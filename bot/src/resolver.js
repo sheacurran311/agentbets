@@ -161,6 +161,9 @@ class ResolutionEngine {
         case 'moltbook':
           return await this.resolveMoltbook(targetHandle, threshold, question);
 
+        case 'moltx':
+          return await this.resolveMoltx(targetHandle, threshold, question);
+
         case 'github':
           return await this.resolveGitHub(data);
 
@@ -822,6 +825,251 @@ class ResolutionEngine {
       };
     } catch (error) {
       return { resolved: false, error: `Moltbook platform stats error: ${error.message}` };
+    }
+  }
+
+  /**
+   * Resolve using MoltX data (agent-only X for AI agents)
+   * Supports: followers, views, posts, likes, engagement rate
+   * API: https://moltx.io/v1
+   */
+  async resolveMoltx(handle, threshold, question) {
+    // Try to extract handle from question if not provided
+    if (!handle) {
+      const match = question.match(/@(\w+)/);
+      if (match) {
+        handle = match[1];
+      }
+    }
+
+    // Check if this is a hashtag-based market
+    const hashtagMatch = question.match(/#(\w+)/);
+    if (hashtagMatch && /posts?|count/i.test(question)) {
+      return await this.resolveMoltxHashtag(hashtagMatch[1], threshold, question);
+    }
+
+    // Check if this is a leaderboard rank market
+    if (/top\s*\d+|rank/i.test(question) && handle) {
+      return await this.resolveMoltxRank(handle, threshold, question);
+    }
+
+    if (!handle) {
+      return { resolved: false, error: 'No MoltX agent handle specified' };
+    }
+
+    try {
+      const response = await axios.get(
+        `https://moltx.io/v1/agent/${encodeURIComponent(handle)}/stats`,
+        { timeout: 10000, headers: { 'User-Agent': 'AgentBets/1.0 (Resolution Service)' } }
+      );
+
+      if (!response.data.success || !response.data.data) {
+        return { resolved: false, error: `Agent @${handle} not found on MoltX` };
+      }
+
+      const stats = response.data.data;
+      const current = stats.current || {};
+      const recent7d = stats.recent_7d || {};
+
+      // Determine what metric we're checking based on question
+      let actualValue;
+      let metricName;
+      const lower = (question || '').toLowerCase();
+
+      if (/views?|impressions?/i.test(lower)) {
+        // Views require leaderboard lookup (not in agent stats)
+        return await this.resolveMoltxViews(handle, threshold, question);
+      } else if (/posts?|total_posts/i.test(lower)) {
+        actualValue = current.total_posts || 0;
+        metricName = 'posts';
+      } else if (/likes?|total_likes/i.test(lower)) {
+        actualValue = current.total_likes_received || 0;
+        metricName = 'likes received';
+      } else if (/engagement|engagement_rate/i.test(lower)) {
+        actualValue = recent7d.avg_engagement_rate || 0;
+        metricName = '7-day engagement rate';
+      } else if (/following/i.test(lower)) {
+        actualValue = current.following || 0;
+        metricName = 'following';
+      } else {
+        // Default to followers
+        actualValue = current.followers || 0;
+        metricName = 'followers';
+      }
+
+      const thresholdNum = this.parseThreshold(threshold);
+      if (!thresholdNum) {
+        return { resolved: false, error: 'Could not parse threshold' };
+      }
+
+      // For engagement rate, handle as percentage
+      const compareValue = metricName.includes('engagement') ? actualValue : actualValue;
+      const outcome = compareValue >= thresholdNum ? 'YES' : 'NO';
+
+      console.log(`[Resolver] MoltX @${handle}: ${this.formatNumber(actualValue)} ${metricName}, threshold = ${this.formatNumber(thresholdNum)}, outcome = ${outcome}`);
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: metricName.includes('engagement') 
+          ? `${actualValue.toFixed(2)}% ${metricName}`
+          : `${this.formatNumber(actualValue)} ${metricName}`,
+        threshold: this.formatNumber(thresholdNum),
+        source: 'MoltX',
+        verificationUrl: `https://moltx.io/${handle}`,
+        data: {
+          handle,
+          ...current,
+          recent7d,
+          timestamp: new Date().toISOString()
+        }
+      };
+    } catch (error) {
+      return { resolved: false, error: `MoltX API error: ${error.message}` };
+    }
+  }
+
+  /**
+   * Resolve MoltX views via leaderboard (views not in agent stats endpoint)
+   */
+  async resolveMoltxViews(handle, threshold, question) {
+    try {
+      const response = await axios.get(
+        `https://moltx.io/v1/leaderboard?metric=views&limit=100`,
+        { timeout: 10000, headers: { 'User-Agent': 'AgentBets/1.0 (Resolution Service)' } }
+      );
+
+      if (!response.data.success || !response.data.data?.leaders) {
+        return { resolved: false, error: 'Could not fetch MoltX views leaderboard' };
+      }
+
+      const leaders = response.data.data.leaders;
+      const agent = leaders.find(l => l.name.toLowerCase() === handle.toLowerCase());
+
+      if (!agent) {
+        return { resolved: false, error: `Agent @${handle} not found in MoltX views leaderboard (top 100)` };
+      }
+
+      const actualValue = agent.value;
+      const thresholdNum = this.parseThreshold(threshold);
+
+      if (!thresholdNum) {
+        return { resolved: false, error: 'Could not parse threshold' };
+      }
+
+      const outcome = actualValue >= thresholdNum ? 'YES' : 'NO';
+
+      console.log(`[Resolver] MoltX @${handle} views: ${this.formatNumber(actualValue)}, threshold = ${this.formatNumber(thresholdNum)}, outcome = ${outcome}`);
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: `${this.formatNumber(actualValue)} views`,
+        threshold: this.formatNumber(thresholdNum),
+        source: 'MoltX (views leaderboard)',
+        verificationUrl: `https://moltx.io/${handle}`,
+        data: { handle, views: actualValue, rank: agent.rank, timestamp: new Date().toISOString() }
+      };
+    } catch (error) {
+      return { resolved: false, error: `MoltX views lookup error: ${error.message}` };
+    }
+  }
+
+  /**
+   * Resolve MoltX leaderboard rank market
+   * e.g., "Will @AlleyBot be top 3 on MoltX by followers?"
+   */
+  async resolveMoltxRank(handle, threshold, question) {
+    try {
+      // Determine metric from question
+      const metric = /views?|impressions?/i.test(question) ? 'views' : 'followers';
+
+      const response = await axios.get(
+        `https://moltx.io/v1/leaderboard?metric=${metric}&limit=100`,
+        { timeout: 10000, headers: { 'User-Agent': 'AgentBets/1.0 (Resolution Service)' } }
+      );
+
+      if (!response.data.success || !response.data.data?.leaders) {
+        return { resolved: false, error: `Could not fetch MoltX ${metric} leaderboard` };
+      }
+
+      const leaders = response.data.data.leaders;
+      const agent = leaders.find(l => l.name.toLowerCase() === handle.toLowerCase());
+
+      if (!agent) {
+        return { resolved: false, error: `Agent @${handle} not found in MoltX ${metric} leaderboard (top 100)` };
+      }
+
+      // Extract target rank from question or threshold
+      const rankMatch = question.match(/top\s*(\d+)/i);
+      const targetRank = rankMatch ? parseInt(rankMatch[1]) : this.parseThreshold(threshold);
+
+      if (!targetRank) {
+        return { resolved: false, error: 'Could not determine target rank' };
+      }
+
+      const outcome = agent.rank <= targetRank ? 'YES' : 'NO';
+
+      console.log(`[Resolver] MoltX @${handle} rank: #${agent.rank} (${metric}), target top ${targetRank}, outcome = ${outcome}`);
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: `Rank #${agent.rank} by ${metric}`,
+        threshold: `Top ${targetRank}`,
+        source: `MoltX (${metric} leaderboard)`,
+        verificationUrl: `https://moltx.io/leaderboard`,
+        data: { handle, rank: agent.rank, value: agent.value, metric, timestamp: new Date().toISOString() }
+      };
+    } catch (error) {
+      return { resolved: false, error: `MoltX rank lookup error: ${error.message}` };
+    }
+  }
+
+  /**
+   * Resolve MoltX hashtag post count market
+   * e.g., "Will #agenteconomy reach 20,000 posts on MoltX?"
+   */
+  async resolveMoltxHashtag(hashtag, threshold, question) {
+    try {
+      const response = await axios.get(
+        `https://moltx.io/v1/hashtags/trending?limit=50`,
+        { timeout: 10000, headers: { 'User-Agent': 'AgentBets/1.0 (Resolution Service)' } }
+      );
+
+      if (!response.data.success || !response.data.data?.hashtags) {
+        return { resolved: false, error: 'Could not fetch MoltX trending hashtags' };
+      }
+
+      const hashtags = response.data.data.hashtags;
+      const tag = hashtags.find(h => h.name.toLowerCase() === hashtag.toLowerCase());
+
+      if (!tag) {
+        return { resolved: false, error: `Hashtag #${hashtag} not found in MoltX trending (top 50)` };
+      }
+
+      const actualValue = tag.post_count;
+      const thresholdNum = this.parseThreshold(threshold);
+
+      if (!thresholdNum) {
+        return { resolved: false, error: 'Could not parse threshold' };
+      }
+
+      const outcome = actualValue >= thresholdNum ? 'YES' : 'NO';
+
+      console.log(`[Resolver] MoltX #${hashtag}: ${this.formatNumber(actualValue)} posts, threshold = ${this.formatNumber(thresholdNum)}, outcome = ${outcome}`);
+
+      return {
+        resolved: true,
+        outcome,
+        actualValue: `${this.formatNumber(actualValue)} posts`,
+        threshold: this.formatNumber(thresholdNum),
+        source: 'MoltX (trending hashtags)',
+        verificationUrl: `https://moltx.io/hashtag/${hashtag}`,
+        data: { hashtag, postCount: actualValue, lastUsedAt: tag.last_used_at, timestamp: new Date().toISOString() }
+      };
+    } catch (error) {
+      return { resolved: false, error: `MoltX hashtag lookup error: ${error.message}` };
     }
   }
 

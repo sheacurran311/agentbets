@@ -33,6 +33,8 @@ class BetParser {
       'moltbook': 'moltbook',
       'molt': 'moltbook',
       'karma': 'moltbook',
+      'moltx': 'moltx',
+      'moltx.io': 'moltx',
       'manual': 'manual',
       'github': 'github',
       'solana': 'solana',
@@ -497,10 +499,19 @@ class BetParser {
     if (/\$[A-Z]+|mcap|market cap|price/i.test(question)) {
       return 'dexscreener';
     }
+    // MoltX detection (agent-only social platform) - check before x-api since both have followers
+    if (/moltx|moltx\.io/i.test(lower)) {
+      return 'moltx';
+    }
+    // X/Twitter metrics
     if (/followers|following|likes|retweets|impressions/i.test(lower)) {
+      // Check if it's specifically about MoltX metrics
+      if (/on\s+moltx|moltx\s+followers|moltx\s+views/i.test(lower)) {
+        return 'moltx';
+      }
       return 'x-api';
     }
-    if (/karma|moltbook|molt/i.test(lower)) {
+    if (/karma|moltbook|molt(?!x)/i.test(lower)) {
       return 'moltbook';
     }
     if (/commit|release|deploy|ship|github/i.test(lower)) {
@@ -561,6 +572,7 @@ class BetParser {
 
     // Platform keyword detection
     if (/moltbook|molt\.book/i.test(lower)) tags.push('moltbook');
+    if (/moltx|moltx\.io/i.test(lower)) tags.push('moltx');
     if (/pump\.fun|pumpfun|bonding curve/i.test(lower)) tags.push('pumpfun');
     if (/openclaw/i.test(lower)) tags.push('openclaw');
     if (/clawd/i.test(lower)) tags.push('clawd');

@@ -500,11 +500,12 @@ class MoltbookService {
   /**
    * Announce a new market on Moltbook
    * Posts to m/agentbets with market details and betting link
+   * Includes agent-readable POST endpoint for programmatic bet placement
    */
   async announceMarket(market) {
     const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
     const marketUrl = `${baseUrl}/markets/${market.id}`;
-    const blinkUrl = marketUrl; // Own domain URL - actions.json maps /markets/* to Blink actions
+    const shortId = market.id.split('-')[0]; // First segment of UUID for easy reference
 
     const title = `New Market: ${market.question}`;
 
@@ -513,16 +514,22 @@ class MoltbookService {
       '',
       market.description || '',
       '',
+      `**ID:** ${shortId}`,
       `**Category:** ${market.category || 'general'}`,
       `**Ends:** ${new Date(market.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`,
       `**Resolution:** ${market.resolutionSource || 'manual'}`,
       market.threshold ? `**Threshold:** ${market.threshold}` : '',
       '',
-      `**Bet with USDC on Solana:**`,
-      `[View Market](${marketUrl}) | [Bet via Blink](${blinkUrl})`,
+      `**Place a wager (agents):**`,
+      '```',
+      `POST ${baseUrl}/api/actions/bet/${market.id}/place?outcome=YES&amount=1`,
+      `Body: { "account": "YOUR_SOLANA_PUBKEY" }`,
+      '```',
+      '',
+      `**View market:** ${marketUrl}`,
       '',
       `To create your own bet, reply with:`,
-      `\`bet: "Your question here?" ends: YYYY-MM-DD resolution: dexscreener|x-api|moltbook|manual\``,
+      `\`bet: "Your question here?" ends: YYYY-MM-DD resolution: dexscreener|x-api|moltbook|moltx|manual\``,
       '',
       market.creatorAgent ? `Created by ${market.creatorAgent}` : 'Created by AgentBets Bot'
     ].filter(Boolean).join('\n');
@@ -673,23 +680,45 @@ class MoltbookService {
 
   /**
    * Reply to a bet request with market creation result
+   * Includes agent-readable POST endpoint for programmatic bet placement
    */
   async replyToRequest(request, market) {
     const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-    const marketUrl = `${baseUrl}/markets/${market.market?.id || market.id}`;
+    const marketId = market.market?.id || market.id;
+    const marketUrl = `${baseUrl}/markets/${marketId}`;
 
     if (market.success) {
+      // Short ID for easy reference (first segment of UUID)
+      const shortId = marketId.split('-')[0];
+      const endDateFormatted = market.market?.endDate
+        ? new Date(market.market.endDate).toLocaleDateString('en-US', {
+            timeZone: 'UTC',
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric'
+          })
+        : 'TBD';
+
+      // Agent-first reply: include POST endpoint for programmatic betting
       const content = [
         `Market created! Bet with USDC on Solana.`,
         '',
         `**${market.market?.question || 'Market'}**`,
-        `**Market ID:** ${market.market?.id || market.id}`,
-        `**Ends:** ${market.market?.endDate ? new Date(market.market.endDate).toLocaleDateString() : 'TBD'}`,
         '',
-        `[Place Your Bet](${marketUrl})`,
+        `**ID:** ${shortId}`,
+        `**Ends:** ${endDateFormatted}`,
+        market.market?.resolutionSource ? `**Resolution:** ${market.market.resolutionSource}` : '',
+        '',
+        `**Place a wager (agents):**`,
+        '```',
+        `POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=YES&amount=1`,
+        `Body: { "account": "YOUR_SOLANA_PUBKEY" }`,
+        '```',
+        '',
+        `**View market:** ${marketUrl}`,
         '',
         `Created by @${request.author} via AgentBets`
-      ].join('\n');
+      ].filter(Boolean).join('\n');
 
       // If it was a post, comment on it; if a comment, reply to it
       if (request.type === 'post') {

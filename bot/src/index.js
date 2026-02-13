@@ -16,6 +16,7 @@ const { CronJob } = require('cron');
 const schedule = require('node-schedule');
 const TwitterService = require('./twitter');
 const MoltbookService = require('./moltbook');
+const MoltxService = require('./moltx');
 const BetParser = require('./parser');
 const AgentVerifier = require('./verifier');
 const ResolutionEngine = require('./resolver');
@@ -61,6 +62,7 @@ const PROCESSED_TWEETS_FILE = path.join(DATA_DIR, 'processed-tweets.json');
 const PENDING_CONFIRMATIONS_FILE = path.join(DATA_DIR, 'pending-confirmations.json');
 const PROCESSED_MOLTBOOK_FILE = path.join(DATA_DIR, 'processed-moltbook.json');
 const PENDING_MOLTBOOK_CONFIRMATIONS_FILE = path.join(DATA_DIR, 'pending-moltbook-confirmations.json');
+const PROCESSED_MOLTX_FILE = path.join(DATA_DIR, 'processed-moltx.json');
 const LAST_MENTION_ID_FILE = path.join(DATA_DIR, 'last-mention-id.json');
 
 // Track startup time for grace period (skip old mentions on restart)
@@ -462,6 +464,7 @@ function loadPendingConfirmations() {
 // Initialize services
 const twitter = new TwitterService();
 const moltbook = new MoltbookService();
+const moltx = new MoltxService();
 const parser = new BetParser();
 const verifier = new AgentVerifier();
 const resolver = new ResolutionEngine();
@@ -522,6 +525,7 @@ async function initializeStorage() {
   pendingConfirmations = loadPendingConfirmations();
   processedMoltbookItems = loadProcessedMoltbookItems();
   pendingMoltbookConfirmations = loadPendingMoltbookConfirmations();
+  processedMoltxItems = loadProcessedMoltxItems();
   
   // Load market threads for thread-aware betting
   const loadedThreads = loadMarketThreads();
@@ -542,6 +546,7 @@ async function initializeStorage() {
   console.log(`[Bot] Loaded ${pendingConfirmations.size} pending Twitter market confirmations`);
   console.log(`[Bot] Loaded ${processedMoltbookItems.size} processed Moltbook items`);
   console.log(`[Bot] Loaded ${pendingMoltbookConfirmations.size} pending Moltbook confirmations`);
+  console.log(`[Bot] Loaded ${processedMoltxItems.size} processed MoltX items`);
 
   // SAFETY: On restart, check pending confirmations against existing markets
   // If the market was already created (e.g., server crashed after creation but before cleanup),
@@ -1626,6 +1631,25 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
       }
     }
 
+    // Cross-post to MoltX if enabled
+    if (moltx.enabled) {
+      try {
+        await moltx.announceMarket({
+          id: market.market.id,
+          question: betParams.question,
+          description: `Created by @${authorHandle} via X`,
+          category: betParams.category || 'general',
+          endDate: betParams.endDate,
+          resolutionSource: betParams.resolution,
+          threshold: betParams.threshold,
+          creatorAgent: `@${authorHandle}`
+        });
+        console.log(`[Bot] Market cross-posted to MoltX`);
+      } catch (err) {
+        console.warn(`[Bot] Failed to cross-post to MoltX: ${err.message}`);
+      }
+    }
+
     console.log(`[Bot] Successfully created and announced market`);
   } catch (error) {
     console.error(`[Bot] Error creating market:`, error);
@@ -1951,6 +1975,42 @@ function savePendingMoltbookConfirmations() {
     fs.writeFileSync(PENDING_MOLTBOOK_CONFIRMATIONS_FILE, JSON.stringify(data, null, 2));
   } catch (error) {
     console.error('[Persistence] Error saving pending Moltbook confirmations to disk:', error.message);
+  }
+}
+
+// Track processed MoltX post IDs to avoid duplicates
+let processedMoltxItems = new Set();
+
+// Reentrancy guard for MoltX
+let _checkingMoltx = false;
+
+/**
+ * Load processed MoltX items from disk
+ */
+function loadProcessedMoltxItems() {
+  try {
+    if (fs.existsSync(PROCESSED_MOLTX_FILE)) {
+      const items = JSON.parse(fs.readFileSync(PROCESSED_MOLTX_FILE, 'utf8'));
+      const set = new Set(items.slice(-5000));
+      console.log(`[Persistence] Loaded ${set.size} processed MoltX items from disk`);
+      return set;
+    }
+  } catch (error) {
+    console.error('[Persistence] Error loading MoltX items from disk:', error.message);
+  }
+  return new Set();
+}
+
+/**
+ * Save processed MoltX items to disk
+ */
+function saveProcessedMoltxItems() {
+  try {
+    ensureDataDir();
+    const items = Array.from(processedMoltxItems).slice(-5000);
+    fs.writeFileSync(PROCESSED_MOLTX_FILE, JSON.stringify(items));
+  } catch (error) {
+    console.error('[Persistence] Error saving MoltX items to disk:', error.message);
   }
 }
 
@@ -2376,6 +2436,25 @@ async function createMarketFromMoltbook(request, betParams) {
           `Bet now: ${blinkUrl}`
         );
       }
+
+      // Cross-post to MoltX if enabled
+      if (moltx.enabled) {
+        try {
+          await moltx.announceMarket({
+            id: market.market.id,
+            question: betParams.question,
+            description: `Created by ${request.author} via Moltbook`,
+            category: betParams.category || 'general',
+            endDate: betParams.endDate,
+            resolutionSource: betParams.resolution,
+            threshold: betParams.threshold,
+            creatorAgent: request.author
+          });
+          console.log(`[Moltbook] Market cross-posted to MoltX`);
+        } catch (err) {
+          console.warn(`[Moltbook] Failed to cross-post to MoltX: ${err.message}`);
+        }
+      }
     }
 
     marketCreationInProgress.delete(normalizedQ);
@@ -2385,6 +2464,289 @@ async function createMarketFromMoltbook(request, betParams) {
 
   } catch (err) {
     console.error(`[Moltbook] Error creating market from ${request.author}:`, err.message);
+    marketCreationInProgress.delete(normalizedQ);
+  }
+}
+
+/**
+ * Check MoltX for new bet requests
+ * Polls the MoltX feed and mentions for posts containing bet syntax
+ */
+async function checkMoltxRequests() {
+  if (!moltx.enabled) return;
+
+  if (_checkingMoltx) {
+    console.log(`[MoltX] Skipping check — previous check still running`);
+    return;
+  }
+  _checkingMoltx = true;
+
+  console.log(`[MoltX] Checking for new bet requests...`);
+
+  try {
+    const requests = await moltx.checkForBetRequests();
+
+    if (!requests || requests.length === 0) {
+      console.log(`[MoltX] No new bet requests`);
+      return;
+    }
+
+    console.log(`[MoltX] Found ${requests.length} potential bet requests`);
+
+    for (const request of requests) {
+      // Skip if already processed
+      const itemKey = `${request.type}_${request.id}`;
+      if (processedMoltxItems.has(itemKey)) continue;
+      processedMoltxItems.add(itemKey);
+      saveProcessedMoltxItems();
+
+      console.log(`[MoltX] Processing ${request.type} from ${request.author}: ${request.text.slice(0, 80)}...`);
+
+      try {
+        // Parse the bet request
+        if (!parser.isBetRequest(request.text)) {
+          console.log(`[MoltX] Not a valid bet request, skipping`);
+          continue;
+        }
+
+        const betParams = parser.parseBet(request.text);
+        if (!betParams.valid) {
+          console.log(`[MoltX] Invalid bet format: ${betParams.error}`);
+          await moltx.replyToRequest(request, {
+            success: false,
+            error: `Invalid bet format: ${betParams.error}. Use: bet: "Your question?" ends: YYYY-MM-DD resolution: dexscreener|x-api|moltbook|moltx|manual`
+          });
+          continue;
+        }
+
+        // DATE CLARIFICATION: If the date is vague or missing, ask for clarification
+        if (betParams.needsDateClarification) {
+          console.log(`[MoltX] Date needs clarification from ${request.author}`);
+
+          let clarificationMsg;
+          if (betParams.detectedDatePhrase && betParams.suggestedDate) {
+            clarificationMsg = `I found your market question:\n\n"${betParams.question}"\n\n` +
+              `You said "${betParams.detectedDatePhrase}" — did you mean ${betParams.suggestedDateLabel || new Date(betParams.suggestedDate).toISOString().split('T')[0]}?\n\n` +
+              `Reply with "confirm" or provide a specific date like: 2026-02-28`;
+          } else {
+            clarificationMsg = `I found your market question:\n\n"${betParams.question}"\n\n` +
+              `When should this market end? Reply with a date, e.g.:\n• 2026-02-28\n• March 1, 2026`;
+          }
+
+          await moltx.reply(request.id, `@${request.author} ${clarificationMsg}`);
+          continue;
+        }
+
+        // VALIDATION: Check if the bet outcome is verifiable
+        const verifiability = parser.validateVerifiability(betParams);
+        if (!verifiability.verifiable) {
+          console.log(`[MoltX] Unverifiable bet from ${request.author}: ${verifiability.warnings.join(', ')}`);
+          let errorMsg = `Your bet needs a measurable, verifiable outcome.\n\nIssues:\n`;
+          for (const warning of verifiability.warnings.slice(0, 2)) {
+            errorMsg += `- ${warning}\n`;
+          }
+          if (verifiability.suggestion) {
+            errorMsg += `\n${verifiability.suggestion}`;
+          }
+          await moltx.replyToRequest(request, { success: false, error: errorMsg });
+          continue;
+        }
+
+        // Create market via shared MoltX market creation logic
+        await createMarketFromMoltx(request, betParams);
+
+      } catch (err) {
+        console.error(`[MoltX] Error processing request from ${request.author}:`, err.message);
+      }
+    }
+  } catch (error) {
+    console.error(`[MoltX] Error checking requests:`, error);
+  } finally {
+    _checkingMoltx = false;
+  }
+}
+
+/**
+ * Create a market from a MoltX request with validated bet parameters
+ * Mirrors createMarketFromMoltbook() but uses MoltX for replies
+ */
+async function createMarketFromMoltx(request, betParams) {
+  const normalizedQ = betParams.question.replace(/\s+/g, ' ').trim().toLowerCase();
+  const DEDUP_WINDOW_MS = 10 * 60 * 1000;
+  const now = Date.now();
+
+  // Clean expired entries
+  for (const [q, data] of recentlyCreatedMarkets) {
+    if (now - data.timestamp > DEDUP_WINDOW_MS) recentlyCreatedMarkets.delete(q);
+  }
+  for (const [q, ts] of marketCreationInProgress) {
+    if (now - ts > 120_000) marketCreationInProgress.delete(q);
+  }
+
+  // Check if already created recently
+  if (recentlyCreatedMarkets.has(normalizedQ)) {
+    const existing = recentlyCreatedMarkets.get(normalizedQ);
+    console.warn(`[MoltX] DUPLICATE BLOCKED: Market "${betParams.question.slice(0, 50)}" was created ${Math.round((now - existing.timestamp) / 1000)}s ago`);
+    const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+    await moltx.replyToRequest(request, {
+      success: true,
+      market: { id: existing.marketId },
+      message: `This market already exists! View it here: ${baseUrl}/markets/${existing.marketId}`
+    });
+    return;
+  }
+
+  // Check in-progress lock
+  if (marketCreationInProgress.has(normalizedQ)) {
+    console.warn(`[MoltX] DUPLICATE BLOCKED: Market creation already in progress for "${betParams.question.slice(0, 50)}"`);
+    return;
+  }
+
+  // Acquire lock
+  marketCreationInProgress.set(normalizedQ, now);
+
+  // Rate limiting
+  const handleKey = request.author.toLowerCase();
+  const history = marketCreationHistory.get(handleKey) || [];
+  const recentCreations = history.filter(ts => now - ts < 24 * 60 * 60 * 1000);
+
+  if (recentCreations.length >= MAX_MARKETS_PER_DAY) {
+    const oldestInWindow = Math.min(...recentCreations);
+    const resetTime = new Date(oldestInWindow + 24 * 60 * 60 * 1000);
+    console.warn(`[MoltX] RATE LIMIT: ${request.author} hit daily limit (${recentCreations.length}/${MAX_MARKETS_PER_DAY})`);
+    marketCreationInProgress.delete(normalizedQ);
+    await moltx.replyToRequest(request, {
+      success: false,
+      error: `You've reached the maximum of ${MAX_MARKETS_PER_DAY} markets per day. You can create another market after ${resetTime.toUTCString()}.`
+    });
+    return;
+  }
+
+  try {
+    // Phishing scan
+    const questionScan = phishingDetector.scanQuestion(betParams.question);
+    if (questionScan.isPhishing) {
+      console.log(`[MoltX] PHISHING in bet question from ${request.author}: ${questionScan.reason}`);
+      marketCreationInProgress.delete(normalizedQ);
+      await moltx.replyToRequest(request, {
+        success: false,
+        error: `Your bet question was blocked for safety. ${questionScan.reason}`
+      });
+      return;
+    }
+
+    // Build tags
+    const moltxBaseTags = ['moltx-created', request.author, betParams.resolution];
+    const moltxAutoTags = betParams.autoTags || [];
+    const moltxAllTags = [...new Set([...moltxBaseTags, ...moltxAutoTags])].slice(0, 10);
+
+    // Create market via API
+    const market = await agentbets.createMarket({
+      question: betParams.question,
+      description: `Created by ${request.author} via MoltX`,
+      category: betParams.category || 'general',
+      endDate: betParams.endDate,
+      resolutionSource: betParams.resolution,
+      threshold: betParams.threshold,
+      verificationMethod: `Auto-resolved via ${betParams.resolution} API`,
+      creatorAgent: request.author,
+      tags: moltxAllTags,
+      resolutionTiming: betParams.resolutionTiming || 'at_close'
+    });
+
+    // Handle duplicate (409)
+    if (market.isDuplicate) {
+      console.warn(`[MoltX] API returned duplicate for "${betParams.question.slice(0, 50)}"`);
+      recentlyCreatedMarkets.set(normalizedQ, { timestamp: Date.now(), marketId: market.existingMarket.id });
+      marketCreationInProgress.delete(normalizedQ);
+      const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+      await moltx.replyToRequest(request, {
+        success: true,
+        market: market.existingMarket,
+        message: `This market already exists! View it here: ${baseUrl}/markets/${market.existingMarket.id}`
+      });
+      return;
+    }
+
+    // Handle rate limit (429)
+    if (market.isRateLimited) {
+      console.warn(`[MoltX] API rate limited: ${market.error}`);
+      marketCreationInProgress.delete(normalizedQ);
+      const resetInfo = market.resetsAt ? ` Resets: ${new Date(market.resetsAt).toUTCString()}` : '';
+      await moltx.replyToRequest(request, {
+        success: false,
+        error: `Rate limit reached (${market.used || '?'}/${market.limit || '?'} markets per day).${resetInfo}`
+      });
+      return;
+    }
+
+    if (market.success) {
+      console.log(`[MoltX] Market created: ${market.market.id} by ${request.author}`);
+
+      // Record for deduplication and rate limiting
+      recentlyCreatedMarkets.set(normalizedQ, { timestamp: Date.now(), marketId: market.market.id });
+      const rlHistory = marketCreationHistory.get(handleKey) || [];
+      rlHistory.push(Date.now());
+      marketCreationHistory.set(handleKey, rlHistory);
+
+      // Track for auto-resolution
+      const marketData = {
+        moltxItemId: request.id,
+        authorHandle: request.author,
+        question: betParams.question,
+        endDate: betParams.endDate,
+        resolution: betParams.resolution,
+        threshold: betParams.threshold,
+        targetHandle: betParams.targetHandle,
+        targetToken: betParams.targetToken,
+        resolutionTiming: betParams.resolutionTiming || 'at_close',
+        createdAt: new Date().toISOString(),
+        platform: 'moltx'
+      };
+      pendingResolutions.set(market.market.id, marketData);
+      savePendingResolutions();
+
+      // Schedule resolution
+      scheduleMarketResolution(market.market.id, marketData);
+
+      // Cross-post to Twitter if available
+      if (twitter.writeClient || twitter.infshAvailable) {
+        const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
+        const blinkUrl = `${baseUrl}/markets/${market.market.id}`;
+        await twitter.tweet(
+          `New bet from MoltX agent ${request.author}!\n\n` +
+          `"${betParams.question.slice(0, 80)}"\n\n` +
+          `Bet now: ${blinkUrl}`
+        );
+      }
+
+      // Cross-post to Moltbook if enabled
+      if (moltbook.enabled) {
+        try {
+          await moltbook.announceMarket({
+            id: market.market.id,
+            question: betParams.question,
+            description: `Created by ${request.author} via MoltX`,
+            category: betParams.category || 'general',
+            endDate: betParams.endDate,
+            resolutionSource: betParams.resolution,
+            threshold: betParams.threshold,
+            creatorAgent: request.author
+          });
+          console.log(`[MoltX] Market cross-posted to Moltbook`);
+        } catch (err) {
+          console.warn(`[MoltX] Failed to cross-post to Moltbook: ${err.message}`);
+        }
+      }
+    }
+
+    marketCreationInProgress.delete(normalizedQ);
+
+    // Reply on MoltX with market details
+    await moltx.replyToRequest(request, market);
+
+  } catch (err) {
+    console.error(`[MoltX] Error creating market from ${request.author}:`, err.message);
     marketCreationInProgress.delete(normalizedQ);
   }
 }
@@ -2805,6 +3167,34 @@ async function startBot() {
           } catch (err) {
             console.warn(`[Moltbook] Initialization error: ${err.message}`);
             console.warn('[Moltbook] Moltbook features will be limited');
+          }
+        })();
+      }
+
+      // MOLTX INTEGRATION: Starts if MOLTX_API_KEY is configured
+      if (moltx.enabled) {
+        (async () => {
+          try {
+            console.log('[MoltX] Starting MoltX integration...');
+            await moltx.testConnectivity();
+
+            // Get bot profile
+            const me = await moltx.getMe();
+            if (me.success) {
+              console.log(`[MoltX] Authenticated as @${moltx.botName}`);
+            }
+
+            // Poll MoltX for bet requests every 3 minutes
+            const moltxJob = new CronJob('*/3 * * * *', checkMoltxRequests);
+            moltxJob.start();
+
+            // Initial MoltX check on startup (after 15s to avoid rate limits)
+            setTimeout(checkMoltxRequests, 15000);
+
+            console.log('[MoltX] Polling started (every 3 minutes)');
+          } catch (err) {
+            console.warn(`[MoltX] Initialization error: ${err.message}`);
+            console.warn('[MoltX] MoltX features will be limited');
           }
         })();
       }
