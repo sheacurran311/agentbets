@@ -1113,11 +1113,14 @@ app.get('/api/markets/pending-resolutions', async (req, res) => {
         question: m.question,
         category: m.category,
         proposedResolution: m.proposedResolution,
+        resolutionSource: m.resolutionSource,
         totalVolume: (m.totalVolume || 0) / 1000000, // USDC decimals
         totalBets: m.totalBets || 0,
         yesPool: (m.yesPool || 0) / 1000000,
         noPool: (m.noPool || 0) / 1000000,
         endDate: m.endDate,
+        betPda: m.betPda,
+        onChain: m.onChain,
         verificationUrl: m.verificationUrl,
         verificationMethod: m.verificationMethod
       }))
@@ -2121,28 +2124,44 @@ app.put('/api/markets/:id/propose-resolution', async (req, res) => {
       return res.status(400).json({ error: 'Market already resolved or cancelled' });
     }
 
-    if (!['YES', 'NO'].includes(proposedOutcome)) {
+    // Manual markets can transition to pending_confirmation without a proposed outcome
+    // The admin will decide the outcome. Auto-resolved markets must have YES/NO.
+    const isManualTransition = !proposedOutcome && (proposedBy === 'bot-manual-expiry' || market.resolutionSource === 'manual');
+
+    if (!isManualTransition && !['YES', 'NO'].includes(proposedOutcome)) {
       return res.status(400).json({ error: 'Proposed outcome must be YES or NO' });
     }
+
+    // Build the proposed resolution object
+    const proposedResolution = isManualTransition
+      ? {
+          outcome: null,
+          confidence: 0,
+          evidence: evidence || { reason: 'Market ended - manual resolution required' },
+          proposedAt: new Date().toISOString(),
+          proposedBy: proposedBy || 'manual'
+        }
+      : {
+          outcome: proposedOutcome,
+          confidence: confidence || 0,
+          evidence: evidence || {},
+          proposedAt: new Date().toISOString(),
+          proposedBy: proposedBy || 'manual'
+        };
 
     // Move to pending confirmation state
     await markets.update(market.id, {
       status: 'pending_confirmation',
-      proposedResolution: {
-        outcome: proposedOutcome,
-        confidence: confidence || 0,
-        evidence: evidence || {},
-        proposedAt: new Date().toISOString(),
-        proposedBy: proposedBy || 'manual'
-      }
+      proposedResolution
     });
 
-    console.log(`[Resolution] Market ${market.id} proposed: ${proposedOutcome} (by ${proposedBy})`);
+    const outcomeMsg = isManualTransition ? 'PENDING ADMIN DECISION' : proposedOutcome;
+    console.log(`[Resolution] Market ${market.id} proposed: ${outcomeMsg} (by ${proposedBy})`);
 
     res.json({
       success: true,
       market,
-      message: `Resolution proposed: ${proposedOutcome}. Awaiting admin confirmation.`,
+      message: `Resolution proposed: ${outcomeMsg}. Awaiting admin confirmation.`,
       nextStep: 'Admin must call POST /api/markets/:id/confirm-resolution to finalize'
     });
   } catch (error) {

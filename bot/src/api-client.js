@@ -160,17 +160,24 @@ class AgentBetsAPI {
   /**
    * Propose a resolution for a market (two-phase resolution)
    * Bot proposes outcome but does NOT finalize - admin must confirm
+   * For manual markets, proposedOutcome can be null (admin decides)
    */
   async proposeResolution(marketId, proposedOutcome, confidence = 90, evidence = {}) {
     try {
+      const body = {
+        confidence,
+        evidence,
+        proposedBy: proposedOutcome ? 'bot-auto-resolver' : 'bot-manual-expiry'
+      };
+
+      // Only include proposedOutcome if it's set (manual markets send null)
+      if (proposedOutcome) {
+        body.proposedOutcome = proposedOutcome;
+      }
+
       const response = await axios.put(
         `${this.baseUrl}/markets/${marketId}/propose-resolution`,
-        {
-          proposedOutcome, // 'YES' or 'NO'
-          confidence, // 0-100
-          evidence, // { source, actualValue, threshold, data }
-          proposedBy: 'bot-auto-resolver'
-        },
+        body,
         {
           headers: this.getHeaders()
         }

@@ -780,6 +780,34 @@ async function resolveMarket(marketId, data) {
   console.log(`[Resolver]   question="${data.question}"`);
 
   try {
+    // Manual resolution markets: transition to pending_confirmation without auto-determining outcome
+    // The admin will decide the outcome in the admin panel
+    if (data.resolution === 'manual') {
+      console.log(`[Resolver] Manual market ${marketId} has ended - transitioning to pending admin resolution`);
+
+      const proposal = await agentbets.proposeResolution(
+        marketId,
+        null, // no proposed outcome - admin decides
+        0,
+        { reason: 'Market ended - manual resolution required', resolvedAt: new Date().toISOString() }
+      );
+
+      if (!proposal.success) {
+        console.log(`[Resolver] Failed to transition manual market ${marketId}: ${proposal.error}`);
+        return;
+      }
+
+      // Mark as proposed so we don't re-propose
+      data.proposalStatus = 'proposed';
+      data.proposedAt = new Date().toISOString();
+      data.proposedResolution = { outcome: null, source: 'manual', note: 'Awaiting admin decision' };
+      pendingResolutions.set(marketId, data);
+      savePendingResolutions();
+
+      console.log(`[Resolver] Manual market ${marketId} moved to pending_confirmation, awaiting admin decision`);
+      return;
+    }
+
     const result = await resolver.resolve(data);
 
     if (!result.resolved) {
@@ -2168,7 +2196,8 @@ async function checkMoltbookConfirmationReplies() {
       const comments = await moltbook.getPostComments(pending.postId, 'new');
       if (!comments.success) continue;
 
-      const commentList = comments.data || comments.comments || (Array.isArray(comments) ? comments : []);
+      // request() spreads the API JSON, so comments are at comments.comments (not comments.data)
+      const commentList = comments.comments || comments.data || (Array.isArray(comments) ? comments : []);
 
       for (const comment of commentList) {
         // Skip our own comments
@@ -2982,10 +3011,10 @@ app.post('/webhook/market-created', async (req, res) => {
     return res.json({ success: true, message: 'Already tracked' });
   }
 
-  // Skip markets with manual resolution (no auto-resolution possible)
+  // Manual resolution markets: still track them so we transition to pending_confirmation at end date
+  // The bot won't auto-determine the outcome, but will notify admin when market ends
   if (resolutionSource === 'manual') {
-    console.log(`[Webhook] Market ${marketId} uses manual resolution, skipping auto-track`);
-    return res.json({ success: true, message: 'Manual resolution - not tracked for auto-resolve' });
+    console.log(`[Webhook] Market ${marketId} uses manual resolution - tracking for end-date transition`);
   }
 
   // Always re-detect resolution timing from the question text

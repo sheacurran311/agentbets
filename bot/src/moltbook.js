@@ -597,8 +597,11 @@ class MoltbookService {
     try {
       // 1. Check new posts in m/agentbets
       const posts = await this.getSubmoltPosts(this.submolt, 'new', 10);
-      if (posts.success && posts.data) {
-        const postList = Array.isArray(posts.data) ? posts.data : (posts.data.posts || []);
+      if (posts.success) {
+        // request() spreads the API JSON into the return object, so feed posts
+        // are at posts.posts (not posts.data). Handle all possible shapes.
+        const postList = posts.posts || posts.data?.posts || (Array.isArray(posts.data) ? posts.data : []);
+        console.log(`[Moltbook] Feed returned ${postList.length} posts (keys: ${Object.keys(posts).filter(k => k !== 'success').join(', ')})`);
         for (const post of postList) {
           // Extract author name (API returns author as object {id, name, karma})
           const authorName = typeof post.author === 'object' ? post.author?.name : post.author;
@@ -618,12 +621,17 @@ class MoltbookService {
             });
           }
         }
+      } else {
+        console.warn(`[Moltbook] Feed request failed: ${posts.error || 'unknown error'}`);
       }
 
       // 2. Search for "bet:" or "create bet" mentions across Moltbook
       const searchResult = await this.search('agentbets bet:', 'all', 10);
-      if (searchResult.success && searchResult.data) {
-        const results = Array.isArray(searchResult.data) ? searchResult.data : (searchResult.data.results || []);
+      if (searchResult.success) {
+        // request() spreads the API JSON, so search results are at
+        // searchResult.results (not searchResult.data). Handle all possible shapes.
+        const results = searchResult.results || searchResult.data?.results || (Array.isArray(searchResult.data) ? searchResult.data : []);
+        console.log(`[Moltbook] Search returned ${results.length} results (keys: ${Object.keys(searchResult).filter(k => k !== 'success').join(', ')})`);
         for (const item of results) {
           // Extract author name (API may return author as object {id, name, karma})
           const authorName = typeof item.author === 'object' ? item.author?.name : item.author;
@@ -643,6 +651,8 @@ class MoltbookService {
             });
           }
         }
+      } else {
+        console.warn(`[Moltbook] Search request failed: ${searchResult.error || 'unknown error'}`);
       }
     } catch (err) {
       console.error('[Moltbook] Error checking for bet requests:', err.message);

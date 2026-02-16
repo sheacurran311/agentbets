@@ -3138,7 +3138,7 @@ function App() {
                       </div>
 
                       {/* Bot's Proposed Resolution */}
-                      {market.proposedResolution && (
+                      {market.proposedResolution && market.proposedResolution.outcome ? (
                         <div style={styles.proposalBox}>
                           <div style={{fontWeight: '700', marginBottom: '10px', color: COLORS.textPrimary}}>
                             &#129302; Bot Proposal
@@ -3176,6 +3176,20 @@ function App() {
                             <div style={{fontSize: '11px', color: COLORS.textMuted, marginTop: '8px'}}>
                               Proposed: {new Date(market.proposedResolution.proposedAt).toLocaleString()}
                             </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{...styles.proposalBox, borderColor: COLORS.warning, background: `${COLORS.warning}10`}}>
+                          <div style={{fontWeight: '700', marginBottom: '10px', color: COLORS.warning}}>
+                            &#9998; Manual Resolution Required
+                          </div>
+                          <div style={{fontSize: '13px', color: COLORS.textSecondary}}>
+                            <p style={{margin: 0}}>This market requires manual resolution. No automated outcome was proposed. Please review and confirm YES or NO below.</p>
+                            {market.proposedResolution?.evidence?.reason && (
+                              <div style={{marginTop: '8px', fontStyle: 'italic'}}>
+                                {market.proposedResolution.evidence.reason}
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}

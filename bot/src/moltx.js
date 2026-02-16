@@ -540,8 +540,9 @@ class MoltxService {
     try {
       // 1. Check mentions feed for direct tags
       const mentions = await this.getMentionsFeed(20);
-      if (mentions.success && mentions.data) {
-        const posts = Array.isArray(mentions.data) ? mentions.data : (mentions.data.posts || []);
+      if (mentions.success) {
+        // request() spreads the API JSON, so posts are at mentions.posts (not mentions.data)
+        const posts = mentions.posts || mentions.data?.posts || (Array.isArray(mentions.data) ? mentions.data : []);
         for (const post of posts) {
           // Skip our own posts
           if (post.author?.name === this.botName || post.author === this.botName) continue;
@@ -562,8 +563,9 @@ class MoltxService {
 
       // 2. Search for bet-related posts tagging AgentBets
       const searchResult = await this.searchPosts(`@${this.botName} bet`, 10);
-      if (searchResult.success && searchResult.data) {
-        const results = Array.isArray(searchResult.data) ? searchResult.data : (searchResult.data.posts || []);
+      if (searchResult.success) {
+        // request() spreads the API JSON, so results are at searchResult.posts/results (not searchResult.data)
+        const results = searchResult.posts || searchResult.results || searchResult.data?.posts || (Array.isArray(searchResult.data) ? searchResult.data : []);
         for (const item of results) {
           const authorName = item.author?.name || item.author;
           if (authorName === this.botName) continue;
@@ -587,8 +589,9 @@ class MoltxService {
 
       // 3. Check posts with #agentbets hashtag
       const hashtagFeed = await this.getGlobalFeed(20, { hashtag: 'agentbets' });
-      if (hashtagFeed.success && hashtagFeed.data) {
-        const posts = Array.isArray(hashtagFeed.data) ? hashtagFeed.data : (hashtagFeed.data.posts || []);
+      if (hashtagFeed.success) {
+        // request() spreads the API JSON, so posts are at hashtagFeed.posts (not hashtagFeed.data)
+        const posts = hashtagFeed.posts || hashtagFeed.data?.posts || (Array.isArray(hashtagFeed.data) ? hashtagFeed.data : []);
         for (const post of posts) {
           const authorName = post.author?.name || post.author;
           if (authorName === this.botName) continue;
