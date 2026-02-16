@@ -2406,6 +2406,82 @@ app.post('/api/markets/:id/confirm-resolution', adminLimiter, requireAdminWallet
 });
 
 /**
+ * Reject proposed resolution and revert market to active (ADMIN ONLY)
+ * POST /api/markets/:id/reject-resolution
+ *
+ * Use this when the bot proposed a resolution prematurely or incorrectly.
+ * Reverts the market from pending_confirmation back to active so betting can continue.
+ */
+app.post('/api/markets/:id/reject-resolution', adminLimiter, requireAdminWallet, async (req, res) => {
+  try {
+    const { reason, adminWallet } = req.body;
+    const market = await markets.get(req.params.id);
+
+    if (!market) {
+      return res.status(404).json({ error: 'Market not found' });
+    }
+
+    if (market.status !== 'pending_confirmation') {
+      return res.status(400).json({
+        error: `Market must be in pending_confirmation status. Current status: ${market.status}`
+      });
+    }
+
+    console.log(`[Resolution] Admin rejecting proposed resolution for market ${req.params.id} (wallet: ${adminWallet})`);
+    console.log(`[Resolution] Reason: ${reason || 'No reason given'}`);
+
+    // Revert to active
+    await markets.update(market.id, {
+      status: 'active',
+      proposedResolution: null
+    });
+
+    console.log(`[Resolution] Market ${market.id} reverted to active`);
+
+    // Notify bot webhook to re-track this market (if bot is running)
+    try {
+      const botUrl = process.env.BOT_WEBHOOK_URL || 'http://localhost:3003';
+      await fetch(`${botUrl}/webhook/market-created`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Webhook-Secret': process.env.WEBHOOK_SECRET || ''
+        },
+        body: JSON.stringify({
+          marketId: market.id,
+          question: market.question,
+          endDate: market.endDate,
+          resolutionSource: market.resolutionSource,
+          threshold: market.threshold,
+          targetHandle: market.targetHandle,
+          targetToken: market.targetToken,
+          resolutionTiming: market.resolutionTiming,
+          creatorAgent: market.creatorAgent,
+          platform: market.platform || 'api'
+        })
+      });
+      console.log(`[Resolution] Notified bot to re-track market ${market.id}`);
+    } catch (webhookErr) {
+      console.warn(`[Resolution] Could not notify bot: ${webhookErr.message}`);
+    }
+
+    res.json({
+      success: true,
+      message: `Resolution rejected. Market "${market.question}" reverted to active.`,
+      market: {
+        id: market.id,
+        status: 'active',
+        question: market.question,
+        endDate: market.endDate
+      }
+    });
+  } catch (error) {
+    console.error('[Resolution] Error rejecting resolution:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * Override proposed resolution (ADMIN ONLY)
  * POST /api/markets/:id/override-resolution
  *

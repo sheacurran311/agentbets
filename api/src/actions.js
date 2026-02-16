@@ -860,9 +860,8 @@ router.post('/create/submit', async (req, res) => {
 /**
  * Helper: Generate Blink URL for a market
  * 
- * Uses own domain instead of dial.to interstitial.
- * actions.json maps /markets/* -> /api/actions/bet/* so Blink-aware
- * clients (Chrome extension, wallets) resolve the action automatically.
+ * Returns the own-domain URL. actions.json maps /markets/* -> /api/actions/bet/*
+ * so Blink-aware clients (Chrome extension, wallets) resolve the action automatically.
  * Social crawlers get custom OG meta tags via the crawler middleware.
  */
 function generateBlinkUrl(marketId, baseUrl = null) {

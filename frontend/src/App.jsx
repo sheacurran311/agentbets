@@ -1537,6 +1537,40 @@ function App() {
     }
   }
 
+  // Admin: Reject proposed resolution and revert market to active
+  const rejectResolution = async (marketId) => {
+    if (!isAdmin || !publicKey) {
+      alert('Admin wallet required')
+      return
+    }
+    if (!confirm('Reject this resolution and revert the market to active? Betting will resume.')) {
+      return
+    }
+    setAdminConfirming(marketId)
+    try {
+      const res = await fetch(`${API_BASE}/markets/${marketId}/reject-resolution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reason: 'Rejected via admin panel - premature resolution',
+          adminWallet: publicKey.toString()
+        })
+      })
+      const data = await res.json()
+      if (data.success) {
+        alert(`Market reverted to active! ${data.message || ''}`)
+        fetchPendingResolutions()
+        fetchMarkets()
+      } else {
+        alert(data.error || 'Failed to reject resolution')
+      }
+    } catch (err) {
+      alert('Error rejecting resolution: ' + err.message)
+    } finally {
+      setAdminConfirming(null)
+    }
+  }
+
   // Admin: Force-sync market status from on-chain (for DB stuck but on-chain settled)
   const forceSyncFromChain = async (marketId) => {
     if (!isAdmin || !publicKey) {
@@ -3217,6 +3251,19 @@ function App() {
                           disabled={adminConfirming === market.id}
                         >
                           {adminConfirming === market.id ? 'Confirming...' : 'Confirm NO'}
+                        </button>
+                        <button
+                          style={{
+                            ...styles.confirmNoBtn,
+                            background: COLORS.warning,
+                            opacity: adminConfirming === market.id ? 0.6 : 1,
+                            cursor: adminConfirming === market.id ? 'wait' : 'pointer'
+                          }}
+                          onClick={() => rejectResolution(market.id)}
+                          disabled={adminConfirming === market.id}
+                          title="Reject the proposed resolution and revert market to active"
+                        >
+                          Reject &amp; Revert to Active
                         </button>
                         {market.betPda && (
                           <button

@@ -648,6 +648,7 @@ async function notifyMentionedAgents(marketId, question, creatorHandle, marketUr
   }
 
   console.log(`[Notify] Notifying agents: ${mentionedHandles.join(', ')}`);
+  const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
 
   for (const handle of mentionedHandles) {
     // Don't notify the creator (they already know)
@@ -665,7 +666,8 @@ async function notifyMentionedAgents(marketId, question, creatorHandle, marketUr
         `@${handle} A prediction market was just created about you!\n\n` +
         `"${question.slice(0, 100)}${question.length > 100 ? '...' : ''}"\n\n` +
         `Created by @${creatorHandle}\n\n` +
-        `View & bet: ${marketUrl}`
+        `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=YES&amount=1\n` +
+        `View: ${marketUrl}`
       );
 
       console.log(`[Notify] Notified @${handle} about market ${marketId}`);
@@ -708,14 +710,14 @@ async function sendMarketReminders() {
       const tagString = mentionedHandles.slice(0, 3).map(h => `@${h}`).join(' ');
 
       const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-      const marketUrl = `${baseUrl}/markets/${marketId}`;
 
       await twitter.tweet(
         `Market ending soon! ${tagString}\n\n` +
         `"${data.question.slice(0, 80)}${data.question.length > 80 ? '...' : ''}"\n\n` +
         `Current odds: YES ${yesOdds} / NO ${noOdds}\n` +
         `Ends: ${endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' })}\n\n` +
-        `Last chance to bet: ${marketUrl}`
+        `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=YES&amount=1\n` +
+        `View: ${baseUrl}/markets/${marketId}`
       );
 
       notifiedMarkets.add(reminderKey);
@@ -816,6 +818,16 @@ async function resolveMarket(marketId, data) {
     }
 
     console.log(`[Resolver] Resolved: ${result.outcome} (value: ${result.actualValue})`);
+
+    // ON_TARGET EARLY CHECK: For monotonic metrics (e.g. Moltbook agent count),
+    // we can resolve YES early (target met, stays met), but we must NOT resolve NO
+    // before the end date — the metric can still grow. Only resolve NO once ended.
+    const isOnTarget = data.resolutionTiming === 'on_target';
+    const hasEnded = new Date(data.endDate) <= new Date();
+    if (isOnTarget && !hasEnded && result.outcome === 'NO') {
+      console.log(`[Resolver] on_target market ${marketId}: target not yet met (${result.actualValue}), but market ends ${data.endDate} — waiting`);
+      return;
+    }
 
     // Propose resolution on AgentBets (does NOT finalize - admin must confirm)
     const confidence = result.confidence || 90;
@@ -1592,7 +1604,6 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
       console.error(`[Bot] CRITICAL: baseUrl for market links is a dev URL: ${baseUrl}`);
     }
     const marketUrl = `${baseUrl}/markets/${market.market.id}`;
-    const blinkUrl = marketUrl; // Own domain URL - actions.json maps /markets/* to Blink actions
 
     const endDateFormatted = new Date(betParams.endDate).toLocaleDateString('en-US', {
       timeZone: 'UTC',
@@ -1620,8 +1631,8 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
     replyMessage += `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
       `Body: { "account": "YOUR_SOLANA_PUBKEY" }\n\n`;
 
-    // Blink URL (for humans - clickable in-feed, unfurls with OG preview)
-    replyMessage += `Humans: ${blinkUrl}`;
+    // Human link (clickable, unfurls with OG preview)
+    replyMessage += `Humans: ${marketUrl}`;
 
     // Post reply with Blink URL for in-feed betting
     await twitter.reply(tweetId, replyMessage);
@@ -1908,13 +1919,12 @@ async function processCommand(tweetId, authorHandle, text, tweet = null) {
         // IMPORTANT: Use AGENTBETS_URL (public frontend URL), NOT AGENTBETS_API_URL
         const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
         const shortMarketId = marketId.split('-')[0];
-        const blinkUrl = `${baseUrl}/markets/${marketId}`;
 
         await twitter.reply(tweetId,
           `@${authorHandle} To bet ${betParams.amount} USDC ${betParams.outcome} on market ${shortMarketId}:\n\n` +
           `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=${betParams.outcome}&amount=${betParams.amount}\n` +
           `Body: { "account": "YOUR_SOLANA_PUBKEY" }\n\n` +
-          `Humans: ${blinkUrl}`
+          `Humans: ${baseUrl}/markets/${marketId}`
         );
         break;
       }
@@ -2458,11 +2468,11 @@ async function createMarketFromMoltbook(request, betParams) {
       // Cross-post to Twitter if available
       if (twitter.writeClient || twitter.infshAvailable) {
         const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-        const blinkUrl = `${baseUrl}/markets/${market.market.id}`;
         await twitter.tweet(
           `New bet from Moltbook agent ${request.author}!\n\n` +
           `"${betParams.question.slice(0, 80)}"\n\n` +
-          `Bet now: ${blinkUrl}`
+          `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
+          `Humans: ${baseUrl}/markets/${market.market.id}`
         );
       }
 
@@ -2741,11 +2751,11 @@ async function createMarketFromMoltx(request, betParams) {
       // Cross-post to Twitter if available
       if (twitter.writeClient || twitter.infshAvailable) {
         const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-        const blinkUrl = `${baseUrl}/markets/${market.market.id}`;
         await twitter.tweet(
           `New bet from MoltX agent ${request.author}!\n\n` +
           `"${betParams.question.slice(0, 80)}"\n\n` +
-          `Bet now: ${blinkUrl}`
+          `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
+          `Humans: ${baseUrl}/markets/${market.market.id}`
         );
       }
 
@@ -2881,7 +2891,16 @@ async function checkResolutions() {
       continue;
     }
 
+    // Throttle on_target early checks: only check every 30 minutes (not every minute)
+    // This avoids spamming external APIs for markets that may not resolve for weeks
     if (isOnTarget && !hasEnded) {
+      const lastCheck = data._lastOnTargetCheck || 0;
+      const checkInterval = 60 * 60 * 1000; // 1 hour
+      if (now.getTime() - lastCheck < checkInterval) {
+        continue; // Too soon since last check, skip
+      }
+      data._lastOnTargetCheck = now.getTime();
+      pendingResolutions.set(marketId, data);
       console.log(`[Resolver] ${shortId} — on_target, ${timeLeft}, checking if target met early (source=${data.resolution})...`);
     } else if (hasEnded) {
       console.log(`[Resolver] ${shortId} — ended, resolving via fallback (source=${data.resolution})...`);
@@ -3106,7 +3125,6 @@ app.post('/webhook/bet-placed', async (req, res) => {
   try {
     // Build notification tweet
     const baseUrl = process.env.AGENTBETS_URL || 'https://agentbets.gg';
-    const marketUrl = `${baseUrl}/markets/${marketId}`;
 
     const bettorTag = bettor ? `@${bettor.replace('@', '')}` : 'A user';
     const creatorTag = creatorAgent ? ` ${creatorAgent}` : '';
@@ -3117,7 +3135,8 @@ app.post('/webhook/bet-placed', async (req, res) => {
     await twitter.tweet(
       `New bet! ${bettorTag} wagered ${amount} ${currency || 'USDC'} on ${outcome}${creatorTag}\n\n` +
       `${questionSnippet}\n\n` +
-      `Join the action: ${marketUrl}`
+      `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=YES&amount=1\n` +
+      `Humans: ${baseUrl}/markets/${marketId}`
     );
 
     console.log(`[Webhook] Bet placement announced for market ${marketId}`);
