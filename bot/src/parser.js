@@ -68,7 +68,11 @@ class BetParser {
     // like "create market", "new market", "create bet", etc. They should always be recognized
     // even when the tweet contains URLs (Twitter auto-converts domains like agentbets.gg
     // into https://t.co/... links, which would otherwise trigger the URL rejection below).
-    if (this.betKeywords.some(keyword => lowerText.includes(keyword))) {
+    // Use word-boundary check so "create market" doesn't match "create markets" (plural).
+    if (this.betKeywords.some(keyword => {
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(escaped + '(?!\\w)', 'i').test(lowerText);
+    })) {
       return true;
     }
 
@@ -84,6 +88,33 @@ class BetParser {
     // like "@AgentBetsBot What?" or "@AgentBetsBot Is this working?"
     if (textWithoutMentions.length < 20) {
       return false;
+    }
+
+    // Multiple question marks = multiple distinct questions, NOT a single verifiable market.
+    // e.g. "Will you hit 1K karma? 5K followers? Ship a feature by March?" is a
+    // promotional list of goals, not one clear binary outcome.
+    const questionMarkCount = (textWithoutMentions.match(/\?/g) || []).length;
+    if (questionMarkCount >= 2) {
+      return false;
+    }
+
+    // Promotional call-to-action: "tag @X to create/make/start a market"
+    // Means the tweeter is INVITING others to use the bot, not making a request themselves.
+    if (/\btag\s+@\w+\s+to\b/i.test(text)) {
+      return false;
+    }
+
+    // "Will you..." with no specific non-bot @handle is ambiguous -- "you" has no
+    // verifiable referent. Common in marketing tweets ("Will you hit X? Y? Z?").
+    // Exception: if a real subject @handle appears alongside it, allow it through.
+    if (/\bwill\s+you\b/i.test(textWithoutMentions)) {
+      const botHandles = new Set(['agentbetsbot', 'agentbets']);
+      const otherHandles = (text.match(/@(\w+)/g) || [])
+        .map(h => h.slice(1).toLowerCase())
+        .filter(h => !botHandles.has(h));
+      if (otherHandles.length === 0) {
+        return false;
+      }
     }
 
     // Reject common conversational phrases that aren't bet requests
@@ -103,6 +134,25 @@ class BetParser {
       /what's (up|new|going|happening)/i,
     ];
     if (conversationalPatterns.some(pattern => pattern.test(textWithoutMentions))) {
+      return false;
+    }
+
+    // Reject rhetorical hype / promotional questions that aren't real market proposals
+    const promotionalPatterns = [
+      /\b(ready to|ready for)\b/i,              // "Are you ready to/for..." hype
+      /\bwho('s| is) ready\b/i,                 // "Who's ready to win big?"
+      /\bfind out\b/i,                          // "Will X happen? Find out on our platform!"
+      /\blearn more\b/i,                        // "Can AI do X? Learn more at..."
+      /\b(can|could) you guess\b/i,             // "Can you guess what it is?"
+      /\bguess what\b/i,                        // "Guess what just launched?"
+      /\bstay tuned\b/i,                        // "Will we ship? Stay tuned!"
+      /\bcoming soon\b/i,                       // "Big announcement coming soon!"
+      /\bannouncing\b/i,                        // "Excited to announce: Will X?"
+      /\bjoin (us|now|the)\b/i,                 // "Join us to find out!"
+      /\bcheck (it |this )?out\b/i,             // "Check it out!"
+      /\btry (it |this )?(now|today|free)\b/i,  // "Try it now!"
+    ];
+    if (promotionalPatterns.some(pattern => pattern.test(textWithoutMentions))) {
       return false;
     }
 
@@ -380,8 +430,8 @@ class BetParser {
         return { valid: false, error: dateParseResult.error };
       }
       
-      if (dateParseResult.needsClarification) {
-        // Date is mentioned but too vague to parse precisely
+      if (dateParseResult.needsClarification && dateParseResult.detectedPhrase) {
+        // Date is mentioned but too vague to parse precisely — ask for clarification
         result.endDate = null;
         result.needsDateClarification = true;
         result.detectedDatePhrase = dateParseResult.detectedPhrase;
@@ -391,12 +441,9 @@ class BetParser {
         result.endDate = dateParseResult.date;
         result.needsDateClarification = false;
       } else {
-        // No date mentioned at all — must ask
-        result.endDate = null;
-        result.needsDateClarification = true;
-        result.detectedDatePhrase = null;
-        result.suggestedDate = null;
-        result.suggestedDateLabel = null;
+        // No date mentioned at all — default to 7 days out
+        result.endDate = this.defaultEndDate();
+        result.needsDateClarification = false;
       }
 
       // Extract resolution source
@@ -1025,6 +1072,23 @@ class BetParser {
         result.verifiable = false;
         result.suggestion = this.generateThresholdSuggestion(question, betParams);
       }
+    }
+
+    // Check for mixed platform signals -- a single market can only resolve from one source.
+    // e.g. "Will you hit 1K karma? 5K followers? Ship a feature?" spans Moltbook + X + GitHub.
+    const platformSignals = [
+      { pattern: /\bkarma\b|\bmoltbook\b/i, source: 'Moltbook karma' },
+      { pattern: /\bfollowers\b|\btwitter\b/i, source: 'X/Twitter followers' },
+      { pattern: /\bship\b|\bgithub\b|\bdeploy\b|\bcommit\b/i, source: 'GitHub activity' },
+      { pattern: /\$[A-Z]+|\bmcap\b|\bmarket\s+cap\b/i, source: 'token price' },
+    ];
+    const detectedPlatforms = platformSignals
+      .filter(p => p.pattern.test(question))
+      .map(p => p.source);
+    if (detectedPlatforms.length >= 2) {
+      result.warnings.push(`Question combines multiple platforms (${detectedPlatforms.join(' + ')}): cannot resolve from a single source`);
+      result.verifiable = false;
+      result.suggestion = `Pick ONE metric: e.g. just followers, just karma, or just a token price.`;
     }
 
     return result;

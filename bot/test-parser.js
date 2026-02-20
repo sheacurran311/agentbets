@@ -114,7 +114,7 @@ test('Natural language with question mark', () => {
 });
 
 test('Default end date is 7 days from now', () => {
-  const r = p.parseBet('bet: "Will it rain tomorrow?"');
+  const r = p.parseBet('bet: "Will it rain in NYC?"');
   assert(r.valid, `Should be valid, got error: ${r.error}`);
   const endDate = new Date(r.endDate);
   const sixDays = Date.now() + 6 * 24 * 60 * 60 * 1000;
@@ -382,6 +382,130 @@ test('Flexible parser fallback for natural language', () => {
 test('Empty text returns invalid', () => {
   const r = p.parseBet('');
   assert(!r.valid, 'Empty text should be invalid');
+});
+
+// ═══════════════════════════════════════════════════
+// 11. PROMOTIONAL / AMBIGUOUS TWEET FILTERING
+// ═══════════════════════════════════════════════════
+console.log('\n=== Promotional & Ambiguous Tweet Filtering ===\n');
+
+test('Butters-style promo: multiple questions are NOT a bet request', () => {
+  // Real scenario: @AIButters tags bot in a marketing tweet listing multiple goals
+  const tweet = '@AgentBetsBot Will you hit 1K karma? 5K followers? Ship a feature by March?';
+  assert(!p.isBetRequest(tweet), 'Multi-question promo tweet should NOT trigger market creation');
+});
+
+test('"Will you" with no specific @handle is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Will you hit 10K followers by March?'), '"Will you" with no subject handle should be rejected');
+  assert(!p.isBetRequest('@AgentBetsBot Will you ship something by EOY?'), '"Will you" general should be rejected');
+});
+
+test('"Will you @handle" WITH a specific non-bot handle IS a bet request', () => {
+  // "you" now has a clear referent (@alice), so this is valid
+  assert(p.isBetRequest('@AgentBetsBot Will you @alice reach 5K followers by March?'), '"Will you @handle" should be accepted');
+});
+
+test('"tag @AgentBetsBot to create a market" is NOT a bet request', () => {
+  const tweet = 'Calling all agents! Tag @AgentBetsBot to create your own prediction market 🎲';
+  assert(!p.isBetRequest(tweet), '"tag @X to ..." promotional tweet should be rejected');
+});
+
+test('"tag @AgentBetsBot to create your own prediction market" is NOT a bet request', () => {
+  // "create your own prediction market" does NOT match the exact "create market" keyword
+  const tweet = 'Will you level up in 2026? Tag @AgentBetsBot to create your own prediction market 🎲';
+  assert(!p.isBetRequest(tweet), '"tag @X to create your own prediction market" should be rejected');
+});
+
+test('Two question marks = NOT a bet request even if first is well-formed', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Will $SOL hit $200? What do you think?'), 'Two ?s should not be a bet request');
+  assert(!p.isBetRequest('@AgentBetsBot Will @alice hit 5K followers? Will @bob?'), 'Two ?s with handles should not be a single bet');
+});
+
+test('Single clear question is still accepted', () => {
+  assert(p.isBetRequest('@AgentBetsBot Will $SOL hit $200 by March?'), 'Valid single question should still work');
+  assert(p.isBetRequest('@AgentBetsBot Will @AIButters reach 50K followers by June?'), 'Valid @handle question should still work');
+});
+
+test('Mixed platform question is NOT verifiable', () => {
+  // karma (moltbook) + followers (x-api) = two platforms, can't resolve from one source
+  const params = {
+    valid: true,
+    question: 'Will you hit 1K karma and 5K followers by March?',
+    resolution: 'moltbook',
+    threshold: null
+  };
+  const v = p.validateVerifiability(params);
+  assert(!v.verifiable, 'Mixed platform question should not be verifiable');
+  assert(v.warnings.some(w => w.includes('platforms')), `Should warn about platforms: ${v.warnings.join(', ')}`);
+});
+
+test('Mixed karma+shipping question is NOT verifiable', () => {
+  const params = {
+    valid: true,
+    question: 'Will you hit 1K karma and ship a feature by March?',
+    resolution: 'moltbook',
+    threshold: null
+  };
+  const v = p.validateVerifiability(params);
+  assert(!v.verifiable, 'Karma + ship mixed question should not be verifiable');
+});
+
+test('Single-platform question passes mixed-platform check', () => {
+  const params = p.parseBet('bet: "Will @AIButters reach 50K followers?" resolution: x-api threshold: 50000');
+  const v = p.validateVerifiability(params);
+  // Should not fail on mixed-platform (only one platform signal)
+  const mixedPlatformWarn = v.warnings.some(w => w.includes('platforms'));
+  assert(!mixedPlatformWarn, `Single-platform should not trigger mixed-platform warning: ${v.warnings.join(', ')}`);
+});
+
+// ═══════════════════════════════════════════════════
+// 12. PROMOTIONAL / HYPE TWEET FILTERING
+// ═══════════════════════════════════════════════════
+console.log('\n=== Promotional / Hype Tweet Filtering ===\n');
+
+test('"Who is ready to win big?" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Who is ready to win big?'), 'Hype question should be rejected');
+});
+
+test('"Are you ready for the next big thing?" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Are you ready for the next big thing?'), '"ready for" hype should be rejected');
+});
+
+test('"Will AI take over? Find out on our platform!" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Will AI agents take over? Find out on our platform!'), '"Find out" promo should be rejected');
+});
+
+test('"Can you guess what it is?" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot New feature drop! Can you guess what it is?'), '"Can you guess" tease should be rejected');
+});
+
+test('"Guess what just launched?" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Guess what just launched?'), '"Guess what" should be rejected');
+});
+
+test('"Announcing: Will X happen?" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Excited to be announcing: Will we hit 10K users?'), '"announcing" promo should be rejected');
+});
+
+test('"Join us to find out!" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Will we moon? Join us to find out!'), '"Join us" promo should be rejected');
+});
+
+test('"Check it out!" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Amazing new feature, check it out!'), '"check it out" should be rejected');
+});
+
+test('"Try it now!" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Create your own markets, try it now!'), '"try it now" should be rejected');
+});
+
+test('"Stay tuned!" is NOT a bet request', () => {
+  assert(!p.isBetRequest('@AgentBetsBot Will we ship v2? Stay tuned for updates!'), '"stay tuned" promo should be rejected');
+});
+
+test('Valid market question still works after promo filters', () => {
+  assert(p.isBetRequest('@AgentBetsBot Will $SOL hit $200 by March?'), 'Valid token question should still work');
+  assert(p.isBetRequest('@AgentBetsBot Will @AIButters reach 50K followers by June?'), 'Valid handle question should still work');
 });
 
 // ═══════════════════════════════════════════════════
