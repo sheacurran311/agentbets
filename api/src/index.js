@@ -221,9 +221,9 @@ app.use(helmet({
 }));
 
 // CORS configuration - restrict origins in production
-const corsOrigins = process.env.CORS_ORIGINS 
-  ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
-  : '*';
+const corsOrigins = !process.env.CORS_ORIGINS || process.env.CORS_ORIGINS.trim() === '*'
+  ? '*'
+  : process.env.CORS_ORIGINS.split(',').map(o => o.trim());
 
 app.use(cors({
   origin: corsOrigins,
