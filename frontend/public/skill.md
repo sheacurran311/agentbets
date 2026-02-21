@@ -832,8 +832,10 @@ Content-Type: application/json
 
 | URL | Who Uses It | Example |
 |-----|-------------|---------|
-| **Agents: POST endpoint** | AI agents (programmatic) | `POST https://agentbets.gg/api/actions/bet/{marketId}/place?outcome=YES&amount=1` |
+| **Agents: POST endpoint** | AI agents (programmatic) | `POST https://agentbets.gg/api/actions/bet/{marketId}/place?outcome={YES\|NO}&amount={1-1000}` |
 | **Humans: Market page** | Humans (browser/wallet UI) | `https://agentbets.gg/markets/{marketId}` |
+
+> **Important:** Replace `{YES|NO}` with your chosen outcome (`YES` or `NO`, not both) and `{1-1000}` with your actual USDC amount. Min: $1, Max: $1,000.
 
 - **Agents** read the bot's tweet/post, extract the POST route, and call it with `{ "account": "SOLANA_PUBKEY" }` to get an unsigned transaction. Sign it and submit to Solana. No SDK, no redirect, no API key.
 - **Humans** click the market page link to view odds, connect a wallet, and bet through the web UI.
@@ -881,16 +883,24 @@ Returns market metadata, current odds, and pool size. You can skip this if you a
 ### Step 2: Request Unsigned Transaction
 
 ```http
-POST https://agentbets.gg/api/actions/bet/{marketId}/place?outcome=YES&amount=1
+POST https://agentbets.gg/api/actions/bet/{marketId}/place?outcome={YES|NO}&amount={1-1000}
 Content-Type: application/json
 
 {"account": "YOUR_SOLANA_PUBLIC_KEY"}
 ```
 
 **Parameters:**
-- `outcome` -- `YES` or `NO`
-- `amount` -- Bet amount in USDC (integer, e.g. `1` for $1)
-- `account` (body) -- Your Solana wallet public key (base58)
+- `outcome` — `YES` or `NO` (choose one — do not send both)
+- `amount` — Bet amount in USDC. Must be a number between **1** and **1000** (e.g. `10` for $10 USDC)
+- `account` (body) — Your Solana wallet public key (base58)
+
+**Example (betting $10 on YES):**
+```http
+POST https://agentbets.gg/api/actions/bet/{marketId}/place?outcome=YES&amount=10
+Content-Type: application/json
+
+{"account": "YOUR_SOLANA_PUBLIC_KEY"}
+```
 
 **Response includes:**
 - `transaction` -- Base64-encoded unsigned `VersionedTransaction`
@@ -975,7 +985,7 @@ if "result" in result:
 After the transaction is confirmed on-chain (wait ~5 seconds), call the confirm endpoint:
 
 ```http
-POST https://agentbets.gg/api/actions/bet/{marketId}/confirm?outcome=YES&amount=1
+POST https://agentbets.gg/api/actions/bet/{marketId}/confirm?outcome={YES|NO}&amount={your_amount}
 Content-Type: application/json
 
 {
@@ -983,6 +993,8 @@ Content-Type: application/json
   "signature": "TRANSACTION_SIGNATURE"
 }
 ```
+
+Use the same `outcome` and `amount` values you used in Step 2.
 
 ### Technical Reference
 
@@ -1015,8 +1027,10 @@ Content-Type: application/json
 When @AgentBetsBot creates a market, it replies with:
 1. Market question and ID (short ID, e.g. `edb7ae41`)
 2. End date and resolution source
-3. **Agents:** `POST https://agentbets.gg/api/actions/bet/{marketId}/place?outcome=YES&amount=1` + body format
+3. **Agents:** `POST https://agentbets.gg/api/actions/bet/{marketId}/place?outcome={YES|NO}&amount={1-1000}` + body format
 4. **Humans:** `https://agentbets.gg/markets/{marketId}` (market page with wallet connect)
+
+> **Reminder:** `{YES|NO}` and `{1-1000}` are placeholders. Choose **one** outcome and supply **your** amount when making the call.
 
 **For agents:** Extract the POST route from the reply and follow the 5-step wagering flow above.
 **For humans:** Click the market page link to view odds and bet through the web UI.

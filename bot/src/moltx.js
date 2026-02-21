@@ -9,10 +9,14 @@
  *
  * MoltX is an agent-only social platform (X for AI agents).
  * Requires MOLTX_API_KEY environment variable.
+ * Requires MOLTX_EVM_PRIVATE_KEY for wallet linking (one-time setup, mandatory for posting).
  *
  * API Docs: https://moltx.io/skill.md
+ * EVM Docs: https://moltx.io/evm_eip712.md
  * Base URL: https://moltx.io/v1
  */
+
+const { Wallet } = require('ethers');
 
 class MoltxService {
   constructor() {
@@ -331,6 +335,78 @@ class MoltxService {
     return result;
   }
 
+  /**
+   * Link an EVM wallet to this agent (required for posting).
+   * This is a one-time off-chain EIP-712 signing flow — no transaction, no gas.
+   *
+   * Steps:
+   *   1. Request a signing challenge from MoltX with your wallet address
+   *   2. Sign the returned typed_data locally with your private key (EIP-712)
+   *   3. Submit the signature to MoltX to verify ownership
+   *
+   * @param {string} [privateKey] - 0x-prefixed EVM private key.
+   *   Defaults to MOLTX_EVM_PRIVATE_KEY env var.
+   * @param {number} [chainId=8453] - EVM chain ID (default: Base)
+   */
+  async linkWallet(privateKey, chainId = 8453) {
+    if (!this.enabled) return { success: false, error: 'MoltX not configured' };
+
+    const pk = privateKey || process.env.MOLTX_EVM_PRIVATE_KEY;
+    if (!pk) {
+      return { success: false, error: 'No EVM private key provided. Set MOLTX_EVM_PRIVATE_KEY or pass a key directly.' };
+    }
+
+    let wallet;
+    try {
+      wallet = new Wallet(pk);
+    } catch (err) {
+      return { success: false, error: `Invalid private key: ${err.message}` };
+    }
+
+    const address = wallet.address;
+    console.log(`[MoltX] Linking EVM wallet ${address} (chain ${chainId})...`);
+
+    // Step 1: Request challenge
+    const challengeResult = await this.request('POST', '/agents/me/evm/challenge', {
+      address,
+      chain_id: chainId
+    });
+
+    if (!challengeResult.success) {
+      console.error(`[MoltX] Wallet challenge failed: ${challengeResult.error}`);
+      return challengeResult;
+    }
+
+    const { nonce, typed_data } = challengeResult.data;
+
+    // Step 2: Sign the EIP-712 typed data locally (no transaction — off-chain only)
+    let signature;
+    try {
+      const { EIP712Domain, ...types } = typed_data.types;
+      signature = await wallet.signTypedData(typed_data.domain, types, typed_data.message);
+    } catch (err) {
+      console.error(`[MoltX] EIP-712 signing failed: ${err.message}`);
+      return { success: false, error: `Signing failed: ${err.message}` };
+    }
+
+    // Step 3: Submit signature to MoltX
+    const verifyResult = await this.request('POST', '/agents/me/evm/verify', { nonce, signature });
+
+    if (verifyResult.success) {
+      const linked = verifyResult.data?.evm_wallet;
+      console.log(`[MoltX] Wallet linked successfully: ${linked?.address || address} on chain ${linked?.chain_id || chainId}`);
+    } else {
+      // "already linked to this agent" is not an error — idempotent
+      if (verifyResult.error?.includes('already linked')) {
+        console.log(`[MoltX] Wallet ${address} already linked to this agent`);
+        return { success: true, alreadyLinked: true };
+      }
+      console.error(`[MoltX] Wallet verification failed: ${verifyResult.error}`);
+    }
+
+    return verifyResult;
+  }
+
   // ==========================================
   // FEEDS & MONITORING
   // ==========================================
@@ -414,8 +490,9 @@ class MoltxService {
       market.threshold ? `**Threshold:** ${market.threshold}` : '',
       '',
       `**Place a wager (agents):**`,
-      `POST ${baseUrl}/api/actions/bet/${market.id}/place?outcome=YES&amount=1`,
+      `POST ${baseUrl}/api/actions/bet/${market.id}/place?outcome={YES|NO}&amount={1-1000}`,
       `Body: { "account": "YOUR_SOLANA_PUBKEY" }`,
+      `Replace {YES|NO} with your chosen outcome and {1-1000} with your USDC amount (min $1, max $1000).`,
       '',
       `View market: ${marketUrl}`,
       '',
@@ -459,8 +536,9 @@ class MoltxService {
         market.market?.resolutionSource ? `**Resolution:** ${market.market.resolutionSource}` : '',
         '',
         `**Place a wager (agents):**`,
-        `POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=YES&amount=1`,
+        `POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome={YES|NO}&amount={1-1000}`,
         `Body: { "account": "YOUR_SOLANA_PUBKEY" }`,
+        `Replace {YES|NO} with your chosen outcome and {1-1000} with your USDC amount (min $1, max $1000).`,
         '',
         `View market: ${marketUrl}`,
         '',

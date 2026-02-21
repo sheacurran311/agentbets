@@ -666,7 +666,8 @@ async function notifyMentionedAgents(marketId, question, creatorHandle, marketUr
         `@${handle} A prediction market was just created about you!\n\n` +
         `"${question.slice(0, 100)}${question.length > 100 ? '...' : ''}"\n\n` +
         `Created by @${creatorHandle}\n\n` +
-        `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=YES&amount=1\n` +
+        `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome={YES|NO}&amount={1-1000}\n` +
+        `Body: { "account": "YOUR_PUBKEY" }\n` +
         `View: ${marketUrl}`
       );
 
@@ -716,7 +717,8 @@ async function sendMarketReminders() {
         `"${data.question.slice(0, 80)}${data.question.length > 80 ? '...' : ''}"\n\n` +
         `Current odds: YES ${yesOdds} / NO ${noOdds}\n` +
         `Ends: ${endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' })}\n\n` +
-        `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=YES&amount=1\n` +
+        `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome={YES|NO}&amount={1-1000}\n` +
+        `Body: { "account": "YOUR_PUBKEY" }\n` +
         `View: ${baseUrl}/markets/${marketId}`
       );
 
@@ -1628,7 +1630,7 @@ async function createMarketFromParams(tweetId, authorHandle, betParams) {
       replyMessage += `Place a wager:\n\n`;
     }
     // Blinks API endpoint (for agents - programmatic)
-    replyMessage += `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
+    replyMessage += `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome={YES|NO}&amount={1-1000}\n` +
       `Body: { "account": "YOUR_SOLANA_PUBKEY" }\n\n`;
 
     // Human link (clickable, unfurls with OG preview)
@@ -2471,7 +2473,8 @@ async function createMarketFromMoltbook(request, betParams) {
         await twitter.tweet(
           `New bet from Moltbook agent ${request.author}!\n\n` +
           `"${betParams.question.slice(0, 80)}"\n\n` +
-          `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
+          `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome={YES|NO}&amount={1-1000}\n` +
+          `Body: { "account": "YOUR_PUBKEY" }\n` +
           `Humans: ${baseUrl}/markets/${market.market.id}`
         );
       }
@@ -2754,7 +2757,8 @@ async function createMarketFromMoltx(request, betParams) {
         await twitter.tweet(
           `New bet from MoltX agent ${request.author}!\n\n` +
           `"${betParams.question.slice(0, 80)}"\n\n` +
-          `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome=YES&amount=1\n` +
+          `Agents: POST ${baseUrl}/api/actions/bet/${market.market.id}/place?outcome={YES|NO}&amount={1-1000}\n` +
+          `Body: { "account": "YOUR_PUBKEY" }\n` +
           `Humans: ${baseUrl}/markets/${market.market.id}`
         );
       }
@@ -3135,7 +3139,8 @@ app.post('/webhook/bet-placed', async (req, res) => {
     await twitter.tweet(
       `New bet! ${bettorTag} wagered ${amount} ${currency || 'USDC'} on ${outcome}${creatorTag}\n\n` +
       `${questionSnippet}\n\n` +
-      `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome=YES&amount=1\n` +
+      `Agents: POST ${baseUrl}/api/actions/bet/${marketId}/place?outcome={YES|NO}&amount={1-1000}\n` +
+      `Body: { "account": "YOUR_PUBKEY" }\n` +
       `Humans: ${baseUrl}/markets/${marketId}`
     );
 
@@ -3244,6 +3249,19 @@ async function startBot() {
             const me = await moltx.getMe();
             if (me.success) {
               console.log(`[MoltX] Authenticated as @${moltx.botName}`);
+            }
+
+            // Link EVM wallet if key is configured (required for posting).
+            // This is idempotent — safe to call every startup. Off-chain signing only, no tx.
+            if (process.env.MOLTX_EVM_PRIVATE_KEY) {
+              const walletResult = await moltx.linkWallet();
+              if (!walletResult.success && !walletResult.alreadyLinked) {
+                console.warn('[MoltX] Wallet link failed — posting may be blocked until resolved');
+                console.warn('[MoltX] Run: node scripts/claim-moltx.js --wallet  to retry');
+              }
+            } else {
+              console.warn('[MoltX] MOLTX_EVM_PRIVATE_KEY not set — wallet not linked, posting will fail');
+              console.warn('[MoltX] Run: node scripts/claim-moltx.js --wallet  after setting the key');
             }
 
             // Poll MoltX for bet requests every 3 minutes
