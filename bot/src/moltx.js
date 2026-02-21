@@ -543,16 +543,20 @@ class MoltxService {
       if (mentions.success) {
         // request() spreads the API JSON, so posts are at mentions.posts (not mentions.data)
         const posts = mentions.posts || mentions.data?.posts || (Array.isArray(mentions.data) ? mentions.data : []);
+        // Bot names to skip (handles variations across platforms)
+        const botNames = new Set([this.botName?.toLowerCase(), 'agentbetsbot', 'agentbets', 'agentbb']);
+        
         for (const post of posts) {
           // Skip our own posts
-          if (post.author?.name === this.botName || post.author === this.botName) continue;
+          const authorName = post.author?.name || post.author;
+          if (botNames.has(authorName?.toLowerCase())) continue;
 
           const text = post.content || '';
           if (this.looksLikeBetRequest(text)) {
             betRequests.push({
               type: 'mention',
               id: post.id,
-              author: post.author?.name || post.author,
+              author: authorName,
               text,
               createdAt: post.created_at || post.createdAt,
               platform: 'moltx'
@@ -566,9 +570,16 @@ class MoltxService {
       if (searchResult.success) {
         // request() spreads the API JSON, so results are at searchResult.posts/results (not searchResult.data)
         const results = searchResult.posts || searchResult.results || searchResult.data?.posts || (Array.isArray(searchResult.data) ? searchResult.data : []);
+        
+        // Bot names to skip (handles variations across platforms)
+        const botNames = new Set([this.botName?.toLowerCase(), 'agentbetsbot', 'agentbets', 'agentbb']);
+        
         for (const item of results) {
+          // Skip agent profiles (we only want posts, not bios)
+          if (item.type === 'agent') continue;
+          
           const authorName = item.author?.name || item.author;
-          if (authorName === this.botName) continue;
+          if (botNames.has(authorName?.toLowerCase())) continue;
 
           const text = item.content || '';
           if (this.looksLikeBetRequest(text)) {
@@ -592,9 +603,13 @@ class MoltxService {
       if (hashtagFeed.success) {
         // request() spreads the API JSON, so posts are at hashtagFeed.posts (not hashtagFeed.data)
         const posts = hashtagFeed.posts || hashtagFeed.data?.posts || (Array.isArray(hashtagFeed.data) ? hashtagFeed.data : []);
+        
+        // Bot names to skip (handles variations across platforms)
+        const botNames = new Set([this.botName?.toLowerCase(), 'agentbetsbot', 'agentbets', 'agentbb']);
+        
         for (const post of posts) {
           const authorName = post.author?.name || post.author;
-          if (authorName === this.botName) continue;
+          if (botNames.has(authorName?.toLowerCase())) continue;
 
           const text = post.content || '';
           if (this.looksLikeBetRequest(text)) {

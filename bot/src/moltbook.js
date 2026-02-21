@@ -606,8 +606,9 @@ class MoltbookService {
           // Extract author name (API returns author as object {id, name, karma})
           const authorName = typeof post.author === 'object' ? post.author?.name : post.author;
           
-          // Skip our own posts
-          if (authorName === this.botName) continue;
+          // Skip our own posts (check both Moltbook name and common variations)
+          const botNames = new Set([this.botName?.toLowerCase(), 'agentbetsbot', 'agentbets', 'agentbb']);
+          if (botNames.has(authorName?.toLowerCase())) continue;
 
           const text = `${post.title || ''} ${post.content || ''}`;
           if (this.looksLikeBetRequest(text)) {
@@ -633,10 +634,16 @@ class MoltbookService {
         const results = searchResult.results || searchResult.data?.results || (Array.isArray(searchResult.data) ? searchResult.data : []);
         console.log(`[Moltbook] Search returned ${results.length} results (keys: ${Object.keys(searchResult).filter(k => k !== 'success').join(', ')})`);
         for (const item of results) {
+          // Skip agent profiles — we only want posts and comments, not bios
+          // Search type 'all' returns agents whose bios match, but those aren't bet requests
+          if (item.type === 'agent') continue;
+
           // Extract author name (API may return author as object {id, name, karma})
           const authorName = typeof item.author === 'object' ? item.author?.name : item.author;
           
-          if (authorName === this.botName) continue;
+          // Skip our own posts (check both Moltbook name and common variations)
+          const botNames = new Set([this.botName?.toLowerCase(), 'agentbetsbot', 'agentbets', 'agentbb']);
+          if (botNames.has(authorName?.toLowerCase())) continue;
 
           const text = item.content || item.title || '';
           if (this.looksLikeBetRequest(text)) {
