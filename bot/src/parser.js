@@ -64,22 +64,9 @@ class BetParser {
     // Strip @mentions to get the actual content for analysis
     const textWithoutMentions = text.replace(/@\w+/g, '').trim();
 
-    // Check for explicit bet keywords FIRST -- these are high-signal, unambiguous phrases
-    // like "create market", "new market", "create bet", etc. They should always be recognized
-    // even when the tweet contains URLs (Twitter auto-converts domains like agentbets.gg
-    // into https://t.co/... links, which would otherwise trigger the URL rejection below).
-    // Use word-boundary check so "create market" doesn't match "create markets" (plural).
-    if (this.betKeywords.some(keyword => {
-      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return new RegExp(escaped + '(?!\\w)', 'i').test(lowerText);
-    })) {
-      return true;
-    }
-
     // Reject tweets containing URLs -- real bet requests don't include links.
     // This prevents the bot from responding to promotional tweets, announcements,
     // or spam that happen to tag the bot and contain question-like phrasing.
-    // (Explicit bet keywords above bypass this check intentionally.)
     if (/https?:\/\/\S+/i.test(textWithoutMentions)) {
       return false;
     }
@@ -117,16 +104,20 @@ class BetParser {
       }
     }
 
-    // Reject common conversational phrases that aren't bet requests
+    // Reject common conversational and informational phrases that aren't bet requests
     const conversationalPatterns = [
       /what do you think/i,
-      /what is (this|that|your|the)/i,
-      /what are you/i,
+      /what is\b/i,                                                   // "What is AgentBets?" / "what is this?"
+      /what are (you|these|those|the)\b/i,
       /what happened/i,
+      /what does\b/i,                                                 // "What does this bot do?"
       /is (this|that|it) (working|live|real|correct|right|good|ok)/i,
       /are you (online|working|live|real|there|ok|a bot)/i,
       /can you (help|explain|tell|show|do)/i,
       /how are you/i,
+      /how (do|does|can|did|would|should)\s+(i|you|we|this|it)\b/i,  // "How do I create a market?"
+      /how (do|does)\s+(this|it)\s+work/i,                           // "How does this work?"
+      /\bexplain\b/i,                                                 // "Explain how to..."
       /who are you/i,
       /who (made|built|created) (you|this)/i,
       /does (this|that|it) (work|exist)/i,
@@ -154,6 +145,31 @@ class BetParser {
     ];
     if (promotionalPatterns.some(pattern => pattern.test(textWithoutMentions))) {
       return false;
+    }
+
+    // Instructional context patterns: these use market-creation vocabulary to EXPLAIN
+    // the feature to others, not to invoke it. Must run AFTER conversational/promotional
+    // checks so that all rejection filters have fired before we hit the betKeywords positive check.
+    const instructionalPatterns = [
+      /\bhow\s+to\s+(create|make|start|open|set\s*up)\b/i,       // "how to create a market"
+      /\blearn\s+(how\s+to|to)\s+(create|make|start)\b/i,        // "learn how to create"
+      /\byou\s+can\s+(create|make|start|open)\b/i,               // "you can create a market"
+      /\bto\s+(create|make|start|open)\s+a\s+(market|bet)\b/i,   // "to create a market" (explanation)
+      /\b(here'?s?|this\s+is)\s+how\b/i,                         // "here's how" / "this is how"
+      /\bexample\s+(market|bet|of\s+(a\s+)?(market|bet))\b/i,    // "example market"
+    ];
+    if (instructionalPatterns.some(p => p.test(textWithoutMentions))) {
+      return false;
+    }
+
+    // Check for explicit bet keywords -- high-signal phrases like "create market", "new market",
+    // "create bet", etc. All rejection filters above have already run, so a keyword match here
+    // genuinely indicates the author is trying to create a market.
+    if (this.betKeywords.some(keyword => {
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(escaped + '(?!\\w)', 'i').test(lowerText);
+    })) {
+      return true;
     }
 
     // Check for natural language question patterns (with question mark)

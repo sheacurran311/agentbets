@@ -22,6 +22,7 @@ const AgentVerifier = require('./verifier');
 const ResolutionEngine = require('./resolver');
 const AgentBetsAPI = require('./api-client');
 const PhishingDetector = require('./phishing');
+const IntentClassifier = require('./classifier');
 
 // Database (works both in monorepo and standalone on Railway)
 let db = null;
@@ -470,6 +471,7 @@ const verifier = new AgentVerifier();
 const resolver = new ResolutionEngine();
 const agentbets = new AgentBetsAPI();
 const phishingDetector = new PhishingDetector();
+const classifier = new IntentClassifier();
 
 // Storage - will be initialized async on startup
 let processedTweets = new Set();
@@ -1270,6 +1272,18 @@ async function processMention(tweet) {
     if (!isCommand && !isBetRequest) {
       console.log(`[Bot] Not a command or bet request from @${authorHandle}, ignoring`);
       return;
+    }
+
+    // LLM GATE: For bet requests (not commands), ask OpenAI to confirm genuine intent.
+    // Rule-based patterns can be fooled by instructional or promotional tweets that happen
+    // to contain bet vocabulary. The classifier costs ~$0.00005 per tweet — trivial compared
+    // to the $4 SOL rent lost every time a false-positive market is created on-chain.
+    if (isBetRequest && !isCommand) {
+      const classification = await classifier.classify(text);
+      if (!classification.skipped && !classification.isMarketRequest) {
+        console.log(`[Bot] LLM classified as non-market from @${authorHandle}: ${classification.reason} — ignoring`);
+        return;
+      }
     }
 
     // SECURITY: Now scan for phishing (only on actionable requests — commands or bets)
