@@ -55,6 +55,7 @@ class IntentClassifier {
       this.client = null;
     } else {
       this.client = new OpenAI({ apiKey });
+      console.log('[Classifier] OpenAI gpt-4o-mini intent classifier enabled');
     }
   }
 
